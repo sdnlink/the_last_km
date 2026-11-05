@@ -1,0 +1,17 @@
+[project]
+name = "auto-moniter"
+version = "0.2.0"
+description = "Supervise coding agents until an independent review accepts the work."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+auto-moniter = "auto_moniter.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["auto_moniter*"]

@@ -18,6 +18,7 @@ const state = {
   lastSample: 0,
   liveTask: null,
   directionTask: null,
+  directionPending: new Set(),
   discovery: null,
   boardSearch: "",
   feedKind: "all",
@@ -256,7 +257,7 @@ function renderBoard() {
           ["heartbeat_stale", "monitor_exited", "unknown"].includes(
             task.health.health,
           );
-        return `<article class="task-board-card ${state.liveTask === task.id ? "selected" : ""}" data-board-id="${task.id}"><div class="board-card-head"><button class="board-title" data-select-task="${task.id}" title="${escape(task.title)}">${escape(task.title)}</button>${badge(task)}</div><div class="board-project">${escape(task.cwd)}</div><p class="board-focus">${escape(a.focus || a.operation?.text || task.summary || "等待启动或新的执行输出")}</p><div class="board-result"><strong>最近结果</strong><span>${escape(output?.output || output?.text || "暂无本轮工具结果")}</span></div><div class="board-meta"><span>${escape(phases[task.health.phase] || statuses[task.status])} · 第 ${a.round || 0} 轮</span><span>${a.last_output_at ? `输出 ${duration(a.output_age_s)} 前` : "等待输出"}</span></div>${pending ? `<p class="board-pending">${pending} 条补充要求等待发送或本轮响应</p>` : ""}${stale ? '<p class="board-warning">心跳异常，请查看任务详情</p>' : ""}<div class="board-actions">${taskButtons(task, true)}<button class="detail-button" data-select-task="${task.id}">查看交互</button>${task.can_direct ? `<button class="detail-button" data-direction="${task.id}">调整方向</button>` : ""}</div></article>`;
+        return `<article class="task-board-card ${state.liveTask === task.id ? "selected" : ""}" data-board-id="${task.id}"><div class="board-card-head"><button class="board-title" data-select-task="${task.id}" title="${escape(task.title)}">${escape(task.title)}</button>${badge(task)}</div><div class="board-project">${escape(task.cwd)}</div><p class="board-focus">${escape(a.focus || a.operation?.text || task.summary || "等待启动或新的执行输出")}</p><div class="board-result"><strong>最近结果</strong><span>${escape(output?.output || output?.text || "暂无本轮工具结果")}</span></div><div class="board-meta"><span>${escape(phases[task.health.phase] || statuses[task.status])} · 第 ${a.round || 0} 轮</span><span>${a.last_output_at ? `输出 ${duration(a.output_age_s)} 前` : "等待输出"}</span></div>${pending ? `<p class="board-pending">${pending} 条补充要求等待发送或本轮响应</p>` : ""}${stale ? '<p class="board-warning">心跳异常，请查看任务详情</p>' : ""}${task.direction_error ? `<p class="board-warning">${escape(task.direction_error)}；任务仍可暂停或停止。</p>` : ""}<div class="board-actions">${taskButtons(task, true)}<button class="detail-button" data-select-task="${task.id}">查看交互</button>${task.can_direct ? `<button class="detail-button" data-direction="${task.id}">调整方向</button>` : ""}</div></article>`;
       })
       .join("") ||
     '<p class="live-empty">没有匹配任务。新建任务后会在这里显示。</p>';
@@ -368,7 +369,7 @@ function activityHTML(task, detail = false) {
   const openIssues = (task.audit_issues?.items || []).filter(
     (i) => i.status !== "closed",
   );
-  return `<div class="live-summary"><div class="live-status-row">${badge(task)}<strong>${escape(role)} · 第 ${activity.round || 0} 轮</strong><span>${escape(phase)}</span><span class="live-age">${escape(latest)}</span></div><div class="live-focus"><span class="live-label">${activity.is_running ? "当前工作" : "最近工作"}</span><p>${escape(focus)}</p></div>${activity.operation && activity.focus ? `<div class="live-operation"><span>${escape(labels[activity.operation.kind] || "当前操作")}</span><code>${escape(activity.operation.text)}</code></div>` : ""}<div class="live-controls">${taskButtons(task)}${task.control_message ? `<p class="control-hint" role="status">${escape(task.control_message)}</p>` : ""}${task.resume_unavailable ? `<p class="control-hint">${escape(task.resume_unavailable)}</p>` : ""}</div><div class="live-facts"><span>模块验收 <strong>${task.accepted_modules} / ${task.total_modules}</strong></span><span>待解决审查问题 <strong>${openIssues.length}</strong></span><span>模型调用 <strong>${task.health.usage?.agent_calls || 0}</strong></span><span>心跳 <strong>${task.health.heartbeat_age_s == null ? "—" : `${duration(task.health.heartbeat_age_s)} 前`}</strong></span></div>${plan.length ? `<ol class="live-plan">${plan.map((p) => `<li class="${p.status === "completed" ? "completed" : p.status === "in_progress" ? "in-progress" : "pending"}"><span>${p.status === "completed" ? "✓" : p.status === "in_progress" ? "●" : "○"}</span>${escape(p.step)}</li>`).join("")}</ol>` : ""}${task.last_review?.summary ? `<div class="live-review"><strong>最近审查反馈</strong><p>${escape(task.last_review.summary)}</p></div>` : ""}</div><div class="live-timeline-wrap"><div class="live-timeline-heading"><h3>最近活动</h3><span>${activity.source === "codex_session" ? (activity.is_running ? "已连接当前 AI 会话" : "已读取最近 AI 会话") : activity.source === "live" ? "执行输出实时更新" : "监督事件更新中"}</span></div>${timeline.length ? `<ol class="live-timeline">${timeline.map((e) => `<li class="event-${escape(e.kind)}"><div class="live-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${escape(labels[e.kind] || "活动")}</span>${e.round ? `<small>第 ${escape(e.round)} 轮${e.role === "reviewer" ? " · 审查" : ""}</small>` : ""}</div><details class="live-event" ${e.kind === "message" || e.kind === "phase" ? "open" : ""}><summary>${escape(e.text.split("\n")[0].slice(0, 180))}</summary><pre>${escape(e.text)}${e.output ? `\n\n${escape(e.output)}` : ""}</pre></details></li>`).join("")}</ol>` : `<div class="live-empty">${task.status === "queued" ? "启动任务后，这里将持续显示执行器的进度说明和工具操作。" : "本轮尚未发布可显示的输出；有新消息或工具结果时会自动更新。"}</div>`}</div>`;
+  return `<div class="live-summary"><div class="live-status-row">${badge(task)}<strong>${escape(role)} · 第 ${activity.round || 0} 轮</strong><span>${escape(phase)}</span><span class="live-age">${escape(latest)}</span></div><div class="live-focus"><span class="live-label">${activity.is_running ? "当前工作" : "最近工作"}</span><p>${escape(focus)}</p></div>${activity.operation && activity.focus ? `<div class="live-operation"><span>${escape(labels[activity.operation.kind] || "当前操作")}</span><code>${escape(activity.operation.text)}</code></div>` : ""}<div class="live-controls">${taskButtons(task)}${task.control_message ? `<p class="control-hint" role="status">${escape(task.control_message)}</p>` : ""}${task.resume_unavailable ? `<p class="control-hint">${escape(task.resume_unavailable)}</p>` : ""}${task.direction_error ? `<p class="control-hint" role="alert">${escape(task.direction_error)}</p>` : ""}</div><div class="live-facts"><span>模块验收 <strong>${task.accepted_modules} / ${task.total_modules}</strong></span><span>待解决审查问题 <strong>${openIssues.length}</strong></span><span>模型调用 <strong>${task.health.usage?.agent_calls || 0}</strong></span><span>心跳 <strong>${task.health.heartbeat_age_s == null ? "—" : `${duration(task.health.heartbeat_age_s)} 前`}</strong></span></div>${plan.length ? `<ol class="live-plan">${plan.map((p) => `<li class="${p.status === "completed" ? "completed" : p.status === "in_progress" ? "in-progress" : "pending"}"><span>${p.status === "completed" ? "✓" : p.status === "in_progress" ? "●" : "○"}</span>${escape(p.step)}</li>`).join("")}</ol>` : ""}${task.last_review?.summary ? `<div class="live-review"><strong>最近审查反馈</strong><p>${escape(task.last_review.summary)}</p></div>` : ""}</div><div class="live-timeline-wrap"><div class="live-timeline-heading"><h3>最近活动</h3><span>${activity.source === "codex_session" ? (activity.is_running ? "已连接当前 AI 会话" : "已读取最近 AI 会话") : activity.source === "live" ? "执行输出实时更新" : "监督事件更新中"}</span></div>${timeline.length ? `<ol class="live-timeline">${timeline.map((e) => `<li class="event-${escape(e.kind)}"><div class="live-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${escape(labels[e.kind] || "活动")}</span>${e.round ? `<small>第 ${escape(e.round)} 轮${e.role === "reviewer" ? " · 审查" : ""}</small>` : ""}</div><details class="live-event" ${e.kind === "message" || e.kind === "phase" ? "open" : ""}><summary>${escape(e.text.split("\n")[0].slice(0, 180))}</summary><pre>${escape(e.text)}${e.output ? `\n\n${escape(e.output)}` : ""}</pre></details></li>`).join("")}</ol>` : `<div class="live-empty">${task.status === "queued" ? "启动任务后，这里将持续显示执行器的进度说明和工具操作。" : "本轮尚未发布可显示的输出；有新消息或工具结果时会自动更新。"}</div>`}</div>`;
 }
 function updateActivity(container, task, detail = false) {
   const opened = [...container.querySelectorAll(".live-event[open]")].map(
@@ -646,6 +647,7 @@ function renderDetail(t) {
   if (t.health.health === "heartbeat_stale")
     alerts.push("监督器仍持有运行锁，但心跳已超时，请查看执行日志。");
   if (t.resume_unavailable) alerts.push(t.resume_unavailable);
+  if (t.direction_error) alerts.push(t.direction_error);
   if (t.launch_error) alerts.push(`上次启动失败：${t.launch_error}`);
   if (t.control_message && t.status === "starting")
     alerts.push(t.control_message);
@@ -728,7 +730,7 @@ async function loadLogs(ident) {
 }
 let stopTarget = null;
 function renderDirectionHistory(task) {
-  if (!task) return;
+  if (!task || state.directionTask !== task.id) return;
   $("#direction-task-title").textContent = task.title;
   const description =
     task.direction_delivery === "restart_required"
@@ -736,9 +738,10 @@ function renderDirectionHistory(task) {
       : task.direction_delivery === "on_start"
         ? "要求会保存到当前任务，启动或恢复后的下一轮执行时发送给 AI。"
         : "补充要求在下一轮 AI 调用时发送。当前已经开始的调用不会被中途改写，提交不等于 AI 已完成处理。";
-  $("#direction-delivery").textContent = description;
+  $("#direction-delivery").textContent = task.direction_error || description;
   $("#direction-pause-label").hidden = !task.actions.includes("pause");
-  $("#direction-submit").disabled = !task.can_direct;
+  $("#direction-submit").disabled =
+    !task.can_direct || state.directionPending.has(task.id);
   const label = (receipt) =>
     !receipt
       ? "待发送"
@@ -768,8 +771,10 @@ async function openDirection(ident) {
     const task = await api(`/api/tasks/${ident}`);
     if (state.directionTask === ident) renderDirectionHistory(task);
   } catch (e) {
-    $("#direction-error").textContent = e.message;
-    $("#direction-error").hidden = false;
+    if (state.directionTask === ident) {
+      $("#direction-error").textContent = e.message;
+      $("#direction-error").hidden = false;
+    }
   }
 }
 function selectTask(ident) {
@@ -859,35 +864,52 @@ $("#direction-text").addEventListener("input", (event) => {
       event.target.value,
     );
 });
-$("#direction-dialog").addEventListener(
-  "close",
-  () => (state.directionTask = null),
-);
+$("#direction-dialog").addEventListener("close", () => {
+  if (!$("#direction-dialog").open) state.directionTask = null;
+});
 $("#direction-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ident = state.directionTask;
+  if (!ident || state.directionPending.has(ident)) return;
+  const submittedText = $("#direction-text").value;
+  const submittedPause =
+    !$("#direction-pause-label").hidden && $("#direction-pause").checked;
+  state.directionPending.add(ident);
   $("#direction-submit").disabled = true;
   $("#direction-error").hidden = true;
   try {
     const updated = await api(`/api/tasks/${ident}/directions`, {
-      text: $("#direction-text").value,
-      pause:
-        !$("#direction-pause-label").hidden && $("#direction-pause").checked,
+      text: submittedText,
+      pause: submittedPause,
     });
     state.tasks = state.tasks.map((task) =>
       task.id === ident ? updated : task,
     );
-    localStorage.removeItem(`auto-moniter-direction-${ident}`);
-    $("#direction-text").value = "";
-    $("#direction-pause").checked = false;
+    if (
+      localStorage.getItem(`auto-moniter-direction-${ident}`) === submittedText
+    )
+      localStorage.removeItem(`auto-moniter-direction-${ident}`);
+    if (
+      state.directionTask === ident &&
+      $("#direction-text").value === submittedText
+    ) {
+      $("#direction-text").value = "";
+      $("#direction-pause").checked = false;
+    }
     render();
     renderDirectionHistory(updated);
     toast("补充要求已保存，可在下方查看 AI 接收及返回状态");
   } catch (error) {
-    $("#direction-error").textContent = error.message;
-    $("#direction-error").hidden = false;
+    if (state.directionTask === ident) {
+      $("#direction-error").textContent = error.message;
+      $("#direction-error").hidden = false;
+    } else {
+      toast(error.message, true);
+    }
   } finally {
-    $("#direction-submit").disabled = false;
+    state.directionPending.delete(ident);
+    if (state.directionTask === ident)
+      renderDirectionHistory(state.tasks.find((task) => task.id === ident));
   }
 });
 $("#new-task").addEventListener("click", openCreate);
@@ -954,6 +976,7 @@ $("#create-form").addEventListener("submit", async (event) => {
   }
 });
 $("#detail-dialog").addEventListener("close", () => {
+  if ($("#detail-dialog").open) return;
   state.detail = null;
   state.log = "";
 });

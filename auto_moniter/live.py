@@ -17,14 +17,23 @@ def now() -> str:
 
 def public_events(value: dict, at: str = '') -> list[dict]:
     """Normalize public messages and tool operations; ignore private model reasoning."""
+    try:
+        return _public_events(value, at)
+    except (AttributeError, TypeError, ValueError):
+        return []  # Invalid observation records cannot interrupt supervised work.
+
+
+def _public_events(value: dict, at: str = '') -> list[dict]:
     at = at or now()
     kind = value.get('type', '')
+    if not isinstance(kind, str):
+        return []
     if kind == 'response_item':
         item = value.get('payload') or {}
     elif kind == 'event_msg':
         payload = value.get('payload') or {}
         if payload.get('type') == 'agent_message' and isinstance(payload.get('message'), str):
-            return [{'at': at, 'kind': 'message', 'text': payload['message']}]
+            return [{'at': at, 'kind': 'message', 'text': redact(payload['message'])[:4000]}]
         return []
     else:
         item = value.get('item', value)
@@ -110,6 +119,7 @@ class LiveOutput:
         self.role, self.index = role, index
         self.decoders = [codecs.getincrementaldecoder('utf-8')(errors='replace') for _ in range(2)]
         self.pending = ['', '']
+        self.discarding = [False, False]
         if announce:
             self.emit({'kind': 'phase', 'text': f'{provider} 开始本轮执行', 'provider': provider})
 
@@ -125,12 +135,20 @@ class LiveOutput:
             pass  # Observability must not interrupt the supervised work.
 
     def feed(self, stream: int, chunk: bytes) -> None:
-        self.pending[stream] += self.decoders[stream].decode(chunk)
+        fresh = self.decoders[stream].decode(chunk)
+        if self.discarding[stream]:
+            _, separator, fresh = fresh.partition('\n')
+            if not separator:
+                return
+            self.discarding[stream] = False
+        self.pending[stream] += fresh
         while '\n' in self.pending[stream]:
             line, self.pending[stream] = self.pending[stream].split('\n', 1)
-            self.line(line, stream)
+            if len(line) <= 256 * 1024:
+                self.line(line, stream)
         if len(self.pending[stream]) > 256 * 1024:
-            self.pending[stream] = ''  # Skip oversized structured records, without displaying fragments.
+            self.pending[stream] = ''
+            self.discarding[stream] = True
 
     def line(self, line: str, stream: int) -> None:
         if not line.strip():
@@ -148,5 +166,6 @@ class LiveOutput:
     def close(self) -> None:
         for stream in range(2):
             self.pending[stream] += self.decoders[stream].decode(b'', final=True)
-            self.line(self.pending[stream], stream)
+            if not self.discarding[stream]:
+                self.line(self.pending[stream], stream)
             self.pending[stream] = ''

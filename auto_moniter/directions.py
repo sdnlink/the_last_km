@@ -72,7 +72,10 @@ class Directions:
             return
         path = self.run / 'direction-receipts.json'
         # The supervisor is the only receipt writer; request threads write a separate file.
-        value = self.read(path.name)
+        try:
+            value = self._receipts()
+        except (ValueError, OSError):
+            return  # Broken observation metadata must not cancel the agent call.
         role_receipts = value.setdefault(role, {})
         for ident in ids:
             previous = role_receipts.get(ident, {})
@@ -81,9 +84,23 @@ class Directions:
                                     'at': now()}
             if responded:
                 role_receipts[ident].update(responded_at=now(), responded_round=index)
-        write_json(path, value, durable=True)
+        try:
+            write_json(path, value, durable=True)
+        except OSError:
+            pass
+
+    def _receipts(self) -> dict:
+        receipts = self.read('direction-receipts.json')
+        for role in ('worker', 'reviewer'):
+            values = receipts.get(role, {})
+            if not isinstance(values, dict) or any(
+                    not isinstance(value, dict) or value.get('status') not in {'sent', 'responded'}
+                    or type(value.get('round')) is not int or value['round'] < 1
+                    or not isinstance(value.get('at'), str) for value in values.values()):
+                raise ValueError('补充要求回执格式无效，请修复 direction-receipts.json 后继续发送')
+        return receipts
 
     def snapshot(self) -> list[dict]:
-        receipts = self.read('direction-receipts.json')
+        receipts = self._receipts()
         return [{**item, 'worker': (receipts.get('worker') or {}).get(item['id']),
                  'reviewer': (receipts.get('reviewer') or {}).get(item['id'])} for item in self.messages()]

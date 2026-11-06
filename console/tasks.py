@@ -103,14 +103,14 @@ class TaskStore:
                     depth = len(path.relative_to(root).parts)
                     dirs[:] = [name for name in dirs if not name.startswith('.') and name not in
                                {'node_modules', 'site-packages', 'validation-env', 'venv', '__pycache__'}]
-                    if depth >= 5 or visited > 2000:
-                        dirs[:] = []
                     if visited > 2000:
                         warnings.append(f'目录 {root} 已达到扫描上限，请将 --runs-dir 指向更接近任务的位置')
                         break
-                    if depth >= 5:
+                    if depth >= 5 and dirs:
                         warnings.append(f'目录 {root} 有更深层级，请使用 --runs-dir 指定深层任务目录')
-                    if 'state.json' not in files:
+                        dirs[:] = []
+                    artifacts = {'requirement.md', 'supervisor.lock', 'guardian.lock', 'report.json'}
+                    if 'state.json' not in files or not artifacts.intersection(files):
                         continue
                     dirs[:] = []
                     run = path.resolve()
@@ -235,7 +235,7 @@ class TaskStore:
             direction_error = ''
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
-        can_direct = status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
+        can_direct = not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
         delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
         if active and state.get('directions_version') != 1:
             delivery = 'restart_required'

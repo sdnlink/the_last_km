@@ -54,7 +54,13 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
                        review_isolation=args.review_isolation, worker_isolation=args.worker_isolation,
                        protect_paths=args.protect)
     expected = state.get('provider_config')
-    if not isinstance(expected, dict) or Supervisor._provider_config(SimpleNamespace(config=config)) != expected:
+    if not isinstance(expected, dict):
+        raise ValueError('检查点缺少原始执行器配置')
+    expected = dict(expected)
+    expected.setdefault('review_isolation', 'provider')
+    expected.setdefault('worker_isolation', 'provider')
+    expected.setdefault('protect_paths', [])
+    if Supervisor._provider_config(SimpleNamespace(config=config)) != expected:
         raise ValueError('原始启动配置与检查点的执行器、审核或隔离设置不一致')
     if args.check and args.check != state.get('checks', []):
         raise ValueError('原始验收命令与检查点不一致')

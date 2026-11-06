@@ -4,6 +4,7 @@ import json
 import shlex
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,32 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class ExecutionResumeTests(unittest.TestCase):
+    def test_pause_during_retry_wait_does_not_wait_for_backoff_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / 'run'
+            run.mkdir()
+            (run / 'control.json').write_text(json.dumps({'action': 'pause'}))
+            monitor = Supervisor(RunConfig('task', root, ScriptedProvider('worker', []),
+                                           no_review=True, run_dir=run, retry_delay_s=30), log=lambda _: None)
+            paused = threading.Event()
+            beat = monitor._beat
+
+            def observe(note):
+                beat(note)
+                if note == 'paused at a turn boundary':
+                    paused.set()
+
+            monitor._beat = observe
+            thread = threading.Thread(target=monitor._retry_pause, args=(1, 'unfinished turn'))
+            thread.start()
+            try:
+                self.assertTrue(paused.wait(2), 'Pause must be handled before the 30-second retry deadline')
+            finally:
+                monitor.request_stop()
+                thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
     def checkpoint(self, root, **settings):
         monitor = Supervisor(RunConfig("task", root, ScriptedProvider("worker", []),
                                        no_review=True, run_dir=root / "run", **settings), log=lambda _: None)

@@ -1,0 +1,73 @@
+import unittest
+
+from console.workflow import work_details
+
+
+class WorkDetailsTests(unittest.TestCase):
+    def fixture(self, status='running', phase='working'):
+        state = {'rounds': [
+            {'role': 'worker', 'index': 1, 'status': 'continue', 'summary': '已实现接口', 'gaps': ['补测试'],
+             'evidence': ['app.py'], 'git_checkpoint': {'commit': 'a' * 40}},
+            {'role': 'reviewer', 'index': 1, 'status': 'continue', 'summary': '边界条件待修复', 'gaps': ['补异常处理']},
+        ], 'session_id': 'worker-session', 'provider_config': {}}
+        activity = {'role': 'worker', 'round': 2, 'focus': '正在补充失败分支测试', 'events': [
+            {'role': 'worker', 'round': 2, 'kind': 'command', 'text': 'python3 -m unittest', 'output': 'Ran 2 tests'},
+            {'role': 'worker', 'round': 1, 'kind': 'message', 'text': '{"status":"continue","summary":"已实现接口"}'},
+            {'role': 'reviewer', 'round': 1, 'kind': 'command', 'text': 'git diff base worker'},
+            {'role': 'worker', 'round': 2, 'kind': 'phase', 'text': '开始执行'},
+        ]}
+        health = {'phase': phase, 'activity': 'round 2: worker running', 'health': 'active',
+                  'rounds': 1, 'heartbeat_age_s': 2, 'usage': {'agent_calls': 3}}
+        return work_details(state, health, activity, status, {'pid': 10, 'child_pid': 11},
+                            {'guardian_pid': 9}, 'codex', 'claude')
+
+    def test_only_current_role_is_executing_and_watcher_uses_real_process_details(self):
+        work = self.fixture()
+        self.assertEqual(work['roles']['worker']['status'], 'running')
+        self.assertEqual(work['roles']['worker']['current_work'], '正在补充失败分支测试')
+        self.assertEqual(work['roles']['reviewer']['status'], 'waiting')
+        self.assertEqual(work['roles']['reviewer']['last_conclusion']['summary'], '边界条件待修复')
+        self.assertEqual(work['roles']['watcher']['pid'], 10)
+        self.assertEqual(work['roles']['watcher']['guardian_pid'], 9)
+        self.assertEqual(work['roles']['watcher']['usage']['agent_calls'], 3)
+        review = self.fixture(phase='reviewing')
+        self.assertEqual(review['roles']['worker']['status'], 'waiting')
+        self.assertEqual(review['roles']['reviewer']['status'], 'running')
+
+    def test_conclusions_contain_only_worker_and_reviewer_results(self):
+        work = self.fixture()
+        self.assertEqual([c['summary'] for c in work['conclusions']], ['已实现接口', '边界条件待修复'])
+        self.assertFalse(any('output' in c or 'text' in c for c in work['conclusions']))
+        self.assertEqual(work['conclusions'][0]['git_checkpoint']['commit'], 'a' * 40)
+        self.assertFalse(any(e['text'].startswith('{"status"') for e in work['workflow']))
+        self.assertTrue(any(e.get('output') == 'Ran 2 tests' for e in work['workflow']))
+
+    def test_paused_stopped_and_finished_roles_never_show_running(self):
+        for status in ('paused', 'stopped', 'done', 'queued', 'interrupted'):
+            with self.subTest(status=status):
+                work = self.fixture(status=status)
+                self.assertFalse(any(role['status'] == 'running' for role in work['roles'].values()))
+                self.assertEqual(len(work['conclusions']), 2)
+
+    def test_finished_report_and_pruned_runs_preserve_last_role_conclusions(self):
+        state = {'rounds': 3, 'records': [{'role': 'worker', 'index': 3, 'status': 'done', 'summary': '任务完成'}],
+                 'last_review': {'status': 'done', 'summary': '审核通过'}}
+        work = work_details(state, {'phase': 'finished'}, {}, 'done', {}, {}, 'codex', 'claude')
+        self.assertEqual(work['roles']['worker']['last_conclusion']['index'], 3)
+        self.assertEqual(work['roles']['reviewer']['last_conclusion']['summary'], '审核通过')
+        self.assertEqual({c['role'] for c in work['conclusions']}, {'worker', 'reviewer'})
+
+    def test_validation_runs_in_watcher_without_marking_agents_as_executing(self):
+        work = self.fixture(phase='validating')
+        self.assertEqual(work['roles']['worker']['status'], 'waiting')
+        self.assertEqual(work['roles']['reviewer']['status'], 'waiting')
+        self.assertEqual(work['roles']['watcher']['status'], 'monitoring')
+
+    def test_starting_worker_does_not_reuse_previous_reviewer_focus(self):
+        activity = {'role': 'reviewer', 'round': 1, 'focus': '上一轮审核结论',
+                    'events': [{'role': 'worker', 'round': 1, 'kind': 'message', 'text': '上一轮实现已完成'}]}
+        work = work_details({}, {'phase': 'working', 'activity': 'round 2: starting worker'},
+                            activity, 'running', {}, {}, 'codex', 'claude')
+        self.assertEqual(work['roles']['worker']['current_work'], '正在实现任务')
+        self.assertEqual(work['roles']['worker']['round'], 2)
+        self.assertEqual(work['roles']['reviewer']['current_work'], '')

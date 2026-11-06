@@ -758,7 +758,8 @@ class Supervisor:
             deadline = time.monotonic() + max(0, min(delay, remaining))
             while time.monotonic() < deadline and not self._stop:
                 self._stop_event.wait(min(0.2, max(0, deadline - time.monotonic())))
-                self._process_control(active=True)
+                # No agent is running during backoff; pause at this boundary now.
+                self._process_control()
             self._check_budget()
             self._process_control()
 

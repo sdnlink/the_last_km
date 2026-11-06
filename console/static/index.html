@@ -232,11 +232,11 @@
           <div class="panel-heading">
             <div>
               <h2>
-                全部任务工作状态
+                运行任务概况
                 <span id="board-count" class="count-badge">0</span>
               </h2>
               <p>
-                同时查看各任务当前工作、最新结果和待处理要求，点击卡片进入交互。
+                汇总全部运行及暂停任务，点击任意任务进入工作详情。
               </p>
             </div>
             <label class="board-search"
@@ -320,7 +320,9 @@
             >
               <button class="filter active" data-filter="all">全部任务</button
               ><button class="filter" data-filter="active">
-                执行中<span id="filter-active">0</span></button
+                运行中<span id="filter-active">0</span></button
+              ><button class="filter" data-filter="paused">暂停</button
+              ><button class="filter" data-filter="stopped">停止</button
               ><button class="filter" data-filter="queued">待启动</button
               ><button class="filter" data-filter="done">已完成</button
               ><button class="filter" data-filter="attention">需关注</button>
@@ -415,6 +417,20 @@
             100%；任务内存为本地进程及其子进程的 RSS 合计。通过 Paseo
             执行的远端或 daemon 进程不计入任务占用。
           </div>
+        </section>
+        <section id="detail-page" class="task-detail-page" hidden>
+          <div class="task-detail-top"><button class="detail-back" data-page="tasks">← 返回开发任务</button><span class="subtle-badge">每 3 秒同步</span></div>
+          <section class="panel task-detail-heading">
+            <div><span class="eyebrow">TASK WORKSPACE</span><h2 id="detail-title">任务工作详情</h2><p id="detail-project"></p></div>
+            <div class="detail-page-actions"><div id="detail-actions"></div><button class="button primary" id="detail-open-direction">补充要求 / 调整方向</button></div>
+          </section>
+          <div id="detail-alerts"></div>
+          <section class="panel role-panel"><div class="panel-heading"><div><h2>角色工作详情</h2><p>worker 实现任务 · reviewer 审核改动 · watcher 监督与调度</p></div></div><div id="role-details" class="role-details"></div></section>
+          <section class="panel workflow-panel"><div class="panel-heading"><div><h2><span class="live-dot"></span>实时工作进展</h2><p>当前执行阶段、工作计划与工具活动</p></div><div class="workflow-filters" id="workflow-filters" role="group" aria-label="筛选工作角色"><button data-role-filter="all" class="active">全部</button><button data-role-filter="worker">worker</button><button data-role-filter="reviewer">reviewer</button><button data-role-filter="watcher">watcher</button></div></div><div id="workflow-stages" class="workflow-stages"></div><div id="detail-live" class="workflow-content"></div></section>
+          <section class="panel conclusions-panel"><div class="panel-heading"><div><h2>交互结论</h2><p>逐轮展示 worker 任务执行结论与 reviewer 审查结论</p></div><span id="conclusion-count" class="count-badge">0</span></div><div id="detail-conclusions" class="conclusion-list"></div></section>
+          <div id="detail-git"></div>
+          <details class="panel detail-metadata"><summary>需求与验收信息</summary><div id="detail-body" class="detail-body"></div></details>
+          <details class="panel raw-logs" id="detail-logs"><summary>执行日志 · 原始输出</summary><div class="log-section"><div class="log-heading"><h3>执行日志</h3><select id="log-select" aria-label="选择日志文件"></select><label class="log-follow"><input type="checkbox" id="log-follow" checked />跟随输出</label></div><pre id="log-output" tabindex="0">展开后加载执行日志</pre><small>展示所选日志末尾 64 KiB，自动更新。</small></div></details>
         </section>
         <footer class="page-footer">
           <span><span class="live-dot"></span>每个任务，都向完成再近一步。</span
@@ -561,43 +577,6 @@
           </button>
         </div>
       </form>
-    </dialog>
-    <dialog id="detail-dialog" class="detail-dialog">
-      <div class="dialog-heading">
-        <div>
-          <span class="eyebrow">TASK WORKSPACE</span>
-          <h2 id="detail-title">任务详情</h2>
-          <p id="detail-project"></p>
-        </div>
-        <button
-          class="icon-button"
-          data-close="detail-dialog"
-          aria-label="关闭"
-        >
-          <svg><use href="#i-x" /></svg>
-        </button>
-      </div>
-      <div class="detail-live" id="detail-live"></div>
-      <div class="detail-direction-action">
-        <button class="button primary" id="detail-open-direction">
-          补充要求 / 调整方向
-        </button>
-      </div>
-      <div class="detail-body" id="detail-body"></div>
-      <div class="log-section">
-        <div class="log-heading">
-          <h3>
-            <svg><use href="#i-terminal" /></svg>执行日志
-          </h3>
-          <select id="log-select" aria-label="选择日志文件"></select
-          ><label class="log-follow"
-            ><input type="checkbox" id="log-follow" checked />跟随输出</label
-          >
-        </div>
-        <pre id="log-output" tabindex="0">加载中…</pre>
-        <small>展示所选日志末尾 64 KiB，自动更新。</small>
-      </div>
-      <div class="dialog-footer" id="detail-actions"></div>
     </dialog>
     <dialog id="direction-dialog" class="direction-dialog">
       <form id="direction-form">

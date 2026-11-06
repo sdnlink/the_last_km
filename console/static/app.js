@@ -22,11 +22,12 @@ const state = {
   discovery: null,
   boardSearch: "",
   feedKind: "all",
+  workflowRole: "all",
 };
 const statuses = {
   queued: "待启动",
   starting: "启动中",
-  running: "执行中",
+  running: "运行中",
   paused: "已暂停",
   done: "已交付",
   stopped: "已停止",
@@ -171,7 +172,7 @@ async function api(path, body) {
   }
   return data;
 }
-function switchPage(page) {
+function switchPage(page, updateRoute = true) {
   state.page = page;
   const names = {
     overview: ["工作概览", "从一个想法，到一次交付。在这里掌握每一步进展。"],
@@ -181,28 +182,37 @@ function switchPage(page) {
       "实时进展",
       "了解 AI 正在做什么，跟踪每一次实现、检查与独立审查。",
     ],
+    detail: ["任务工作详情", "跟踪执行工作流，核对每轮结论，及时调整任务方向。"],
   };
+  if (!names[page]) page = "overview";
+  state.page = page;
+  if (page !== "detail") state.detail = null;
+  if (updateRoute && location.hash !== `#/${page}`)
+    history.pushState(null, "", `#/${page}`);
   $("#breadcrumb").textContent = names[page][0];
   $("#page-title").innerHTML =
     `${names[page][0]}<span class="heading-dot">.</span>`;
   $("#page-subtitle").textContent = names[page][1];
   $$(".nav-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.page === page);
+    const selected = el.dataset.page === (page === "detail" ? "tasks" : page);
+    el.classList.toggle("active", selected);
     el.setAttribute(
       "aria-current",
-      el.dataset.page === page ? "page" : "false",
+      selected ? "page" : "false",
     );
   });
-  $("#stats").hidden = ["resources", "progress"].includes(page);
-  $("#tasks-panel").hidden = ["resources", "progress"].includes(page);
-  $("#resource-strip").hidden = page === "progress";
-  $("#live-panel").hidden = page === "resources";
-  $("#all-tasks-panel").hidden = page === "resources";
-  $("#all-feed-panel").hidden = page === "resources";
+  $("#stats").hidden = page !== "overview";
+  $("#tasks-panel").hidden = page !== "tasks";
+  $("#resource-strip").hidden = !["overview", "resources"].includes(page);
+  $("#live-panel").hidden = page !== "progress";
+  $("#all-tasks-panel").hidden = page !== "overview";
+  $("#all-feed-panel").hidden = page !== "progress";
+  $("#detail-page").hidden = page !== "detail";
   $("#live-panel").classList.toggle("expanded", page === "progress");
   $("#resources-panel").hidden = page !== "resources";
   if (page === "resources") renderResources();
   else renderLive();
+  renderBoard();
 }
 function render() {
   const tasks = state.tasks;
@@ -219,7 +229,7 @@ function render() {
     `${counts.running}<span class="stat-unit">个任务</span>`;
   $("#nav-count").textContent = tasks.length;
   $("#task-count").textContent = tasks.length;
-  $("#filter-active").textContent = tasks.filter(active).length;
+  $("#filter-active").textContent = counts.running;
   renderTasks();
   renderResources();
   renderLive();
@@ -228,8 +238,9 @@ function render() {
 }
 
 function renderBoard() {
-  $("#board-count").textContent = state.tasks.length;
+  $("#board-count").textContent = state.tasks.filter(active).length;
   const tasks = state.tasks
+    .filter(active)
     .filter((t) =>
       `${t.title} ${t.cwd}`
         .toLowerCase()
@@ -240,13 +251,6 @@ function renderBoard() {
     tasks
       .map((task) => {
         const a = task.activity || {};
-        const output = (a.events || [])
-          .filter(
-            (e) =>
-              ["result", "output", "error"].includes(e.kind) ||
-              (e.kind === "command" && e.output),
-          )
-          .at(-1);
         const pending = (task.directions || []).filter(
           (item) =>
             !item.worker ||
@@ -257,10 +261,10 @@ function renderBoard() {
           ["heartbeat_stale", "monitor_exited", "unknown"].includes(
             task.health.health,
           );
-        return `<article class="task-board-card ${state.liveTask === task.id ? "selected" : ""}" data-board-id="${task.id}"><div class="board-card-head"><button class="board-title" data-select-task="${task.id}" title="${escape(task.title)}">${escape(task.title)}</button>${badge(task)}</div><div class="board-project">${escape(task.cwd)}</div><p class="board-focus">${escape(a.focus || a.operation?.text || task.summary || "等待启动或新的执行输出")}</p><div class="board-result"><strong>最近结果</strong><span>${escape(output?.output || output?.text || "暂无本轮工具结果")}</span></div><div class="board-meta"><span>${escape(phases[task.health.phase] || statuses[task.status])} · 第 ${a.round || 0} 轮</span><span>${a.last_output_at ? `输出 ${duration(a.output_age_s)} 前` : "等待输出"}</span></div>${pending ? `<p class="board-pending">${pending} 条补充要求等待发送或本轮响应</p>` : ""}${stale ? '<p class="board-warning">心跳异常，请查看任务详情</p>' : ""}${task.direction_error ? `<p class="board-warning">${escape(task.direction_error)}；任务仍可暂停或停止。</p>` : ""}<div class="board-actions">${taskButtons(task, true)}<button class="detail-button" data-select-task="${task.id}">查看交互</button>${task.can_direct ? `<button class="detail-button" data-direction="${task.id}">调整方向</button>` : ""}</div></article>`;
+        return `<article class="task-board-card" data-board-id="${task.id}" data-detail="${task.id}" tabindex="0"><div class="board-card-head"><button class="board-title" data-select-task="${task.id}" title="${escape(task.title)}">${escape(task.title)}</button>${badge(task)}</div><div class="board-project">${escape(task.cwd)}</div><p class="board-focus">${escape(task.work?.roles?.[a.role]?.current_work || task.last_worker?.summary || a.operation?.text || "等待启动或新的执行输出")}</p><div class="board-result"><strong>最近结论</strong><span>${escape(task.work?.conclusions?.at(-1)?.summary || task.last_worker?.summary || task.last_review?.summary || "当前轮次尚未返回结论")}</span></div><div class="board-roles">${["worker","reviewer","watcher"].map(role=>`<span>${role} · ${escape(roleStatuses[task.work?.roles?.[role]?.status] || "未启动")}</span>`).join("")}</div><div class="board-meta"><span>${escape(phases[task.health.phase] || statuses[task.status])} · 第 ${a.round || 0} 轮</span><span>${a.last_output_at ? `输出 ${duration(a.output_age_s)} 前` : "等待输出"}</span></div>${pending ? `<p class="board-pending">${pending} 条补充要求等待发送或本轮响应</p>` : ""}${stale ? '<p class="board-warning">心跳异常，请查看任务详情</p>' : ""}${task.direction_error ? `<p class="board-warning">${escape(task.direction_error)}；任务仍可暂停或停止。</p>` : ""}<div class="board-actions">${taskButtons(task, true)}<button class="detail-button" data-select-task="${task.id}">工作详情 →</button>${task.can_direct ? `<button class="detail-button" data-direction="${task.id}">调整方向</button>` : ""}</div></article>`;
       })
       .join("") ||
-    '<p class="live-empty">没有匹配任务。新建任务后会在这里显示。</p>';
+    '<p class="live-empty">暂无运行或暂停中的任务。全部任务可在“开发任务”列表查看。</p>';
   const el = $("#task-board");
   if (el.dataset.html !== rows) {
     el.innerHTML = rows;
@@ -297,7 +301,6 @@ function renderFeed() {
     plan: "计划更新",
     error: "异常提示",
     phase: "监督事件",
-    direction: "用户要求已发送",
     direction: "用户要求",
   };
   const html =
@@ -337,7 +340,7 @@ function gitHistoryHTML(task) {
   const worker = history.last_worker || {};
   const checkpoints = (task.git_checkpoints || []).slice().reverse();
   const branch = (history.ref || "").replace(/^refs\/heads\//, "");
-  return `<details class="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary><p>每轮改动与工作结论保存在此分支，审核关联对应的 worker 提交。</p><div class="git-history-ref">分支 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p><code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
+  return `<details class="git-history" data-key="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary><p>每轮改动与工作结论保存在此分支，审核关联对应的 worker 提交。</p><div class="git-history-ref">分支 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p><code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
 }
 function activityHTML(task, detail = false) {
   const activity = task.activity || {};
@@ -434,7 +437,9 @@ function renderTasks() {
       (t) =>
         ({
           all: true,
-          active: active(t),
+          active: ["running", "starting"].includes(t.status),
+          paused: t.status === "paused",
+          stopped: t.status === "stopped",
           queued: t.status === "queued",
           done: t.status === "done",
           attention: attention(t),
@@ -459,7 +464,7 @@ function renderTasks() {
           : t.control === "pause" && t.status !== "paused"
             ? "本轮结束后暂停"
             : phases[t.health.phase] || "";
-      return `<tr><td><div class="task-name"><span class="task-avatar ${["", "blue", "purple"][index % 3]}">${icon("terminal")}</span><div><button class="task-title" data-detail="${t.id}" title="${escape(t.title)}">${escape(t.title)}</button><div class="task-path" title="${escape(t.cwd)}">${icon("folder")}<span>${escape(t.cwd || "目录未知")}</span></div></div></div></td><td>${badge(t)}${active(t) && phase ? `<small class="phase">${escape(phase)}</small>` : ""}</td><td><span class="provider-name">${escape(t.provider)}</span><span class="reviewer-name">审查 · ${escape(t.reviewer)}</span></td><td><div class="module-progress"><div>${t.total_modules ? `${t.accepted_modules}<small>/ ${t.total_modules} 模块</small>` : `<small>${t.status === "done" ? "已验收" : "等待模块计划"}</small>`}</div><div class="meter"><span data-width="${progress}"></span></div></div></td><td class="duration">${duration(t.health.usage?.elapsed_s)}</td><td><div class="resource-cell"><span>${resource.process_count ? `CPU ${percent(resource.cpu_percent)}` : "—"}</span><span>${resource.process_count ? bytes(resource.rss_bytes) : "无本地进程"}</span></div></td><td><div class="row-actions">${taskButtons(t, true)}<button class="detail-button" data-detail="${t.id}">详情 ↗</button></div></td></tr>`;
+      return `<tr data-detail="${t.id}" tabindex="0" aria-label="查看任务 ${escape(t.title)}"><td><div class="task-name"><span class="task-avatar ${["", "blue", "purple"][index % 3]}">${icon("terminal")}</span><div><button class="task-title" data-detail="${t.id}" title="${escape(t.title)}">${escape(t.title)}</button><div class="task-path" title="${escape(t.cwd)}">${icon("folder")}<span>${escape(t.cwd || "目录未知")}</span></div></div></div></td><td>${badge(t)}${active(t) && phase ? `<small class="phase">${escape(phase)}</small>` : ""}</td><td><span class="provider-name">${escape(t.provider)}</span><span class="reviewer-name">审查 · ${escape(t.reviewer)}</span></td><td><div class="module-progress"><div>${t.total_modules ? `${t.accepted_modules}<small>/ ${t.total_modules} 模块</small>` : `<small>${t.status === "done" ? "已验收" : "等待模块计划"}</small>`}</div><div class="meter"><span data-width="${progress}"></span></div></div></td><td class="duration">${duration(t.health.usage?.elapsed_s)}</td><td><div class="resource-cell"><span>${resource.process_count ? `CPU ${percent(resource.cpu_percent)}` : "—"}</span><span>${resource.process_count ? bytes(resource.rss_bytes) : "无本地进程"}</span></div></td><td><div class="row-actions">${taskButtons(t, true)}<button class="detail-button" data-detail="${t.id}">工作详情 →</button></div></td></tr>`;
     })
     .join("");
   $$("#task-rows [data-width]").forEach(
@@ -571,7 +576,7 @@ async function refresh() {
     $("#connection-error").hidden = true;
     $("#last-updated").textContent =
       `更新于 ${new Date(data.at).toLocaleTimeString("zh-CN", { hour12: false })}`;
-    if (state.detail && $("#detail-dialog").open) await refreshDetail();
+    if (state.detail && state.page === "detail") await refreshDetail();
     if (state.directionTask && $("#direction-dialog").open)
       renderDirectionHistory(
         state.tasks.find((t) => t.id === state.directionTask),
@@ -631,67 +636,89 @@ function openCreate() {
   $("#form-error").hidden = true;
   $("#create-dialog").showModal();
 }
-function feedback(title, value) {
-  if (!value) return "";
-  const items = [
-    value.summary,
-    ...(value.gaps || []).map((x) => `待完善：${x}`),
-    ...(value.next_actions || []).map((x) => `下一步：${x}`),
-  ].filter(Boolean);
-  return `<div class="detail-feedback"><strong>${title}</strong>${escape(items.join("\n"))}</div>`;
+const roleStatuses = {monitoring:"监督中", running:"执行中", waiting:"等待执行", paused:"已暂停", stopped:"已结束", completed:"已完成", disabled:"未启用", not_started:"未启动"};
+function stableHTML(el, html) {
+  if (el.dataset.html === html) return;
+  const opened = [...el.querySelectorAll("details[open]")].map(d => d.dataset.key || d.querySelector("summary")?.textContent);
+  const scroll = el.scrollTop;
+  el.innerHTML = html;
+  el.dataset.html = html;
+  el.querySelectorAll("details").forEach(d => { if(opened.includes(d.dataset.key || d.querySelector("summary")?.textContent)) d.open = true; });
+  el.scrollTop = scroll;
+}
+function roleDetailsHTML(t) {
+  return ["worker", "reviewer", "watcher"].map(name => {
+    const r = t.work?.roles?.[name] || {status:"not_started"};
+    const titles = {worker:"任务实现", reviewer:"独立审查", watcher:"监督与调度"};
+    const last = r.last_conclusion;
+    const work = r.current_work || (r.status === "waiting" ? "等待本轮调度" : last?.summary || "暂无工作记录");
+    const facts = name === "watcher"
+      ? [["心跳", r.heartbeat_age_s == null ? "—" : `${duration(r.heartbeat_age_s)} 前`], ["监督进程", r.pid || "—"], ["守护进程", r.guardian_pid || "—"], ["模型调用", `${r.usage?.agent_calls || 0} / ${r.usage?.max_agent_calls || "不限"}`], ["恢复次数", r.recovery_count || 0]]
+      : [["执行器", r.provider || "—"], ["工作轮次", r.round == null ? "—" : `第 ${r.round} 轮`], ["执行进程", r.pid || "—"], ["会话", r.session_id || "尚无会话"]];
+    return `<article class="role-card role-${name}" data-role="${name}"><div class="role-card-title"><strong>${name}</strong><span class="role-state ${escape(r.status)}">${escape(roleStatuses[r.status] || r.status)}</span></div><h3>${titles[name]}</h3><p class="role-current">${escape(work)}</p><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl>${last ? `<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p></div>` : ""}<button class="detail-button" data-role-focus="${name}">查看${name === "watcher" ? "监督记录" : "工作记录"} ↓</button></article>`;
+  }).join("");
+}
+function renderWorkflow(t) {
+  stableHTML($("#role-details"), roleDetailsHTML(t));
+  const phase = t.health.phase;
+  const stages = [["worker", "worker 实现", "working"], ["reviewer", "reviewer 审查", "reviewing"], ["watcher", "watcher 验收", "validating"], ["watcher", "归档交付", "closing_agents"]];
+  $("#workflow-stages").innerHTML = stages.map(([role,label,stage],i) => {
+    const skipped = stage === "reviewing" && t.work?.roles?.reviewer?.status === "disabled";
+    const complete = t.status === "done" && !skipped;
+    const current = active(t) && t.status !== "paused" && phase === stage && !skipped;
+    return `<div class="workflow-stage ${complete ? "complete" : current ? "current" : ""}"><span>${skipped ? "—" : complete ? "✓" : i+1}</span><div><strong>${label}</strong><small>${skipped ? "未启用" : complete ? "已完成" : phase === stage && t.status === "paused" ? "已暂停" : current ? "正在执行" : ""}</small></div></div>`;
+  }).join("");
+  const role = state.workflowRole;
+  const events = (t.work?.workflow || []).filter(e => role === "all" || (role === "watcher" ? e.kind === "phase" : e.role === role && e.kind !== "phase")).slice(-40).reverse();
+  const labels = {message:"进度说明",command:"执行命令",file:"文件变更",tool:"工具操作",result:"工具结果",plan:"执行计划",output:"执行输出",phase:"监督事件",error:"执行异常",direction:"用户要求"};
+  const plan = t.activity?.plan || [];
+  const html = `${plan.length ? `<ol class="live-plan">${plan.map(p=>`<li class="${escape(p.status)}">${escape(p.step)}</li>`).join("")}</ol>` : ""}<ol class="work-events">${events.map(e=>`<li><div class="work-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${e.kind === "phase" ? "watcher" : escape(e.role || "worker")} · ${labels[e.kind] || "工作活动"}</span>${e.round ? `<span>第 ${escape(e.round)} 轮</span>` : ""}</div><details data-key="${escape(`${e.at}-${e.role}-${e.kind}-${e.text?.slice(0,60)}`)}" ${["message","phase"].includes(e.kind) ? "open" : ""}><summary>${escape((e.text || "").split("\n")[0].slice(0,200))}</summary><pre>${escape(e.text)}${e.output ? `\n\n${escape(e.output)}` : ""}</pre></details></li>`).join("") || '<li class="live-empty">该角色暂无工作流记录；新活动将在这里自动更新。</li>'}</ol>`;
+  stableHTML($("#detail-live"),html);
+  $$("[data-role-filter]").forEach(el=>el.classList.toggle("active",el.dataset.roleFilter === role));
+}
+function renderConclusions(t) {
+  const items = [...(t.work?.conclusions || [])].reverse();
+  $("#conclusion-count").textContent = items.length;
+  const html = items.map(c=>`<article class="conclusion-item" data-conclusion-role="${escape(c.role)}"><div class="conclusion-heading"><span class="conclusion-role ${escape(c.role)}">${c.role === "reviewer" ? "reviewer · 审查结论" : "worker · 执行结论"}</span><span>${c.index == null ? "最近结论" : `第 ${escape(c.index)} 轮`}</span><span class="subtle-badge">${escape(c.status === "done" ? "完成" : c.status === "continue" ? "继续处理" : c.status)}</span></div><p class="conclusion-summary">${escape(c.summary)}</p>${[["已完成",c.done],["待解决",c.gaps],["下一步",c.next_actions],["阻塞",c.blockers]].filter(([,values])=>values?.length).map(([label,values])=>`<div class="conclusion-field"><strong>${label}</strong><ul>${values.map(v=>`<li>${escape(v)}</li>`).join("")}</ul></div>`).join("")}${c.evidence?.length ? `<details data-key="evidence-${escape(c.role)}-${escape(c.index)}"><summary>验证依据 · ${c.evidence.length} 项</summary><ul>${c.evidence.map(e=>`<li>${escape(e)}</li>`).join("")}</ul></details>` : ""}${c.git_checkpoint?.commit ? `<small class="conclusion-commit">Git 提交 ${escape(c.git_checkpoint.commit)}</small>` : ""}</article>`).join("") || '<p class="live-empty">尚无任务执行或审查结论。当前工作流会持续更新，轮次结束后在这里发布结论。</p>';
+  stableHTML($("#detail-conclusions"),html);
 }
 function renderDetail(t) {
+  state.detailTask = t;
   $("#detail-open-direction").disabled = !t.can_direct;
-  updateActivity($("#detail-live"), t, true);
   $("#detail-title").textContent = t.title;
   $("#detail-project").textContent = t.cwd;
-  const alerts = [];
-  if (t.control === "pause" && t.status !== "paused")
-    alerts.push("已请求暂停，将在当前轮次结束后生效。");
-  if (t.control === "stop" && active(t))
-    alerts.push("正在停止执行并保存状态，请等待监督器确认。");
-  if (t.status === "interrupted")
-    alerts.push("监督器已退出，尚无确认的最终报告。可以查看日志定位原因。");
-  if (t.status === "failed")
-    alerts.push("任务未成功启动或执行失败，请查看日志检查安装、登录和配置。");
-  if (t.health.report_warning)
-    alerts.push(`运行报告需要核对：${t.health.report_warning}`);
-  if (t.health.health === "heartbeat_stale")
-    alerts.push("监督器仍持有运行锁，但心跳已超时，请查看执行日志。");
-  if (t.resume_unavailable) alerts.push(t.resume_unavailable);
-  if (t.direction_error) alerts.push(t.direction_error);
-  if (t.launch_error) alerts.push(`上次启动失败：${t.launch_error}`);
-  if (t.control_message && t.status === "starting")
-    alerts.push(t.control_message);
-  const modules = t.modules
-    .map(
-      (m) =>
-        `<li><span class="module-id">${escape(m.id)}</span><span>${escape(m.title)}</span><span>${m.status === "accepted" ? "已验收" : "待完成"}</span></li>`,
-    )
-    .join("");
+  renderWorkflow(t);
+  renderConclusions(t);
+  stableHTML($("#detail-git"),gitHistoryHTML(t));
+  const alerts = [t.control_message, t.resume_unavailable, t.direction_error, t.health.report_warning, t.launch_error].filter(Boolean);
+  if (t.health.health === "heartbeat_stale") alerts.push("监督器心跳已超时，请检查 watcher 工作详情和执行日志。");
+  if (t.status === "interrupted") alerts.push("任务执行已中断，可检查工作记录后从检查点恢复。");
+  $("#detail-alerts").innerHTML = alerts.map(a=>`<div class="detail-alert">${escape(a)}</div>`).join("");
+  const modules = (t.modules || []).map(m=>`<li><span class="module-id">${escape(m.id)}</span><span>${escape(m.title)}</span><span>${m.status === "accepted" ? "已验收" : "待完成"}</span></li>`).join("");
   const issues = t.audit_issues?.items || [];
-  $("#detail-body").innerHTML =
-    `${alerts.map((a) => `<div class="detail-alert">${escape(a)}</div>`).join("")}<div class="detail-summary">${badge(t)}<div class="detail-stats"><span>轮次<strong>${t.health.rounds || 0}</strong></span><span>模型调用<strong>${t.health.usage?.agent_calls || 0}</strong></span><span>运行<strong>${duration(t.health.usage?.elapsed_s)}</strong></span><span>CPU<strong>${t.resources.process_count ? percent(t.resources.cpu_percent) : "—"}</strong></span><span>内存<strong>${t.resources.process_count ? bytes(t.resources.rss_bytes) : "—"}</strong></span></div></div><h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${t.summary ? `<h3>最新进展</h3><div class="requirement-text">${escape(t.summary)}</div>` : ""}${modules ? `<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3><ul class="module-list">${modules}</ul>` : ""}${feedback("执行器反馈", t.last_worker)}${feedback("独立审查反馈", t.last_review)}${issues.length ? `<h3>审计问题</h3><ul class="module-list">${issues.map((i) => `<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description || i.text || i.summary || "")}</span><span>${i.status === "closed" ? "已关闭" : "待解决"}</span></li>`).join("")}</ul>` : ""}<h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`;
-  $("#detail-actions").innerHTML =
-    `${!t.managed ? '<span class="muted">已有 CLI 任务</span>' : ""}${taskButtons(t)}`;
+  $("#detail-body").innerHTML = `<h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${modules ? `<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3><ul class="module-list">${modules}</ul>` : ""}${issues.length ? `<h3>审计问题</h3><ul class="module-list">${issues.map(i=>`<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description || i.text || i.summary || "")}</span><span>${i.status === "closed" ? "已关闭" : "待解决"}</span></li>`).join("")}</ul>` : ""}<h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`;
+  $("#detail-actions").innerHTML = `${badge(t)}${taskButtons(t)}`;
 }
-async function openDetail(ident) {
+async function openDetail(ident, updateRoute = true) {
+  if (state.detail === ident && state.page === "detail") return refreshDetail();
   state.detail = ident;
   state.log = "";
+  state.workflowRole = "all";
+  switchPage("detail", false);
+  if (updateRoute && location.hash !== `#/tasks/${ident}`) history.pushState(null,"",`#/tasks/${ident}`);
   $("#detail-title").textContent = "加载任务…";
   $("#detail-project").textContent = "";
-  $("#detail-body").replaceChildren();
-  $("#detail-live").replaceChildren();
-  delete $("#detail-live").dataset.html;
-  $("#detail-actions").replaceChildren();
-  $("#log-output").textContent = "加载中…";
+  ["detail-body","detail-live","detail-actions","role-details","detail-conclusions","detail-git","detail-alerts","workflow-stages"].forEach(id=>{const el=$(`#${id}`);el.replaceChildren();delete el.dataset.html;});
+  $("#detail-logs").open = false;
+  $("#log-output").textContent = "展开后加载执行日志";
   $("#log-select").replaceChildren();
-  $("#detail-dialog").showModal();
-  try {
-    await refreshDetail();
-  } catch (error) {
-    toast(error.message, true);
-  }
+  window.scrollTo({top:0});
+  try { await refreshDetail(); } catch(error) { toast(error.message,true); $("#detail-alerts").textContent = `无法读取任务：${error.message}`; }
+}
+function routePage() {
+  const match = /^#\/tasks\/([a-z0-9-]+)$/.exec(location.hash);
+  if (match) { if(state.detail !== match[1] || state.page !== "detail") openDetail(match[1],false); }
+  else switchPage(location.hash.replace(/^#\//, "") || "overview",false);
 }
 async function refreshDetail() {
   if (state.detailBusy) return;
@@ -701,7 +728,7 @@ async function refreshDetail() {
     const t = await api(`/api/tasks/${ident}`);
     if (state.detail !== ident) return;
     renderDetail(t);
-    await loadLogs(ident);
+    if ($("#detail-logs").open) await loadLogs(ident);
   } finally {
     state.detailBusy = false;
   }
@@ -789,13 +816,6 @@ async function openDirection(ident) {
     }
   }
 }
-function selectTask(ident) {
-  state.liveTask = ident;
-  switchPage("progress");
-  renderLive();
-  renderBoard();
-  $("#live-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-}
 async function act(ident, action) {
   if (state.pending.has(ident)) return;
   if (action === "stop") {
@@ -817,7 +837,7 @@ async function act(ident, action) {
       task.id === ident ? updated : task,
     );
     render();
-    if (state.detail === ident && $("#detail-dialog").open)
+    if (state.detail === ident && state.page === "detail")
       renderDetail(updated);
     toast(
       {
@@ -837,23 +857,36 @@ async function act(ident, action) {
     renderTasks();
     renderLive();
     renderBoard();
-    if (state.detail === ident && $("#detail-dialog").open)
+    if (state.detail === ident && state.page === "detail")
       await refreshDetail().catch((e) => toast(e.message, true));
   }
 }
 document.addEventListener("click", (event) => {
-  const page = event.target.closest("[data-page]");
-  if (page) switchPage(page.dataset.page);
-  const close = event.target.closest("[data-close]");
-  if (close) $(`#${close.dataset.close}`).close();
-  const detail = event.target.closest("[data-detail]");
-  if (detail) openDetail(detail.dataset.detail);
   const action = event.target.closest("[data-action]");
-  if (action) act(action.dataset.id, action.dataset.action);
-  const selected = event.target.closest("[data-select-task]");
-  if (selected) selectTask(selected.dataset.selectTask);
+  if (action) { act(action.dataset.id,action.dataset.action); return; }
   const direction = event.target.closest("[data-direction]");
-  if (direction) openDirection(direction.dataset.direction);
+  if (direction) { openDirection(direction.dataset.direction); return; }
+  const page = event.target.closest("[data-page]");
+  if (page) { switchPage(page.dataset.page); return; }
+  const close = event.target.closest("[data-close]");
+  if (close) { $(`#${close.dataset.close}`).close(); return; }
+  const focus = event.target.closest("[data-role-focus], [data-role-filter]");
+  if (focus) {
+    state.workflowRole = focus.dataset.roleFocus || focus.dataset.roleFilter;
+    const task = state.detailTask?.id === state.detail ? state.detailTask : state.tasks.find(t=>t.id === state.detail);
+    if(task) renderWorkflow(task);
+    if(focus.dataset.roleFocus) $("#workflow-stages").scrollIntoView({behavior:"smooth",block:"start"});
+    return;
+  }
+  const detail = event.target.closest("[data-detail]");
+  if (detail) { openDetail(detail.dataset.detail); return; }
+  const selected = event.target.closest("[data-select-task]");
+  if (selected) openDetail(selected.dataset.selectTask);
+});
+document.addEventListener("keydown",event=>{
+  if(["Enter"," "].includes(event.key) && event.target.matches("tr[data-detail], article[data-detail]")) {
+    event.preventDefault();openDetail(event.target.dataset.detail);
+  }
 });
 $("#board-search").addEventListener("input", (event) => {
   state.boardSearch = event.target.value;
@@ -987,11 +1020,11 @@ $("#create-form").addEventListener("submit", async (event) => {
     $("#create-submit").disabled = false;
   }
 });
-$("#detail-dialog").addEventListener("close", () => {
-  if ($("#detail-dialog").open) return;
-  state.detail = null;
-  state.log = "";
+$("#detail-logs").addEventListener("toggle", () => {
+  if ($("#detail-logs").open && state.detail) loadLogs(state.detail).catch(e=>toast(e.message,true));
 });
+window.addEventListener("popstate",routePage);
+window.addEventListener("hashchange",routePage);
 $("#log-select").addEventListener("change", async (event) => {
   state.log = event.target.value;
   try {
@@ -1019,6 +1052,7 @@ $("#confirm-stop").addEventListener("click", async () => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refresh();
 });
+routePage();
 refresh();
 setInterval(() => {
   if (!document.hidden) refresh();

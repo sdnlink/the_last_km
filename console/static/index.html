@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Auto Moniter · 开发控制台</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <svg
+      class="icon-sprite"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <defs>
+        <symbol id="i-grid" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="7" height="7" rx="1.5" />
+          <rect x="14" y="3" width="7" height="7" rx="1.5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </symbol>
+        <symbol id="i-task" viewBox="0 0 24 24">
+          <path
+            d="m3 6 2 2 4-4M12 6h9M3 13l2 2 4-4M12 13h9M3 20l2 2 4-4M12 20h9"
+          />
+        </symbol>
+        <symbol id="i-chip" viewBox="0 0 24 24">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+          <path d="M9 1v5m6-5v5M9 18v5m6-5v5M1 9h5m-5 6h5m12-6h5m-5 6h5" />
+          <rect x="9" y="9" width="6" height="6" rx="1" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <path d="m16 16 5 5" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24">
+          <path d="M5 12h14m-5-5 5 5-5 5" />
+        </symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24">
+          <path d="M20 7v5h-5M4 17v-5h5" />
+          <path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
+        </symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24">
+          <path
+            d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"
+          />
+        </symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <path d="m4 6 6 6-6 6m9 0h7" />
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 24 24">
+          <path d="m6 6 12 12M18 6 6 18" />
+        </symbol>
+        <symbol id="i-server" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="7" rx="2" />
+          <rect x="3" y="14" width="18" height="7" rx="2" />
+          <path d="M7 6.5h.1M7 17.5h.1M16 6.5h2m-2 11h2" />
+        </symbol>
+      </defs>
+    </svg>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Auto Moniter 首页"
+        ><img src="/favicon.svg" alt="" width="34" height="34" /><span
+          >auto<span class="brand-light">moniter</span
+          ><small>DEVELOPMENT CONSOLE</small></span
+        ></a
+      >
+      <div class="workspace">
+        <span class="workspace-avatar">A</span
+        ><span
+          >本地工作空间<small id="workspace-name">Local workspace</small></span
+        ><span class="workspace-dot"></span>
+      </div>
+      <div class="nav-label">工作空间</div>
+      <nav aria-label="主导航">
+        <button
+          class="nav-item active"
+          data-page="overview"
+          aria-label="工作概览"
+          title="工作概览"
+        >
+          <svg><use href="#i-grid" /></svg>工作概览
+        </button>
+        <button
+          class="nav-item"
+          data-page="tasks"
+          aria-label="开发任务"
+          title="开发任务"
+        >
+          <svg><use href="#i-task" /></svg>开发任务<span
+            id="nav-count"
+            class="nav-count"
+            >0</span
+          >
+        </button>
+        <button
+          class="nav-item"
+          data-page="progress"
+          aria-label="实时进展"
+          title="实时进展"
+        >
+          <svg><use href="#i-terminal" /></svg>实时进展
+        </button>
+        <button
+          class="nav-item"
+          data-page="resources"
+          aria-label="资源监控"
+          title="资源监控"
+        >
+          <svg><use href="#i-chip" /></svg>资源监控
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="engine-status">
+          <span class="live-dot"></span>监督引擎<span class="muted">CLI</span>
+        </div>
+        <p>让需求持续推进，直到验收通过。</p>
+        <span class="version">AUTO MONITER / LOCAL</span>
+      </div>
+    </aside>
+    <div class="shell">
+      <header class="topbar">
+        <div class="breadcrumb">
+          工作空间 <span>/</span> <strong id="breadcrumb">工作概览</strong>
+        </div>
+        <div class="topbar-right">
+          <span id="connection" class="connection"
+            ><span class="live-dot"></span>正在连接</span
+          ><span class="top-divider"></span><span class="local-avatar">SK</span>
+        </div>
+      </header>
+      <main>
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">YOUR DEVELOPMENT, IN MOTION</div>
+            <h1 id="page-title">工作概览<span class="heading-dot">.</span></h1>
+            <p id="page-subtitle">
+              从一个想法，到一次交付。在这里掌握每一步进展。
+            </p>
+          </div>
+          <button class="button primary" id="new-task">
+            <svg><use href="#i-plus" /></svg>新建开发任务
+          </button>
+        </div>
+        <div
+          class="connection-error"
+          id="connection-error"
+          role="alert"
+          hidden
+        ></div>
+        <section class="stats-grid" id="stats" aria-label="任务统计">
+          <article class="stat-card">
+            <div class="stat-title">
+              全部任务<svg><use href="#i-task" /></svg>
+            </div>
+            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-note">所有项目的开发任务</div>
+          </article>
+          <article class="stat-card running-stat">
+            <div class="stat-title">正在执行<span class="live-dot"></span></div>
+            <div class="stat-value" id="stat-running">
+              —<span class="stat-unit">个任务</span>
+            </div>
+            <div class="stat-note">
+              <span class="accent">持续推进中</span
+              ><span>· 自动监督与审查</span>
+            </div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-title">
+              已完成交付<svg><use href="#i-check" /></svg>
+            </div>
+            <div class="stat-value" id="stat-done">—</div>
+            <div class="stat-note">已通过独立审查与验收</div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-title">
+              等待处理<svg><use href="#i-clock" /></svg>
+            </div>
+            <div class="stat-value" id="stat-waiting">—</div>
+            <div class="stat-note" id="waiting-note">
+              待启动、暂停或需要关注
+            </div>
+          </article>
+        </section>
+        <section
+          class="resource-strip"
+          id="resource-strip"
+          aria-label="实时主机资源"
+        >
+          <div class="resource-intro">
+            <span class="resource-icon"
+              ><svg><use href="#i-server" /></svg
+            ></span>
+            <div>
+              <strong>运行环境</strong
+              ><span><span class="live-dot"></span>本机实时资源</span>
+            </div>
+          </div>
+          <div class="mini-resource">
+            <div><span>CPU</span><strong id="cpu-value">采样中</strong></div>
+            <div class="meter"><span id="cpu-meter"></span></div>
+            <small id="cpu-description">读取主机数据…</small>
+          </div>
+          <div class="mini-resource">
+            <div><span>内存</span><strong id="memory-value">—</strong></div>
+            <div class="meter blue"><span id="memory-meter"></span></div>
+            <small id="memory-description">—</small>
+          </div>
+          <div class="mini-resource">
+            <div><span>磁盘</span><strong id="disk-value">—</strong></div>
+            <div class="meter purple"><span id="disk-meter"></span></div>
+            <small id="disk-description">—</small>
+          </div>
+          <button class="text-button resource-link" data-page="resources">
+            查看详情<svg><use href="#i-arrow" /></svg>
+          </button>
+        </section>
+        <section class="panel live-panel" id="live-panel">
+          <div class="panel-heading">
+            <div>
+              <h2><span class="live-dot"></span>实时项目进展</h2>
+              <p>
+                查看 AI 当前正在执行的工作、工具操作与最近输出，每 3 秒更新。
+              </p>
+            </div>
+            <label class="live-project-picker"
+              >当前项目<select
+                id="live-task-select"
+                aria-label="选择查看实时进展的项目"
+              ></select
+            ></label>
+          </div>
+          <div id="live-content" class="live-content">
+            <p class="muted">正在读取项目进展…</p>
+          </div>
+        </section>
+        <section class="panel tasks-panel" id="tasks-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>
+                开发任务 <span id="task-count" class="count-badge">0</span>
+              </h2>
+              <p>跟踪执行进度，查看每一轮实现与审查。</p>
+            </div>
+            <button
+              class="icon-button"
+              id="refresh"
+              title="刷新数据"
+              aria-label="刷新数据"
+            >
+              <svg><use href="#i-refresh" /></svg>
+            </button>
+          </div>
+          <div class="table-toolbar">
+            <div
+              class="filters"
+              id="filters"
+              role="group"
+              aria-label="任务状态筛选"
+            >
+              <button class="filter active" data-filter="all">全部任务</button
+              ><button class="filter" data-filter="active">
+                执行中<span id="filter-active">0</span></button
+              ><button class="filter" data-filter="queued">待启动</button
+              ><button class="filter" data-filter="done">已完成</button
+              ><button class="filter" data-filter="attention">需关注</button>
+            </div>
+            <label class="search"
+              ><svg><use href="#i-search" /></svg
+              ><input
+                id="search"
+                type="search"
+                placeholder="搜索任务、项目或执行器"
+                aria-label="搜索任务"
+            /></label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="task-column">任务名称 / 项目</th>
+                  <th>状态</th>
+                  <th>执行器</th>
+                  <th>模块进度</th>
+                  <th>运行时长</th>
+                  <th>资源占用</th>
+                  <th class="align-right">操作</th>
+                </tr>
+              </thead>
+              <tbody id="task-rows"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="empty-state" hidden>
+            <span class="empty-icon"
+              ><svg><use href="#i-terminal" /></svg
+            ></span>
+            <h3 id="empty-title">下一个交付，从这里开始</h3>
+            <p id="empty-description">
+              添加一个开发任务，让执行器开始实现，让监督器持续跟进。
+            </p>
+            <button class="button secondary" id="empty-create">
+              <svg><use href="#i-plus" /></svg>创建第一个任务
+            </button>
+          </div>
+          <div class="table-footer">
+            <span id="table-caption">正在加载任务…</span
+            ><span
+              ><span class="live-dot"></span>每 3 秒自动更新
+              <span class="footer-dot">·</span
+              ><span id="last-updated">等待同步</span></span
+            >
+          </div>
+        </section>
+        <section id="resources-panel" class="panel resources-panel" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2>资源使用趋势</h2>
+              <p>从打开页面开始采样 · 最近 60 次记录 · 主机整体资源</p>
+            </div>
+            <span class="subtle-badge">LIVE / 3s</span>
+          </div>
+          <div class="charts">
+            <div class="chart-card">
+              <div class="chart-heading">
+                <h3>CPU 使用率</h3>
+                <span id="chart-cpu-value">—</span>
+              </div>
+              <svg
+                id="cpu-chart"
+                class="chart"
+                viewBox="0 0 600 160"
+                role="img"
+                aria-label="CPU 使用率趋势"
+              ></svg>
+              <div class="chart-labels"><span>较早</span><span>现在</span></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-heading">
+                <h3>内存使用率</h3>
+                <span id="chart-memory-value">—</span>
+              </div>
+              <svg
+                id="memory-chart"
+                class="chart blue-chart"
+                viewBox="0 0 600 160"
+                role="img"
+                aria-label="内存使用率趋势"
+              ></svg>
+              <div class="chart-labels"><span>较早</span><span>现在</span></div>
+            </div>
+          </div>
+          <div class="resource-details" id="resource-details"></div>
+          <div class="resource-explainer">
+            任务 CPU 按使用的 CPU 核心计量，可能超过
+            100%；任务内存为本地进程及其子进程的 RSS 合计。通过 Paseo
+            执行的远端或 daemon 进程不计入任务占用。
+          </div>
+        </section>
+        <footer class="page-footer">
+          <span><span class="live-dot"></span>每个任务，都向完成再近一步。</span
+          ><span
+            >BUILT FOR CONTINUOUS DELIVERY
+            <span class="footer-mark">↗</span></span
+          >
+        </footer>
+      </main>
+    </div>
+    <dialog id="create-dialog" class="create-dialog">
+      <form id="create-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">LET’S BUILD SOMETHING</span>
+            <h2>新建开发任务</h2>
+            <p>写下需求，其余交给执行器与监督器。</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close="create-dialog"
+            aria-label="关闭"
+          >
+            <svg><use href="#i-x" /></svg>
+          </button>
+        </div>
+        <div class="form-body">
+          <label
+            >任务名称 <span class="required">*</span
+            ><input
+              name="title"
+              required
+              maxlength="160"
+              placeholder="例如：为 API 增加健康检查接口"
+              autofocus
+          /></label>
+          <label
+            >开发需求 <span class="required">*</span
+            ><textarea
+              name="requirement"
+              rows="5"
+              required
+              maxlength="32000"
+              placeholder="描述你想实现的功能、约束和完成标准…"
+            ></textarea>
+          </label>
+          <label
+            >项目目录 <span class="required">*</span
+            ><input
+              name="cwd"
+              required
+              placeholder="/path/to/your/project"
+            /><small>执行器将在此目录中修改代码。</small></label
+          >
+          <div class="form-grid">
+            <label
+              >执行器<select
+                name="provider"
+                id="provider-select"
+              ></select></label
+            ><label
+              >独立审查器<select name="reviewer" id="reviewer-select"></select
+            ></label>
+          </div>
+          <div id="provider-hint" class="form-hint"></div>
+          <details class="advanced">
+            <summary>执行配置与验收标准<span>可选</span></summary>
+            <div class="advanced-body">
+              <div class="form-grid">
+                <label
+                  >执行模型<input
+                    name="model"
+                    maxlength="200"
+                    placeholder="使用执行器默认模型" /></label
+                ><label
+                  >审查模型<input
+                    name="reviewer_model"
+                    maxlength="200"
+                    placeholder="使用审查器默认模型"
+                /></label>
+              </div>
+              <label id="paseo-field" hidden
+                >Paseo 后端<input
+                  name="paseo_backend"
+                  value="claude"
+                  maxlength="200" /></label
+              ><label
+                >验收命令<textarea
+                  name="checks"
+                  rows="3"
+                  placeholder="每行一条，例如：&#10;python -m unittest discover -s tests&#10;git diff --check"
+                ></textarea
+                ><small
+                  >由监督器在项目目录执行，用于确认交付结果。</small
+                ></label
+              >
+              <div class="form-grid thirds">
+                <label
+                  >运行预算（分钟）<input
+                    type="number"
+                    name="max_runtime_minutes"
+                    min="0"
+                    max="43200"
+                    value="120"
+                    required /></label
+                ><label
+                  >模型调用上限<input
+                    type="number"
+                    name="max_agent_calls"
+                    min="0"
+                    max="100000"
+                    value="100"
+                    required /></label
+                ><label
+                  >执行轮次上限<input
+                    type="number"
+                    name="max_rounds"
+                    min="0"
+                    max="100000"
+                    value="0"
+                    required
+                /></label>
+              </div>
+              <small>上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
+            </div>
+          </details>
+          <label class="checkbox-label"
+            ><input type="checkbox" name="auto_start" checked /><span
+              >创建后立即启动<small>关闭后保存为待启动任务。</small></span
+            ></label
+          >
+          <div id="form-error" class="form-error" role="alert" hidden></div>
+        </div>
+        <div class="dialog-footer">
+          <button
+            type="button"
+            class="button secondary"
+            data-close="create-dialog"
+          >
+            取消</button
+          ><button type="submit" class="button primary" id="create-submit">
+            <svg><use href="#i-plus" /></svg>创建并启动任务
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="detail-dialog" class="detail-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="eyebrow">TASK WORKSPACE</span>
+          <h2 id="detail-title">任务详情</h2>
+          <p id="detail-project"></p>
+        </div>
+        <button
+          class="icon-button"
+          data-close="detail-dialog"
+          aria-label="关闭"
+        >
+          <svg><use href="#i-x" /></svg>
+        </button>
+      </div>
+      <div class="detail-live" id="detail-live"></div>
+      <div class="detail-body" id="detail-body"></div>
+      <div class="log-section">
+        <div class="log-heading">
+          <h3>
+            <svg><use href="#i-terminal" /></svg>执行日志
+          </h3>
+          <select id="log-select" aria-label="选择日志文件"></select
+          ><label class="log-follow"
+            ><input type="checkbox" id="log-follow" checked />跟随输出</label
+          >
+        </div>
+        <pre id="log-output" tabindex="0">加载中…</pre>
+        <small>展示所选日志末尾 64 KiB，自动更新。</small>
+      </div>
+      <div class="dialog-footer" id="detail-actions"></div>
+    </dialog>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <div class="dialog-heading"><h2>停止当前任务？</h2></div>
+      <p>监督器会终止当前执行并保存状态。之后可以从检查点恢复。</p>
+      <div class="dialog-footer">
+        <button class="button secondary" data-close="confirm-dialog">
+          返回</button
+        ><button class="button danger" id="confirm-stop">停止任务</button>
+      </div>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

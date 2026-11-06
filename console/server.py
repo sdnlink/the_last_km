@@ -109,7 +109,10 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.strip('/').split('/')
                 if len(parts) != 4 or parts[:2] != ['api', 'tasks']:
                     raise TaskError('接口不存在', 404)
-                self._json(self.server.store.action(parts[2], parts[3]))
+                if parts[3] == 'directions':
+                    self._json(self.server.store.add_direction(parts[2], data), 201)
+                else:
+                    self._json(self.server.store.action(parts[2], parts[3]))
         except (TaskError, OSError, ValueError) as exc:
             self._error(exc)
 

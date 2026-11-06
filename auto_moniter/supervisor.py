@@ -53,6 +53,7 @@ from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
 from auto_moniter.live import LiveOutput
+from auto_moniter.directions import Directions
 
 
 LogFn = Callable[[str], None]
@@ -215,6 +216,8 @@ class Supervisor:
         self._pruned_worker_rounds = 0
         self._pruned_records = 0
         self._pruned_failures = {"worker": 0, "reviewer": 0}
+        self.directions = Directions(self.run_dir)
+        self._direction_ids = {'worker': [], 'reviewer': []}
 
     def request_stop(self) -> None:
         self._stop = True
@@ -907,6 +910,10 @@ class Supervisor:
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
+        if self._pending_directions():
+            verdict.status = 'continue'
+            verdict.gaps.append('New human instructions arrived after the worker started. Implement and review them before accepting delivery.')
+            return False
         before = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         if expected_tree and before != expected_tree:
             self.modules.invalidate(before)
@@ -966,7 +973,14 @@ class Supervisor:
             verdict.next_actions.append("Fix the failed acceptance checks. Do not weaken or bypass their assertions; the monitor will rerun them before delivery.")
             return False
         self._delivery_tree = before
+        if self._pending_directions():
+            verdict.status = 'continue'
+            verdict.next_actions.append('Read the new human instructions before the next delivery attempt.')
+            return False
         return not self._stop
+
+    def _pending_directions(self) -> bool:
+        return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
 
     def _verdict_from_turn(self, turn: "_CompletedTurn", *, role: str) -> Verdict:
         verdict = parse_verdict(turn.text, structured=turn.structured)
@@ -1006,6 +1020,8 @@ class Supervisor:
                 "Continue all work possible within the authorized scope, investigate alternatives, "
                 "and recheck unavailable dependencies. Do not invent credentials or claim incomplete work is deliverable."
             )
+        if not verdict.parse_error and not turn.interruption:
+            self.directions.receipt(self._direction_ids[role], role, max(1, self._next_round - 1), responded=True)
         return verdict
 
     def _finish(
@@ -1015,6 +1031,13 @@ class Supervisor:
         records: list[RoundRecord],
         verdict: Verdict | None,
     ) -> RunReport:
+        with self.directions.lock():
+            return self._finish_locked(status, summary, records, verdict)
+
+    def _finish_locked(self, status: str, summary: str, records: list[RoundRecord],
+                       verdict: Verdict | None) -> RunReport:
+        if status == 'done' and self._pending_directions():
+            status, summary = 'action_required', 'New human instructions arrived during delivery. Resume to implement them.'
         self._prune_history(records)
         if status != "done":
             errors = self._stop_external_agent()
@@ -1122,6 +1145,7 @@ class Supervisor:
         state = {
             "cwd": str(self.config.cwd),
             "state_version": 1,
+            "directions_version": 1,
             "baseline_file": baseline_path.name,
             "baseline_count": len(getattr(self, "_baseline_files", {})),
             "acceptance": self.config.acceptance,
@@ -1530,12 +1554,26 @@ class Supervisor:
         state["usage"] = self._usage()
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
+        messages = self.directions.messages()
+        self._direction_ids[role] = [item['id'] for item in messages]
+        if messages:
+            prompt += "\n\nLatest instructions from the human managing this task (in chronological order):\n"
+            prompt += json.dumps(messages, ensure_ascii=False, indent=2)
+            prompt += ("\nApply these instructions to priorities and implementation within the authorized project. "
+                       "Explicitly report how you addressed them and any conflict with the saved requirement, module acceptance or checks. "
+                       "Do not silently discard requirements, weaken checks, or claim an instruction is satisfied without evidence. "
+                       "The reviewer must independently check the amended work.\n")
         prompt_path.write_text(prompt, encoding="utf-8")
         started = time.monotonic()
         self._beat(f"round {index}: {role} pid pending")
         prepared = PreparedCommand([])
         completed = False
         live_output = LiveOutput(self.run_dir, role, index, provider.name)
+        def on_started(child):
+            self._remember_child(child)
+            self.directions.receipt(self._direction_ids[role], role, index)
+            if messages:
+                live_output.emit({'kind': 'direction', 'text': f'已向本轮 AI 发送 {len(messages)} 条用户补充要求'})
         try:
             if session_id and provider.resume_supported:
                 prepared = provider.resume_command(
@@ -1554,7 +1592,7 @@ class Supervisor:
             result = run_command(
                 prepared, self.config.cwd, timeout_s=self.config.turn_timeout_s,
                 idle_timeout_s=self.config.idle_timeout_s,
-                on_child=self._remember_child, heartbeat=self._heartbeat,
+                on_child=on_started, heartbeat=self._heartbeat,
                 heartbeat_note=f"round {index}: {role} running",
                 should_stop=self._should_stop,
                 max_output_bytes=self.config.max_output_bytes,

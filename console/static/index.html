@@ -228,6 +228,47 @@
             查看详情<svg><use href="#i-arrow" /></svg>
           </button>
         </section>
+        <section class="panel all-tasks-panel" id="all-tasks-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>
+                全部任务工作状态
+                <span id="board-count" class="count-badge">0</span>
+              </h2>
+              <p>
+                同时查看各任务当前工作、最新结果和待处理要求，点击卡片进入交互。
+              </p>
+            </div>
+            <label class="board-search"
+              ><input
+                id="board-search"
+                type="search"
+                placeholder="搜索任务 / 项目"
+                aria-label="搜索全部任务状态"
+            /></label>
+          </div>
+          <div id="discovery-note" class="discovery-note" hidden></div>
+          <div id="task-board" class="task-board"></div>
+        </section>
+        <section class="panel all-feed-panel" id="all-feed-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>实时交互结果</h2>
+              <p>
+                汇总所有任务的进度说明、命令与结果。点击任务名定位对应项目。
+              </p>
+            </div>
+            <label class="feed-filter"
+              ><select id="feed-kind" aria-label="筛选交互类型">
+                <option value="all">全部交互</option>
+                <option value="message">AI 进度说明</option>
+                <option value="tool">命令与工具结果</option>
+                <option value="error">异常与监督事件</option>
+              </select></label
+            >
+          </div>
+          <ol id="all-activity" class="all-activity"></ol>
+        </section>
         <section class="panel live-panel" id="live-panel">
           <div class="panel-heading">
             <div>
@@ -242,6 +283,12 @@
                 aria-label="选择查看实时进展的项目"
               ></select
             ></label>
+          </div>
+          <div class="selected-task-bar">
+            <strong id="selected-task-title">所选任务</strong
+            ><button class="button secondary small-button" id="open-direction">
+              补充要求 / 调整方向
+            </button>
           </div>
           <div id="live-content" class="live-content">
             <p class="muted">正在读取项目进展…</p>
@@ -531,6 +578,11 @@
         </button>
       </div>
       <div class="detail-live" id="detail-live"></div>
+      <div class="detail-direction-action">
+        <button class="button primary" id="detail-open-direction">
+          补充要求 / 调整方向
+        </button>
+      </div>
       <div class="detail-body" id="detail-body"></div>
       <div class="log-section">
         <div class="log-heading">
@@ -546,6 +598,66 @@
         <small>展示所选日志末尾 64 KiB，自动更新。</small>
       </div>
       <div class="dialog-footer" id="detail-actions"></div>
+    </dialog>
+    <dialog id="direction-dialog" class="direction-dialog">
+      <form id="direction-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">TASK CONVERSATION</span>
+            <h2>补充要求 / 调整方向</h2>
+            <p id="direction-task-title"></p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close="direction-dialog"
+            aria-label="关闭"
+          >
+            <svg><use href="#i-x" /></svg>
+          </button>
+        </div>
+        <div class="form-body">
+          <p id="direction-delivery" class="direction-delivery"></p>
+          <div id="direction-history" class="direction-history"></div>
+          <label
+            >你的新要求<textarea
+              id="direction-text"
+              name="text"
+              rows="5"
+              maxlength="4000"
+              required
+              placeholder="例如：先完善登录失败和权限拒绝的处理，再进行页面优化；请说明修改依据并运行相关测试。"
+            ></textarea
+            ><small
+              >补充内容会保留在任务中，并发送给后续执行器及审查器。</small
+            ></label
+          >
+          <label class="checkbox-label" id="direction-pause-label"
+            ><input id="direction-pause" type="checkbox" /><span
+              >提交后在当前轮次结束时暂停<small
+                >先保存新方向，暂停后可确认结果再恢复执行。</small
+              ></span
+            ></label
+          >
+          <div
+            id="direction-error"
+            class="form-error"
+            role="alert"
+            hidden
+          ></div>
+        </div>
+        <div class="dialog-footer">
+          <button
+            type="button"
+            class="button secondary"
+            data-close="direction-dialog"
+          >
+            关闭</button
+          ><button type="submit" class="button primary" id="direction-submit">
+            发送补充要求
+          </button>
+        </div>
+      </form>
     </dialog>
     <dialog id="confirm-dialog" class="confirm-dialog">
       <div class="dialog-heading"><h2>停止当前任务？</h2></div>

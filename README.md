@@ -511,7 +511,29 @@ auto-moniter run \
 
 ## 安全
 
-工人默认使用各自 CLI 的非交互、自动批准模式。Paseo 的 Claude 工人默认使用 `bypass`，Codex 工人默认使用 `full-access`，其他后端保留其默认模式。`--mode` 可覆盖工人默认模式，选择交互批准模式可能触发等待输入后的重试。`--reviewer-mode` 仅允许只读或 plan 模式，`--reviewer-extra-arg` 不允许覆盖权限、配置、工作目录、后端或会话。审查模式及 Paseo 的隔离限制见上表。只在你信任的仓库里运行。监督器不会替 agent 做 git 提交或推送。
+工人默认使用各自 CLI 的非交互、自动批准模式。Paseo 的 Claude 工人默认使用 `bypass`，Codex 工人默认使用 `full-access`，其他后端保留其默认模式。`--mode` 可覆盖工人默认模式，选择交互批准模式可能触发等待输入后的重试。`--reviewer-mode` 仅允许只读或 plan 模式，`--reviewer-extra-arg` 不允许覆盖权限、配置、工作目录、后端或会话。审查模式及 Paseo 的隔离限制见上表。只在你信任的仓库里运行。监督器在目标项目仓库的专用分支逐轮提交改动与结论，不执行推送。
+
+### 目标项目中的 Git 追溯与审核
+
+默认 `--git-history auto`：目标目录属于 Git 仓库时，监督器创建 `auto-moniter/<运行标识>` 分支并保存项目初始工作区基线。每个 worker 轮次返回后，源码快照和工作结论一起写入该分支；失败、中断及无源码改动的轮次同样留下结论提交。结论文件位于目标项目的 `.auto-moniter/history/<运行标识>/NNN-worker.json`，包含原始需求、本轮收到的补充要求、结果、证据、退出状态和脱敏后的原始结论。运行目录的 `state.json`、`report.json` 及 Web 控制台均可查到分支、前后提交号和 diff 命令。
+
+```bash
+# 强制要求目标项目可保存 Git 历史
+auto-moniter run '实现需求' -C /path/to/project --provider codex --reviewer codex --git-history required
+
+# 在目标项目中使用页面或 state.json 给出的实际标识
+git log --oneline auto-moniter/<运行标识>
+git show <worker提交>:.auto-moniter/history/<运行标识>/001-worker.json
+git diff <本轮基线提交> <worker提交> -- . ':(exclude).auto-moniter'
+```
+
+reviewer 在目标项目目录审核两个实际 Git diff：本轮基线到 worker 提交，以及运行初始基线到该提交。新增文件和删除也包含在提交中。监督器执行 diff 并提供变更摘要和补丁片段，要求 reviewer 执行对应命令、对照原始需求及补充要求核对实现。审核通过的证据须包含本次 worker 的完整提交号及有效变更文件；缺少提交号不能交付。审核结论随后写入 `NNN-reviewer.json` 并独立提交，关联其审核的 worker 提交。审核触发频率仍由 `--review-every` 控制；每轮 worker 都保存 Git 记录。
+
+监督器使用独立临时索引写入上述分支，当前检出的分支、HEAD 及用户暂存区保持原状。开始运行前已有的修改计入输入基线，轮次 diff 只显示随后发生的改动。源码选择沿用工作区验收规则，排除 Git 忽略文件及运行、构建目录；审计结论不作为业务源码变更证据。该分支是源码快照的审计历史，合并到业务分支仍由项目自己的交付流程完成。
+
+恢复执行继续使用原分支和轮次编号；分支被外部移动、检查点领先运行状态或提交失败时停止并报告，避免覆盖历史或以未留痕结果交付。`--keep-rounds` 只清理运行日志窗口，Git 中的轮次提交和项目内结论文件继续保留，需按目标仓库的磁盘容量管理。旧版运行在升级后恢复时从当前工作区建立基线，过去轮次不会补造 Git 记录。
+
+非 Git 目录在 `auto` 模式下继续原流程；使用 `required` 可在执行前拒绝此类项目。`--git-history off` 显式关闭新运行的 Git 留痕，已留痕运行恢复时禁止关闭。
 
 审查员只能读取工作区和已有验证证据，不负责实现修复或执行会生成文件的构建、测试。需要修改代码或补充验证时，reviewer 返回缺口，由 worker 完成后再审查。监督器只检查审查前后指纹，不保存文件副本；检测到变化立即停止，保留现场供检查。原生 Codex 使用只读沙箱，其他支持后端使用 plan 权限模式，各后端的隔离能力取决于其 CLI。验收证据必须指向项目内的真实变更文件，运行日志及指向项目外的符号链接不能作为证据。
 

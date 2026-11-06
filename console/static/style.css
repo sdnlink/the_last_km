@@ -1827,6 +1827,21 @@ body:has(dialog[open]) {
 .live-plan .completed {
   color: var(--accent);
 }
+.git-history, .git-history-empty {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: #f2f7fc;
+  border: 1px solid #dbe6f1;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+  color: #405775;
+  font-size: 12px;
+}
+.git-history summary { cursor: pointer; font-weight: 600; color: #285987; }
+.git-history p { margin: 8px 0; }
+.git-history pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #fff; padding: 10px; border-radius: 6px; }
+.git-history ol { margin: 10px 0; padding-left: 20px; }
+.git-history li { padding: 10px 0; border-top: 1px solid #dbe6f1; }
 .live-review {
   margin-top: 17px;
   padding: 12px 14px;

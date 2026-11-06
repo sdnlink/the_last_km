@@ -48,6 +48,7 @@ def parse_time(value: str) -> datetime | None:
 
 
 EVENT_LABELS = {
+    'git_checkpoint': '项目 Git 记录已保存',
     'agent_start': '开始执行', 'review_checkpoint': '提交独立审查', 'agent_failure': '执行异常，准备重试',
     'audit_issues_reported': '审查发现待解决问题', 'audit_issues_resolved': '审查问题已解决',
     'module_accepted': '模块通过验收', 'modules_invalidated': '模块需要重新验收',
@@ -166,6 +167,9 @@ class ActivityReader:
                 text += f"（退出码 {event.get('exit', '?')}）：{event.get('command', '')}"
             elif name == 'run_finished':
                 text += '：' + str(event.get('summary') or event.get('status') or '')
+            elif name == 'git_checkpoint':
+                text += f"：第 {event.get('round', '?')} 轮 " + ('reviewer' if event.get('role') == 'reviewer' else 'worker')
+                text += '\n' + str(event.get('commit', '')) + '\n' + str(event.get('ref', ''))
             activity.append({'at': event.get('at', ''), 'kind': 'phase', 'text': text,
                              'role': event.get('role', ''), 'round': event.get('round', '')})
         activity.sort(key=lambda item: (parse_time(item.get('at', '')) or datetime.min.replace(tzinfo=timezone.utc)))

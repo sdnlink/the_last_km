@@ -35,6 +35,8 @@ def validate(config) -> None:
         raise ValueError("Unknown review isolation mode")
     if config.worker_isolation not in {"provider", "strict"}:
         raise ValueError("Unknown worker isolation mode")
+    if config.git_history not in {'auto', 'required', 'off'}:
+        raise ValueError('Unknown Git history mode')
     for name in ("memory_bytes", "file_bytes", "max_run_bytes"):
         if not isinstance(getattr(config, name), int) or getattr(config, name) < 0:
             raise ValueError(f"Invalid {name}")

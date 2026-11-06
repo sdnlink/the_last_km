@@ -239,6 +239,9 @@ class TaskStore:
         delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
         if active and state.get('directions_version') != 1:
             delivery = 'restart_required'
+        rounds = state.get('rounds')
+        if not isinstance(rounds, list):
+            rounds = state.get('records') or []
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
@@ -250,6 +253,10 @@ class TaskStore:
                      'modules': modules, 'accepted_modules': accepted, 'total_modules': len(modules),
                      'summary': state.get('summary') or (state.get('last_worker') or {}).get('summary', ''),
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),
+                     'git_history': state.get('git_history', {'enabled': False}),
+                     'git_checkpoints': [{**item['git_checkpoint'], 'summary': item.get('summary', ''),
+                                          'status': item.get('status', '')}
+                                         for item in rounds[-20:] if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
                      'activity': progress,
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
@@ -367,6 +374,7 @@ class TaskStore:
     def _new_args(self, meta: dict) -> list[str]:
         argv = ['run', '--cwd', meta['cwd'], '--run-dir', meta['run_dir'],
                 '--provider', meta['provider'], '--reviewer', meta['reviewer'],
+                '--git-history', 'required',
                 '--max-runtime', str(meta['max_runtime_minutes'] * 60),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
         for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend')]:

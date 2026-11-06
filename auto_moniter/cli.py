@@ -64,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start a new reviewer session every round (default). --no-fresh-review resumes it.",
     )
     run.add_argument("--resume", action="store_true", help="Continue an existing --run-dir instead of starting over")
+    run.add_argument('--git-history', choices=('auto', 'required', 'off'), default='auto',
+                     help='Checkpoint each worker/reviewer conclusion in the project Git repository (default: auto)')
     run.add_argument("--guard", action="store_true", help="Run a parent guardian that resumes the monitor after an unexpected exit")
     run.add_argument("--guard-restarts", type=_nonnegative_int, default=3, help="Maximum automatic monitor restarts, cumulative on resume (default: 3)")
     run.add_argument("--guard-delay", default="5s", help="Initial guardian restart delay; backs off to 60s (default: 5s)")
@@ -273,6 +275,7 @@ def _run(args: argparse.Namespace) -> int:
         check_timeout_s=_parse_duration(args.check_timeout) if args.check_timeout is not None else None,
         restart_after_stall=args.restart_after_stall,
         review_every=args.review_every,
+        git_history=args.git_history,
         modules=definitions(json.loads(args.modules.expanduser().read_text(encoding="utf-8"))) if args.modules else [],
         max_runtime_s=_parse_duration(args.max_runtime),
         max_agent_calls=args.max_agent_calls,

@@ -54,6 +54,7 @@ from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
+from auto_moniter.git_history import GitHistory, GitHistoryError
 
 
 LogFn = Callable[[str], None]
@@ -107,6 +108,7 @@ class RunConfig:
     file_bytes: int = 0
     max_run_bytes: int = 0
     review_every: int | None = None
+    git_history: str = 'auto'
 
 
 @dataclass
@@ -122,6 +124,7 @@ class RoundRecord:
     tree: str = ""
     failure: str = ""
     interruption: str = ""
+    git_checkpoint: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -133,6 +136,7 @@ class RunReport:
     records: list[RoundRecord] = field(default_factory=list)
     session_id: str = ""
     reviewer_session_id: str = ""
+    git_history: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +146,7 @@ class RunReport:
             "stop_reason": self.stop_reason,
             "session_id": self.session_id,
             "reviewer_session_id": self.reviewer_session_id,
+            "git_history": self.git_history,
             "records": [
                 {
                     "index": record.index,
@@ -164,6 +169,7 @@ class RunReport:
                     "tree": record.tree,
                     "failure": record.failure,
                     "interruption": record.interruption,
+                    "git_checkpoint": record.git_checkpoint,
                 }
                 for record in self.records
             ],
@@ -218,6 +224,8 @@ class Supervisor:
         self._pruned_failures = {"worker": 0, "reviewer": 0}
         self.directions = Directions(self.run_dir)
         self._direction_ids = {'worker': [], 'reviewer': []}
+        self.git_history: GitHistory | None = None
+        self._git_before = ''
 
     def request_stop(self) -> None:
         self._stop = True
@@ -236,9 +244,11 @@ class Supervisor:
                 if self._resume_refused or loaded is None:
                     return RunReport("invalid", 0, "Run is not resumable; no cleanup attempted.", "invalid")
                 self._records = loaded[0]
+                if (self.run_dir / 'git-history.json').exists():
+                    self.git_history = GitHistory.open(self.config.cwd, self.run_dir, self.config.git_history)
                 self._recover_interrupted_run()
                 return self._finish("stopped", reason, self._records, None)
-        except (OSError, ValueError, TypeError, AttributeError, RecoveryError, LockError) as exc:
+        except (OSError, ValueError, TypeError, AttributeError, RecoveryError, LockError, GitHistoryError) as exc:
             return RunReport("recovery_failed", 0, f"Could not stop interrupted work: {exc}", "recovery_failed")
 
     def run(self) -> RunReport:
@@ -330,6 +340,11 @@ class Supervisor:
             self.config.requirement = saved
         if not hasattr(self, "_baseline_files"):
             self._baseline_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+        self.git_history = GitHistory.open(self.config.cwd, self.run_dir, self.config.git_history)
+        if self.git_history:
+            if (self.git_history.last_worker and self.git_history.last_worker['round'] >= self._next_round):
+                raise RecoveryError('Git checkpoint is ahead of run state; reconcile the saved round before resuming')
+            self.log(f'project Git history: {self.git_history.ref}')
         self.log(f"run directory: {self.run_dir}")
         self.log(f"worker: {self.config.provider.name}")
         reviewer = None if self.config.no_review else self.config.reviewer
@@ -376,6 +391,8 @@ class Supervisor:
             self._check_budget(new_call=True)
             self._next_round = round_index + 1
             self._beat(f"round {round_index}: starting worker")
+            if self.git_history:
+                self._git_before = self.git_history.begin_round(round_index)
 
             worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
             self.log(f"round {round_index}: worker running")
@@ -396,8 +413,6 @@ class Supervisor:
                 self.log(f"round {round_index}: no worker session id; the next round starts a new session")
             verdict = self._verdict_from_turn(turn, role="worker")
             self._rounds_since_review += 1
-            if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
-                self._merge_modules(verdict)
             tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
             reopened = self.audit.invalidate(tree)
             if reopened:
@@ -420,6 +435,10 @@ class Supervisor:
                 interruption=turn.interruption,
             )
             records.append(record)
+            if self.git_history:
+                self._checkpoint(record, turn.text, self._git_before)
+            if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
+                self._merge_modules(verdict)
             self._write_state(records, "running", stall, previous_gap_key, tree)
             self.log(
                 f"round {round_index}: worker status={verdict.status} "
@@ -571,6 +590,12 @@ class Supervisor:
                     raise RuntimeError("Could not close Paseo reviewer; stop before starting another worker round.")
                 self._active_reviewer_id = ""
             review = self._verdict_from_turn(review_turn, role="reviewer")
+            if self.git_history and _accepted(review):
+                git_problems = self.git_history.review_problems(review.evidence)
+                if git_problems:
+                    review.status = 'continue'
+                    review.gaps.extend(git_problems)
+                    review.next_actions.append('Review the exact worker Git checkpoint and cite its full hash in evidence.')
             if not review_turn.exit_code and not review_turn.timed_out and not review_turn.interruption and not review.parse_error:
                 self._merge_modules(review)
             review_failure = _failure_reason(review_turn, review)
@@ -581,9 +606,12 @@ class Supervisor:
                     self._record_audit(review, verdict, round_index, review_tree)
                 except AuditCapacityError as exc:
                     self._audit_feedback = review
-                    records.append(RoundRecord(round_index, "reviewer", review, review_turn.exit_code,
-                                               review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
-                                               str(review_turn.output_path), tree=tree))
+                    capacity_record = RoundRecord(round_index, "reviewer", review, review_turn.exit_code,
+                                                  review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
+                                                  str(review_turn.output_path), tree=tree)
+                    records.append(capacity_record)
+                    if self.git_history:
+                        self._checkpoint(capacity_record, review_turn.text, self.git_history.last_worker['commit'])
                     raise BudgetExceeded(str(exc)) from exc
                 except ValueError as exc:
                     review.status = "continue"
@@ -607,6 +635,8 @@ class Supervisor:
                 interruption=review_turn.interruption,
             )
             records.append(review_record)
+            if self.git_history:
+                self._checkpoint(review_record, review_turn.text, self.git_history.last_worker['commit'])
             self._write_state(records, "running", stall, previous_gap_key, tree)
             self.log(
                 f"round {round_index}: reviewer status={review.status} gaps={len(review.gaps)} "
@@ -811,6 +841,16 @@ class Supervisor:
             self._event("audit_issues_resolved", issues=closed, tree=tree)
             if open_before.intersection(closed) - {item["id"] for item in self.audit.pending()}:
                 self._progress_reset = True
+
+    def _checkpoint(self, record: RoundRecord, raw: str, before: str) -> None:
+        data = RunReport('', 0, '', '', [record]).to_dict()['records'][0]
+        data['requirement'] = self.config.requirement
+        data['acceptance'] = self.config.acceptance
+        data['directions'] = [item for item in self.directions.messages()
+                              if item['id'] in self._direction_ids[record.role]]
+        record.git_checkpoint = self.git_history.record(record.index, record.role, data, before=before, raw=raw)
+        self._event('git_checkpoint', role=record.role, round=record.index,
+                    commit=record.git_checkpoint['commit'], ref=self.git_history.ref)
 
     def _merge_modules(self, verdict: Verdict) -> None:
         try:
@@ -1064,6 +1104,7 @@ class Supervisor:
             records=records,
             session_id=self.worker_session_id,
             reviewer_session_id=self.reviewer_session_id,
+            git_history=self.git_history.export() if self.git_history else {'enabled': False},
         )
         if verdict and verdict.blockers and status == "blocked":
             report.summary = summary + " Blockers: " + "; ".join(verdict.blockers)
@@ -1146,6 +1187,7 @@ class Supervisor:
             "cwd": str(self.config.cwd),
             "state_version": 1,
             "directions_version": 1,
+            "git_history": self.git_history.export() if self.git_history else {'enabled': False},
             "baseline_file": baseline_path.name,
             "baseline_count": len(getattr(self, "_baseline_files", {})),
             "acceptance": self.config.acceptance,
@@ -1526,6 +1568,7 @@ class Supervisor:
                 "",
                 "Workspace diff:",
                 workspace_diff(self.config.cwd, ignore_dir=self.run_dir),
+                self.git_history.review_context() if self.git_history else '',
                 "",
                 f"Worker transcript: {output_path}",
                 "",
@@ -1555,6 +1598,11 @@ class Supervisor:
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
         messages = self.directions.messages()
+        if role == 'worker' and self.git_history:
+            prompt += ('\n\nThe monitor records your conclusion and actual source changes in the target repository '
+                       f'on {self.git_history.ref} after this turn. Keep edits in {self.config.cwd}. '
+                       'Do not alter .auto-moniter/history, the audit branch, or previous audit records. '
+                       'Report changed files, actual validation results, remaining gaps and failures precisely.\n')
         self._direction_ids[role] = [item['id'] for item in messages]
         if messages:
             prompt += "\n\nLatest instructions from the human managing this task (in chronological order):\n"
@@ -1870,6 +1918,7 @@ def _record_from_state(item: dict) -> RoundRecord:
         tree=str(item.get("tree") or ""),
         failure=str(item.get("failure") or ""),
         interruption=str(item.get("interruption") or ""),
+        git_checkpoint=dict(item.get('git_checkpoint') or {}),
     )
 
 

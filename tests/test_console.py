@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ class ConsoleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.project = self.root / 'project'
         self.project.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True, capture_output=True)
         self.env = patch.dict(os.environ, {'AUTO_MONITER_STATE_DIR': str(self.root / 'state')})
         self.env.start()
         self.store = TaskStore(self.root / 'data', self.project)
@@ -166,6 +168,9 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'仍在�
             self.wait_for(lambda: self.store.detail(ident)['status'] == 'paused')
             paused = self.store.detail(ident)
             self.assertGreater(paused['resources']['process_count'], 0)
+            self.assertTrue(paused['git_history']['enabled'])
+            self.assertTrue(paused['git_checkpoints'][0]['commit'])
+            self.assertEqual(paused['git_checkpoints'][0]['role'], 'worker')
             self.store.action(ident, 'continue')
             self.wait_for(lambda: self.store.detail(ident)['status'] == 'running')
             self.store.action(ident, 'stop')

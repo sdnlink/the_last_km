@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -66,6 +67,7 @@ class ImportedTaskControlTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.project = self.root / 'project'
         self.project.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True, capture_output=True)
         binaries = self.root / 'bin'
         binaries.mkdir()
         agent = binaries / 'codex'

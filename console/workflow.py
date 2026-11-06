@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 
+from console.conclusions import present_conclusion
+
 
 def conclusion_event(event: dict) -> bool:
     """Native providers sometimes publish their final JSON as a public message."""
@@ -64,14 +66,13 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
     rounds = state.get('rounds')
     if not isinstance(rounds, list):
         rounds = state.get('records') or []
-    conclusions = [{key: item.get(key) for key in ('index', 'role', 'status', 'summary', 'done', 'gaps',
-                    'next_actions', 'evidence', 'blockers', 'exit_code', 'elapsed_s', 'git_checkpoint')}
+    conclusions = [present_conclusion(item)
                    for item in rounds[-40:] if item.get('role') in {'worker', 'reviewer'}]
     # Older/pruned runs still expose their latest business conclusions.
     for role in ('worker', 'reviewer'):
         last_key = 'last_worker' if role == 'worker' else 'last_review'
         if not any(item['role'] == role for item in conclusions) and state.get(last_key):
-            conclusions.append({**state[last_key], 'role': role, 'index': None})
+            conclusions.append(present_conclusion({**state[last_key], 'role': role, 'index': None}))
     active = status in {'running', 'starting'}
     phase = health.get('phase')
     round_match = re.search(r'\bround (\d+):', health.get('activity', ''))

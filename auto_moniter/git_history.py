@@ -149,7 +149,11 @@ class GitHistory:
                         'result': data, 'raw_conclusion': clipped(raw)})
         write_json(path, payload, durable=True)
         tree = self._tree(path)
-        commit = self._commit(tree, f'Round {index} {role}: {data.get("status", "unknown")}\n\n' +
+        outcome = (data.get('watcher_result') or {}).get('status') if role == 'reviewer' else None
+        title = f'Round {index} {role}: {data.get("status", "unknown")}'
+        if outcome:
+            title += f'; audit {outcome}'
+        commit = self._commit(tree, title + '\n\n' +
                               str(safe(data.get('summary', '')))[:1000])
         changed = self.git('diff', '--no-ext-diff', '--no-textconv', '--relative', '--name-only', '-z', before, commit,
                            '--', '.', ':(exclude).auto-moniter').split(b'\0')

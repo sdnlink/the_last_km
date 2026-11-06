@@ -1,4 +1,17 @@
 import {$,$$,escape,duration,active,roleStatuses,timeLabel,stableHTML} from './ui.js';
+function checkpointHTML(id, c) {
+  const cp=c.git_checkpoint||c;
+  if(!cp.commit)return '';
+  const branch=(cp.ref||'').replace(/^refs\/heads\//,'');
+  return `<div class="conclusion-git"><button class="detail-button" data-id="${escape(id)}" data-git-record="${escape(cp.commit)}">查看本地提交 · ${escape(cp.commit.slice(0,12))} ↗</button><small>提交分支：${escape(branch||'未记录分支')}</small></div>`;
+}
+function watcherHTML(c) {
+  const result=c.watcher_result||{};
+  if(c.role!=='reviewer'||!result.status)return '';
+  const rejected=result.status==='rejected';
+  const text=rejected?'系统未接受审计项关闭，仍需复核':result.closed?.length?`watcher 已登记关闭 ${result.closed.join('、')}`:result.status==='applied'?'watcher 已记录本轮审计反馈':'本轮未应用审计项关闭';
+  return `<div class="watcher-outcome ${rejected?'rejected':'applied'}"><strong>${escape(text)}</strong>${result.reasons?.length?`<details><summary>查看系统处理原因</summary><ul>${result.reasons.map(r=>`<li>${escape(r)}</li>`).join('')}</ul></details>`:''}</div>`;
+}
 function gitHistoryHTML(task) {
   const history = task.git_history || {};
   if (!history.enabled)
@@ -6,7 +19,7 @@ function gitHistoryHTML(task) {
   const worker = history.last_worker || {};
   const checkpoints = (task.git_checkpoints || []).slice().reverse();
   const branch = (history.ref || "").replace(/^refs\/heads\//, "");
-  return `<details class="git-history" data-key="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary><p>每轮改动与工作结论保存在此分支，审核关联对应的 worker 提交。</p><div class="git-history-ref">分支 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p><code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
+  return `<details class="git-history" data-key="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary><p>每轮改动与工作结论保存在此分支，审核关联对应的 worker 提交。</p><div class="git-history-ref">分支 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p>${checkpointHTML(task.id,item)}<code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
 }
 function roleDetailsHTML(t) {
   return ["worker", "reviewer", "watcher"].map(name => {
@@ -22,7 +35,7 @@ function roleDetailsHTML(t) {
       facts.push(['周期审核', r.every_worker_rounds == null ? '未记录' : r.every_worker_rounds === 0 ? '仅完成候选及阻塞' : `每 ${r.every_worker_rounds} 轮`]);
       facts.push(['审核间隔已累计', r.rounds_since_review == null ? '未记录' : `${r.rounds_since_review} 轮${r.due ? ' · 已达到阈值' : ''}`]);
     }
-    return `<article class="role-card role-${name}" data-role="${name}"><div class="role-card-title"><strong>${name}</strong><span class="role-state ${escape(r.status)}">${escape(name === 'reviewer' && r.status === 'waiting' ? '等待 worker 结果' : roleStatuses[r.status] || r.status)}</span></div><h3>${titles[name]}</h3><p class="role-current">${escape(work)}</p><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl>${last ? `<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p></div>` : ""}<button class="detail-button" data-role-focus="${name}">查看${name === "watcher" ? "监督记录" : "工作记录"} ↓</button></article>`;
+    return `<article class="role-card role-${name}" data-role="${name}"><div class="role-card-title"><strong>${name}</strong><span class="role-state ${escape(r.status)}">${escape(name === 'reviewer' && r.status === 'waiting' ? '等待 worker 结果' : roleStatuses[r.status] || r.status)}</span></div><h3>${titles[name]}</h3><p class="role-current">${escape(work)}</p><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl>${last ? `<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p>${watcherHTML(last)}${checkpointHTML(t.id,last)}</div>` : ""}<button class="detail-button" data-role-focus="${name}">查看${name === "watcher" ? "监督记录" : "工作记录"} ↓</button></article>`;
   }).join("");
 }
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
@@ -47,7 +60,7 @@ function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true}
 function renderConclusions(t) {
   const items = [...(t.work?.conclusions || [])].reverse();
   if ($("#conclusion-count")) $("#conclusion-count").textContent = items.length;
-  const html = items.map(c=>`<article class="conclusion-item" data-conclusion-role="${escape(c.role)}"><div class="conclusion-heading"><span class="conclusion-role ${escape(c.role)}">${c.role === "reviewer" ? "reviewer · 审查结论" : "worker · 执行结论"}</span><span>${c.index == null ? "最近结论" : `第 ${escape(c.index)} 轮`}</span><span class="subtle-badge">${escape(c.status === "done" ? "完成" : c.status === "continue" ? "继续处理" : c.status)}</span></div><p class="conclusion-summary">${escape(c.summary)}</p>${[["已完成",c.done],["待解决",c.gaps],["下一步",c.next_actions],["阻塞",c.blockers]].filter(([,values])=>values?.length).map(([label,values])=>`<div class="conclusion-field"><strong>${label}</strong><ul>${values.map(v=>`<li>${escape(v)}</li>`).join("")}</ul></div>`).join("")}${c.evidence?.length ? `<details data-key="evidence-${escape(c.role)}-${escape(c.index)}"><summary>验证依据 · ${c.evidence.length} 项</summary><ul>${c.evidence.map(e=>`<li>${escape(e)}</li>`).join("")}</ul></details>` : ""}${c.git_checkpoint?.commit ? `<small class="conclusion-commit">Git 提交 ${escape(c.git_checkpoint.commit)}</small>` : ""}</article>`).join("") || '<p class="live-empty">尚无任务执行或审查结论。当前工作流会持续更新，轮次结束后在这里发布结论。</p>';
+  const html = items.map(c=>`<article class="conclusion-item" data-conclusion-role="${escape(c.role)}"><div class="conclusion-heading"><span class="conclusion-role ${escape(c.role)}">${c.role === "reviewer" ? "reviewer · 审查结论" : "worker · 执行结论"}</span><span>${c.index == null ? "最近结论" : `第 ${escape(c.index)} 轮`}</span><span class="subtle-badge">${escape(c.status === "done" ? "完成" : c.status === "continue" ? "继续处理" : c.status)}</span></div><p class="conclusion-summary">${escape(c.summary)}</p>${watcherHTML(c)}${c.reported_summary ? `<details><summary>reviewer 原始表述</summary><p>${escape(c.reported_summary)}</p></details>` : ""}${[["已完成",c.done],["待解决",c.gaps],["下一步",c.next_actions],["阻塞",c.blockers]].filter(([,values])=>values?.length).map(([label,values])=>`<div class="conclusion-field"><strong>${label}</strong><ul>${values.map(v=>`<li>${escape(v)}</li>`).join("")}</ul></div>`).join("")}${c.evidence?.length ? `<details data-key="evidence-${escape(c.role)}-${escape(c.index)}"><summary>验证依据 · ${c.evidence.length} 项</summary><ul>${c.evidence.map(e=>`<li>${escape(e)}</li>`).join("")}</ul></details>` : ""}${checkpointHTML(t.id,c)}</article>`).join("") || '<p class="live-empty">尚无任务执行或审查结论。当前工作流会持续更新，轮次结束后在这里发布结论。</p>';
   stableHTML($("#detail-conclusions"),html);
 }
 

@@ -34,6 +34,32 @@ class AcceptanceTests(unittest.TestCase):
             problems = acceptance_problems(root, ["notes.txt"], baseline=baseline, diff_text="only app.py")
         self.assertTrue(any("does not appear" in problem for problem in problems))
 
+    def test_line_references_with_chinese_annotations_remain_file_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / '说明（视图）.md'
+            target.write_text('before')
+            baseline = file_snapshot(root)
+            target.write_text('after')
+            for evidence in ['说明（视图）.md:694：流程已核对。', '说明（视图）.md：694：已核对',
+                             '说明（视图）.md:694同样要求校验', '当前变更文件 说明（视图）.md:694-700：已修复',
+                             '`说明（视图）.md:694:2`：已修复']:
+                with self.subTest(evidence=evidence):
+                    self.assertEqual(acceptance_problems(root, [evidence], baseline=baseline), [])
+
+    def test_annotations_do_not_allow_unchanged_or_outside_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / 'project'
+            project.mkdir()
+            (project / 'unchanged.md').write_text('old')
+            (root / 'outside.md').write_text('outside')
+            baseline = file_snapshot(project)
+            for evidence in ['unchanged.md:12：已核对', '../outside.md:12：已修复',
+                             'missing.md:12：已修复', '.auto-moniter/history/record.json:1：结论']:
+                with self.subTest(evidence=evidence):
+                    self.assertTrue(acceptance_problems(project, [evidence], baseline=baseline))
+
     def test_reviewer_writes_are_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

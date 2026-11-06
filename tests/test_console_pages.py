@@ -108,7 +108,7 @@ class ConsolePageTests(unittest.TestCase):
         self.assertIn('PRIVATE_RAW_LOG_CONTENT', logs)
 
     def test_page_assets_and_dialog_fragments_are_separate_and_allowlisted(self):
-        for path in ('/pages/overview.js', '/pages/progress.js', '/pages/work.css', '/fragments/create.html'):
+        for path in ('/pages/overview.js', '/pages/progress.js', '/pages/work.css', '/fragments/create.html', '/fragments/git.html'):
             self.assertEqual(self.get(path)[0], 200)
         for path in ('/pages/../server.py', '/fragments/../../README.md', '/pages/detail.html', '/index.html'):
             self.assertEqual(self.get(path)[0], 404)
@@ -116,4 +116,14 @@ class ConsolePageTests(unittest.TestCase):
         self.assertIn('import(', bootstrap)
         self.assertNotIn('function renderTasks', bootstrap)
         self.assertNotIn('setInterval', bootstrap)
+
+    def test_git_record_is_requested_separately_for_the_selected_task(self):
+        commit = 'a' * 40
+        with patch.object(self.store, 'git_record', return_value={'commit': commit}) as reader:
+            status, body = self.get('/api/tasks/' + self.task['id'] + '/git/' + commit)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['commit'], commit)
+        reader.assert_called_once_with(self.task['id'], commit)
+        _, detail = self.get('/tasks/' + self.task['id'])
+        self.assertNotIn('git-record-dialog', IdParser(detail).ids)
 

@@ -71,6 +71,7 @@ export function initialize() {
   $$('[data-nav]').forEach(el=>{el.classList.toggle('active',el.dataset.nav===nav);if(el.dataset.nav===nav)el.setAttribute('aria-current','page');});
   document.addEventListener('click',async e=>{
     const close=e.target.closest('[data-close]');if(close){$(`#${close.dataset.close}`)?.close();return;}
+    const gitRecord=e.target.closest('[data-git-record]');if(gitRecord){(await import('./dialogs.js')).openGitRecord(gitRecord.dataset.id,gitRecord.dataset.gitRecord);return;}
     const action=e.target.closest('[data-action]');if(action){if(action.dataset.action==='stop'){(await import('./dialogs.js')).confirmStop(action.dataset.id);}else runAction(action.dataset.id,action.dataset.action);return;}
     const direction=e.target.closest('[data-direction]');if(direction){(await import('./dialogs.js')).openDirection(direction.dataset.direction);return;}
     if(e.target.closest('#new-task,#empty-create')){(await import('./dialogs.js')).openCreate();return;}

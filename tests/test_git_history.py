@@ -9,6 +9,7 @@ from unittest.mock import patch
 from auto_moniter.git_history import GitHistory, GitHistoryError
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.workspace import evidence_paths, file_snapshot
+from console.git_records import GitRecordError, read_git_record
 from tests.test_supervisor import ScriptedProvider, _verdict
 
 
@@ -34,6 +35,30 @@ class GitProjectFixture(unittest.TestCase):
 
 
 class GitHistoryTests(GitProjectFixture):
+    def test_console_reads_immutable_git_object_and_preserves_worktree_and_index(self):
+        history = GitHistory.open(self.project, self.run)
+        (self.project / 'app.py').write_text('staged input\n')
+        git(self.project, 'add', 'app.py')
+        (self.project / 'app.py').write_text('unstaged input\n')
+        record = history.record(1, 'worker', {'summary': 'committed conclusion'}, before=history.begin_round(1))
+        (self.project / record['record']).write_text('tampered physical record')
+        before = [git(self.project, *args) for args in [('rev-parse', 'HEAD'), ('show', ':app.py'), ('diff',)]]
+        result = read_git_record(self.project, history.export(), record)
+        self.assertEqual(result['content']['result']['summary'], 'committed conclusion')
+        self.assertEqual(result['commit'], record['commit'])
+        self.assertEqual(result['current_branch'], git(self.project, 'symbolic-ref', '--short', 'HEAD').decode().strip())
+        self.assertIn(history.ref.rsplit('/', 1)[-1], result['log_command'])
+        after = [git(self.project, *args) for args in [('rev-parse', 'HEAD'), ('show', ':app.py'), ('diff',)]]
+        self.assertEqual(before, after)
+
+    def test_console_rejects_foreign_commit_path_or_record_identity(self):
+        history = GitHistory.open(self.project, self.run)
+        record = history.record(1, 'worker', {}, before=history.begin_round(1))
+        for override in ({'commit': git(self.project, 'rev-parse', 'HEAD').decode().strip()},
+                         {'record': '../app.py'}, {'round': 2}, {'role': 'reviewer'}, {'commit': '--all'}):
+            with self.subTest(override=override), self.assertRaises(GitRecordError):
+                read_git_record(self.project, history.export(), {**record, **override})
+
     def test_dirty_baseline_and_real_index_are_preserved(self):
         (self.project / 'app.py').write_text('staged input\n')
         git(self.project, 'add', 'app.py')
@@ -104,6 +129,7 @@ class GitHistoryTests(GitProjectFixture):
         prefix = sub.relative_to(self.project).as_posix() + '/'
         self.assertIn(b'"status": "continue"', git(self.project, 'show', second['commit'] + ':' + prefix + first['record']))
         self.assertNotIn(b'app.py', git(self.project, 'ls-tree', '-r', '--name-only', second['commit']))
+        self.assertEqual(read_git_record(sub, history.export(), first)['content']['round'], 1)
 
     def test_unborn_repository_and_plain_project_modes(self):
         plain = self.root / 'plain'
@@ -148,6 +174,44 @@ class DiffReviewer(ScriptedProvider):
 
 class GitSupervisorTests(GitProjectFixture):
     # Integration uses actual Git and local scripted processes; no model is called.
+    def test_review_commit_persists_accepted_and_rejected_watcher_decisions(self):
+        for rejected in (False, True):
+            with self.subTest(rejected=rejected):
+                run = self.project / ('rejected-run' if rejected else 'accepted-run')
+                # Ensure the run baseline differs from the worker's scripted output.
+                (self.project / 'app.py').write_text('before worker\n')
+                worker = ScriptedProvider('worker', [
+                    {'verdict': _verdict('done', evidence=['app.py']), 'touch': 'app.py'},
+                    {'verdict': _verdict('done', evidence=['app.py'])}])
+                conclusion = _verdict('done', evidence=['app.py'], closed=['AUD-1', 'AUD-2'])
+                conclusion['summary'] = 'AUD-1、AUD-2已独立复核关闭'
+                for proposal in conclusion['issue_resolutions']:
+                    proposal['evidence'] = ['missing.py:1：已核实' if rejected else 'app.py:1：已核实']
+                reviewer = DiffReviewer('reviewer', [
+                    {'verdict': _verdict('continue', gaps=['missing route', 'missing rejection check'], evidence=['app.py'])},
+                    {'verdict': conclusion}])
+                report = Supervisor(RunConfig('Implement', self.project, worker, reviewer=reviewer,
+                                              run_dir=run, max_rounds=2, retry_delay_s=0), log=lambda _: None).run()
+                self.assertEqual(report.status, 'max_rounds' if rejected else 'done', report.summary)
+                record = report.records[-1]
+                checkpoint = record.git_checkpoint
+                data = json.loads(git(self.project, 'show', checkpoint['commit'] + ':' + checkpoint['record']))
+                self.assertEqual(data['result']['summary'], conclusion['summary'])
+                outcome = data['result']['watcher_result']
+                self.assertEqual(outcome['status'], 'rejected' if rejected else 'applied')
+                self.assertEqual(outcome['closed'], [] if rejected else ['AUD-1', 'AUD-2'])
+                self.assertTrue(all(item['status'] == ('open' if rejected else 'resolved')
+                                    for item in data['result']['audit_issues']['items']))
+                state = json.loads((run / 'state.json').read_text())
+                self.assertEqual(state['rounds'][-1]['watcher_result'], outcome)
+                self.assertIn(('audit rejected' if rejected else 'audit applied').encode(),
+                              git(self.project, 'show', '-s', '--format=%s', checkpoint['commit']))
+                shown = read_git_record(self.project, state['git_history'], checkpoint)
+                self.assertEqual(shown['conclusion']['watcher_result'], outcome)
+                if rejected:
+                    self.assertIn('未获 watcher 接受', shown['conclusion']['summary'])
+                    self.assertEqual(shown['conclusion']['reported_summary'], conclusion['summary'])
+
     def test_supervisor_reviews_actual_project_diff_and_exports_git_records(self):
         worker = ScriptedProvider('worker', [{'verdict': _verdict('done', evidence=['app.py']), 'touch': 'app.py'}])
         reviewer = DiffReviewer('reviewer', [{'verdict': _verdict('done', evidence=['app.py'])}])
@@ -269,6 +333,11 @@ class GitSupervisorTests(GitProjectFixture):
         self.assertTrue(task['git_history']['enabled'])
         self.assertEqual(task['git_checkpoints'][0]['commit'], report.records[0].git_checkpoint['commit'])
         self.assertEqual(task['git_checkpoints'][0]['summary'], report.records[0].verdict.summary)
+        from console.tasks import TaskError
+        self.assertEqual(store.git_record(task['id'], report.records[0].git_checkpoint['commit'])['content']['round'], 1)
+        with self.assertRaises(TaskError) as raised:
+            store.git_record(task['id'], 'f' * 40)
+        self.assertEqual(raised.exception.status, 404)
         (run / 'report.json').unlink()
         self.assertEqual(store.detail(task['id'])['git_checkpoints'][0]['commit'], task['git_checkpoints'][0]['commit'])
 

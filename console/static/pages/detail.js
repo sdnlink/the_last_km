@@ -14,7 +14,7 @@ function render(t){
  if(t.status==='interrupted')alerts.push('任务执行已中断，可查看工作记录后从检查点恢复。');
  $('#detail-alerts').innerHTML=alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
  const modules=(t.modules||[]).map(m=>`<li><span class="module-id">${escape(m.id)}</span><span>${escape(m.title)}</span><span>${m.status==='accepted'?'已验收':'待完成'}</span></li>`).join('');
- $('#detail-body').innerHTML=`<h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${modules?`<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3><ul class="module-list">${modules}</ul>`:''}<h3>审计问题</h3><ul class="module-list">${(t.audit_issues?.items||[]).map(i=>`<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description||i.text||i.summary||'')}</span><span>${i.status==='closed'?'已关闭':'待解决'}</span></li>`).join('')||'<li>暂无审计问题</li>'}</ul><h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`;
+ $('#detail-body').innerHTML=`<h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${modules?`<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3><ul class="module-list">${modules}</ul>`:''}<h3>审计问题</h3><ul class="module-list">${(t.audit_issues?.items||[]).map(i=>`<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description||i.text||i.summary||'')}</span><span>${['closed','resolved'].includes(i.status)?'已关闭':'待解决'}</span></li>`).join('')||'<li>暂无审计问题</li>'}</ul><h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`;
 }
 async function loadLogs(){
  const seq=++logSequence;

@@ -26,6 +26,8 @@ from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
 from console.recovery import resume_arguments
 from console.workflow import work_details
+from console.git_records import read_git_record, GitRecordError
+from console.conclusions import present_conclusion
 
 
 PROVIDERS = ('codex', 'claude', 'grok', 'gemini', 'cursor', 'antigravity', 'paseo')
@@ -264,7 +266,7 @@ class TaskStore:
                      'summary': state.get('summary') or (state.get('last_worker') or {}).get('summary', ''),
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),
                      'git_history': state.get('git_history', {'enabled': False}),
-                     'git_checkpoints': [{**item['git_checkpoint'], 'summary': item.get('summary', ''),
+                     'git_checkpoints': [{**item['git_checkpoint'], 'summary': present_conclusion(item).get('summary', ''),
                                           'status': item.get('status', '')}
                                          for item in rounds[-20:] if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
@@ -359,6 +361,18 @@ class TaskStore:
     def detail(self, ident: str) -> dict:
         with self._lock:
             return self._view(self._get(ident), self.metrics.sample()['processes'])
+
+    def git_record(self, ident: str, commit: str) -> dict:
+        view = self.detail(ident)
+        history = view.get('git_history') or {}
+        candidates = [*view.get('git_checkpoints', []), history.get('last_worker', {}), history.get('last_record', {})]
+        checkpoint = next((item for item in candidates if item.get('commit') == commit), None)
+        if not checkpoint:
+            raise TaskError('该提交不在本任务的近期 Git 记录中', 404)
+        try:
+            return read_git_record(Path(view['cwd']), history, checkpoint)
+        except GitRecordError as exc:
+            raise TaskError(str(exc), 409) from exc
 
     def create(self, data: dict) -> dict:
         def text(key, default='', maximum=32000):

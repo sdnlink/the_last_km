@@ -1,0 +1,14 @@
+<dialog id="git-record-dialog" class="git-record-dialog">
+  <div class="dialog-heading"><div><span class="eyebrow">LOCAL GIT RECORD</span><h2>本地 Git 结论记录</h2><p id="git-record-project"></p></div><button class="icon-button" data-close="git-record-dialog" aria-label="关闭"><svg><use href="#i-x"/></svg></button></div>
+  <div class="form-body">
+    <p id="git-record-loading">正在从目标项目 Git 提交读取记录…</p>
+    <p id="git-record-error" class="form-error" role="alert" hidden></p>
+    <div id="git-record-body" hidden>
+      <dl class="git-record-meta"><dt>提交所在分支</dt><dd id="git-record-ref"></dd><dt>当前检出分支</dt><dd id="git-record-current"></dd><dt>提交号</dt><dd id="git-record-commit"></dd><dt>提交时间</dt><dd id="git-record-at"></dd><dt>结论文件</dt><dd id="git-record-file"></dd></dl>
+      <p id="git-record-outcome" class="git-record-outcome"></p>
+      <h3>本轮结论</h3><p id="git-record-summary"></p>
+      <h3>在目标仓库中核对</h3><pre id="git-record-command"></pre>
+      <details><summary>查看 Git 中的完整结论与系统记录</summary><pre id="git-record-json"></pre></details>
+    </div>
+  </div>
+</dialog>

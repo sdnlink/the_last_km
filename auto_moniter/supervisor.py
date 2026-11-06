@@ -125,6 +125,7 @@ class RoundRecord:
     failure: str = ""
     interruption: str = ""
     git_checkpoint: dict = field(default_factory=dict)
+    watcher_result: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -170,6 +171,7 @@ class RunReport:
                     "failure": record.failure,
                     "interruption": record.interruption,
                     "git_checkpoint": record.git_checkpoint,
+                    "watcher_result": record.watcher_result,
                 }
                 for record in self.records
             ],
@@ -599,21 +601,27 @@ class Supervisor:
             if not review_turn.exit_code and not review_turn.timed_out and not review_turn.interruption and not review.parse_error:
                 self._merge_modules(review)
             review_failure = _failure_reason(review_turn, review)
+            watcher_result = {'status': 'not_applied', 'closed': [], 'reasons': [],
+                              'issues': {item['id']: item['status'] for item in self.audit.items}}
             if (not review_failure and not review.parse_error and not review_turn.interruption
                     and (_accepted(review) or review.gaps or review.next_actions or review.blockers or review.issue_resolutions)):
                 # Provider/format failures must not replace the last business audit.
                 try:
-                    self._record_audit(review, verdict, round_index, review_tree)
+                    watcher_result = self._record_audit(review, verdict, round_index, review_tree)
                 except AuditCapacityError as exc:
                     self._audit_feedback = review
                     capacity_record = RoundRecord(round_index, "reviewer", review, review_turn.exit_code,
                                                   review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
                                                   str(review_turn.output_path), tree=tree)
                     records.append(capacity_record)
+                    capacity_record.watcher_result = {'status': 'rejected', 'closed': [], 'reasons': [str(exc)],
+                                                       'issues': {item['id']: item['status'] for item in self.audit.items}}
                     if self.git_history:
                         self._checkpoint(capacity_record, review_turn.text, self.git_history.last_worker['commit'])
                     raise BudgetExceeded(str(exc)) from exc
                 except ValueError as exc:
+                    watcher_result = {'status': 'rejected', 'closed': [], 'reasons': [str(exc)],
+                                      'issues': {item['id']: item['status'] for item in self.audit.items}}
                     review.status = "continue"
                     review.parse_error = "invalid audit closure"
                     review.gaps.append(f"Audit issue update rejected: {exc}")
@@ -633,6 +641,7 @@ class Supervisor:
                 tree=tree,
                 failure=review_failure,
                 interruption=review_turn.interruption,
+                watcher_result=watcher_result,
             )
             records.append(review_record)
             if self.git_history:
@@ -829,7 +838,7 @@ class Supervisor:
         return {"enabled": not self.config.no_review, "every_worker_rounds": self.config.review_every,
                 "rounds_since_review": self._rounds_since_review}
 
-    def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str) -> None:
+    def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str) -> dict:
         modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope == "module" else []
         findings = _audit_findings(review)
         open_before = {item["id"] for item in self.audit.pending()}
@@ -842,11 +851,15 @@ class Supervisor:
             self._event("audit_issues_resolved", issues=closed, tree=tree)
             if open_before.intersection(closed) - {item["id"] for item in self.audit.pending()}:
                 self._progress_reset = True
+        return {'status': 'applied', 'reported': reported, 'closed': closed, 'reasons': [],
+                'issues': {item['id']: item['status'] for item in self.audit.items}}
 
     def _checkpoint(self, record: RoundRecord, raw: str, before: str) -> None:
         data = RunReport('', 0, '', '', [record]).to_dict()['records'][0]
         data['requirement'] = self.config.requirement
         data['acceptance'] = self.config.acceptance
+        if record.role == 'reviewer':
+            data['audit_issues'] = self.audit.export()
         data['directions'] = [item for item in self.directions.messages()
                               if item['id'] in self._direction_ids[record.role]]
         record.git_checkpoint = self.git_history.record(record.index, record.role, data, before=before, raw=raw)
@@ -1920,6 +1933,7 @@ def _record_from_state(item: dict) -> RoundRecord:
         failure=str(item.get("failure") or ""),
         interruption=str(item.get("interruption") or ""),
         git_checkpoint=dict(item.get('git_checkpoint') or {}),
+        watcher_result=dict(item.get('watcher_result') or {}),
     )
 
 

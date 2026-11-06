@@ -69,7 +69,7 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
     # Use checkpoint requirement/modules/checks, so source input files need not still exist.
     result = ['run', '--resume', '--cwd', str(args.cwd.resolve()), '--run-dir', str(run.resolve()),
               '--provider', args.provider, '--worker-isolation', args.worker_isolation,
-              '--review-isolation', args.review_isolation]
+              '--review-isolation', args.review_isolation, '--git-history', args.git_history]
     strings = {'model': '--model', 'mode': '--mode', 'paseo_backend': '--paseo-backend',
                'paseo_mode': '--paseo-mode', 'reviewer': '--reviewer', 'reviewer_model': '--reviewer-model',
                'reviewer_mode': '--reviewer-mode', 'reviewer_paseo_backend': '--reviewer-paseo-backend',

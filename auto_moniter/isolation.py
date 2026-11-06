@@ -83,6 +83,9 @@ class WorkerIsolation(ReviewIsolation):
         end = original.argv.index("--chdir")
         # Rebind only this project writable, then remount validation sources read-only.
         extra = ["--bind", str(self.cwd), str(self.cwd), "--ro-bind", str(self.run_dir), str(self.run_dir)]
+        history = self.cwd / '.auto-moniter/history'
+        if history.is_dir():
+            extra += ['--ro-bind', str(history), str(history)]
         for path in protected:
             extra += ["--ro-bind", str(path), str(path)]
         return PreparedCommand(original.argv[:end] + extra + original.argv[end:], command.stdin_text)

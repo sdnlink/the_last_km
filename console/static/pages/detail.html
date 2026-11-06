@@ -1,0 +1,14 @@
+        <section id="detail-page" class="task-detail-page">
+          <div class="task-detail-top"><a class="detail-back" href="/tasks">← 返回开发任务</a><span class="subtle-badge">每 3 秒同步</span></div>
+          <section class="panel task-detail-heading">
+            <div><span class="eyebrow">TASK WORKSPACE</span><h2 id="detail-title">任务工作详情</h2><p id="detail-project"></p></div>
+            <div class="detail-page-actions"><div id="detail-actions"></div><a class="button secondary" id="detail-progress-link">实时跟进此任务 →</a><button class="button primary" id="detail-open-direction">补充要求 / 调整方向</button></div>
+          </section>
+          <div id="detail-alerts"></div>
+          <section class="panel role-panel"><div class="panel-heading"><div><h2>角色工作详情</h2><p>worker 实现任务 · reviewer 审核改动 · watcher 监督与调度</p></div></div><div id="role-details" class="role-details"></div></section>
+          <section class="panel workflow-panel"><div class="panel-heading"><div><h2><span class="live-dot"></span>实时工作进展</h2><p>当前执行阶段、工作计划与工具活动</p></div><div class="workflow-filters" id="workflow-filters" role="group" aria-label="筛选工作角色"><button data-role-filter="all" class="active">全部</button><button data-role-filter="worker">worker</button><button data-role-filter="reviewer">reviewer</button><button data-role-filter="watcher">watcher</button></div></div><div id="workflow-stages" class="workflow-stages"></div><div id="detail-live" class="workflow-content"></div></section>
+          <section class="panel conclusions-panel"><div class="panel-heading"><div><h2>交互结论</h2><p>逐轮展示 worker 任务执行结论与 reviewer 审查结论</p></div><span id="conclusion-count" class="count-badge">0</span></div><div id="detail-conclusions" class="conclusion-list"></div></section>
+          <div id="detail-git"></div>
+          <details class="panel detail-metadata"><summary>需求与验收信息</summary><div id="detail-body" class="detail-body"></div></details>
+          <details class="panel raw-logs" id="detail-logs"><summary>执行日志 · 原始输出</summary><div class="log-section"><div class="log-heading"><h3>执行日志</h3><select id="log-select" aria-label="选择日志文件"></select><label class="log-follow"><input type="checkbox" id="log-follow" checked />跟随输出</label></div><pre id="log-output" tabindex="0">展开后加载执行日志</pre><small>展示所选日志末尾 64 KiB，自动更新。</small></div></details>
+        </section>

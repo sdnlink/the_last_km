@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from auto_moniter.redaction import redact
 from console.tasks import TaskError, TaskStore
+from console.pages import page_route, render_page, asset
 
 
 STATIC = Path(__file__).with_name('static')
@@ -59,29 +60,35 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._check_host()
             url = urlsplit(self.path)
-            if url.path in {'/', '/app.js', '/style.css', '/favicon.svg'}:
-                filename, content_type = {
-                    '/': ('index.html', 'text/html; charset=utf-8'),
-                    '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
-                    '/style.css': ('style.css', 'text/css; charset=utf-8'),
-                    '/favicon.svg': ('favicon.svg', 'image/svg+xml'),
-                }[url.path]
-                self._send(200, (STATIC / filename).read_bytes(), content_type)
+            route = page_route(url.path)
+            static = asset(url.path) if route is None else None
+            if route:
+                self._send(200, render_page(*route, self.server.store.cwd), 'text/html; charset=utf-8')
+            elif static:
+                self._send(200, static[0].read_bytes(), static[1])
             elif url.path == '/api/config':
                 self._json({**self.server.store.config(), 'csrf_token': self.server.csrf})
             elif url.path == '/api/overview':
-                self._json(self.server.store.overview())
+                self._json(self.server.store.dashboard())
+            elif url.path == '/api/tasks':
+                self._json(self.server.store.task_summaries())
+            elif url.path == '/api/resources':
+                self._json(self.server.store.resource_overview())
             elif url.path.startswith('/api/tasks/'):
                 parts = url.path.strip('/').split('/')
                 if len(parts) == 4 and parts[3] == 'logs':
                     name = parse_qs(url.query).get('file', [''])[0]
                     self._json(self.server.store.logs(parts[2], name))
+                elif len(parts) == 4 and parts[3] == 'progress':
+                    self._json(self.server.store.progress(parts[2]))
                 elif len(parts) == 3:
                     self._json(self.server.store.detail(parts[2]))
                 else:
                     raise TaskError('接口不存在', 404)
             else:
                 raise TaskError('页面不存在', 404)
+        except (BrokenPipeError, ConnectionResetError):
+            return  # Navigating away cancels in-flight requests.
         except (TaskError, OSError, ValueError) as exc:
             self._error(exc)
 
@@ -113,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.server.store.add_direction(parts[2], data), 201)
                 else:
                     self._json(self.server.store.action(parts[2], parts[3]))
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except (TaskError, OSError, ValueError) as exc:
             self._error(exc)
 

@@ -1,0 +1,137 @@
+    <dialog id="create-dialog" class="create-dialog">
+      <form id="create-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">LET’S BUILD SOMETHING</span>
+            <h2>新建开发任务</h2>
+            <p>写下需求，其余交给执行器与监督器。</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close="create-dialog"
+            aria-label="关闭"
+          >
+            <svg><use href="#i-x" /></svg>
+          </button>
+        </div>
+        <div class="form-body">
+          <label
+            >任务名称 <span class="required">*</span
+            ><input
+              name="title"
+              required
+              maxlength="160"
+              placeholder="例如：为 API 增加健康检查接口"
+              autofocus
+          /></label>
+          <label
+            >开发需求 <span class="required">*</span
+            ><textarea
+              name="requirement"
+              rows="5"
+              required
+              maxlength="32000"
+              placeholder="描述你想实现的功能、约束和完成标准…"
+            ></textarea>
+          </label>
+          <label
+            >项目目录 <span class="required">*</span
+            ><input
+              name="cwd"
+              required
+              placeholder="/path/to/your/project"
+            /><small>选择 Git 项目目录；每轮改动和结论自动保存到项目的审计分支。</small></label
+          >
+          <div class="form-grid">
+            <label
+              >执行器<select
+                name="provider"
+                id="provider-select"
+              ></select></label
+            ><label
+              >独立审查器<select name="reviewer" id="reviewer-select"></select
+            ></label>
+          </div>
+          <div id="provider-hint" class="form-hint"></div>
+          <details class="advanced">
+            <summary>执行配置与验收标准<span>可选</span></summary>
+            <div class="advanced-body">
+              <div class="form-grid">
+                <label
+                  >执行模型<input
+                    name="model"
+                    maxlength="200"
+                    placeholder="使用执行器默认模型" /></label
+                ><label
+                  >审查模型<input
+                    name="reviewer_model"
+                    maxlength="200"
+                    placeholder="使用审查器默认模型"
+                /></label>
+              </div>
+              <label id="paseo-field" hidden
+                >Paseo 后端<input
+                  name="paseo_backend"
+                  value="claude"
+                  maxlength="200" /></label
+              ><label
+                >验收命令<textarea
+                  name="checks"
+                  rows="3"
+                  placeholder="每行一条，例如：&#10;python -m unittest discover -s tests&#10;git diff --check"
+                ></textarea
+                ><small
+                  >由监督器在项目目录执行，用于确认交付结果。</small
+                ></label
+              >
+              <div class="form-grid thirds">
+                <label
+                  >运行预算（分钟）<input
+                    type="number"
+                    name="max_runtime_minutes"
+                    min="0"
+                    max="43200"
+                    value="120"
+                    required /></label
+                ><label
+                  >模型调用上限<input
+                    type="number"
+                    name="max_agent_calls"
+                    min="0"
+                    max="100000"
+                    value="100"
+                    required /></label
+                ><label
+                  >执行轮次上限<input
+                    type="number"
+                    name="max_rounds"
+                    min="0"
+                    max="100000"
+                    value="0"
+                    required
+                /></label>
+              </div>
+              <small>上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
+            </div>
+          </details>
+          <label class="checkbox-label"
+            ><input type="checkbox" name="auto_start" checked /><span
+              >创建后立即启动<small>关闭后保存为待启动任务。</small></span
+            ></label
+          >
+          <div id="form-error" class="form-error" role="alert" hidden></div>
+        </div>
+        <div class="dialog-footer">
+          <button
+            type="button"
+            class="button secondary"
+            data-close="create-dialog"
+          >
+            取消</button
+          ><button type="submit" class="button primary" id="create-submit">
+            <svg><use href="#i-plus" /></svg>创建并启动任务
+          </button>
+        </div>
+      </form>
+    </dialog>

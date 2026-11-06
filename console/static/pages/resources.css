@@ -1,0 +1,143 @@
+
+.charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+  padding: 0 23px 23px;
+}
+
+.chart-card {
+  padding: 18px;
+  border-radius: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 15px;
+}
+
+.chart-heading h3 {
+  font-size: 11px;
+  font-weight: 500;
+  margin: 0;
+  color: var(--muted);
+}
+
+.chart-heading span {
+  font-size: 18px;
+  font-family: monospace;
+  color: var(--accent);
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  stroke-width: 1;
+}
+
+.chart .grid-line {
+  stroke: var(--line);
+  stroke-dasharray: 3 6;
+}
+
+.chart .area {
+  fill: #087d7812;
+  stroke: none;
+}
+
+.chart .trend {
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart.blue-chart .area {
+  fill: #356d9a12;
+}
+
+.chart.blue-chart .trend {
+  stroke: var(--blue);
+}
+
+.blue-chart + .chart-labels {
+  color: var(--muted);
+}
+
+.chart-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 9px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.resource-details {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+  padding: 0 23px 23px;
+}
+
+.resource-details > div {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 15px;
+}
+
+.resource-details small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-bottom: 8px;
+}
+
+.resource-details strong {
+  font-family: monospace;
+  font-size: 15px;
+  font-weight: 400;
+}
+
+.resource-explainer {
+  font-size: 10px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  padding: 16px 23px;
+}
+
+.resources-panel {
+  margin-top: 0;
+}
+
+@media (max-width: 960px) {
+  .charts {
+    gap: 15px;
+    padding: 0 18px 18px;
+  }
+
+  .resource-details {
+    grid-template-columns: 1fr 1fr;
+  }
+
+}
+
+@media (max-width: 640px) {
+  .charts {
+    grid-template-columns: 1fr;
+  }
+
+  .resource-details {
+    gap: 10px;
+    padding: 0 18px 18px;
+  }
+
+  .resource-explainer {
+    font-size: 9px;
+    padding: 14px 18px;
+  }
+
+}

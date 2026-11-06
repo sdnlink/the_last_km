@@ -1,0 +1,60 @@
+    <dialog id="direction-dialog" class="direction-dialog">
+      <form id="direction-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">TASK CONVERSATION</span>
+            <h2>补充要求 / 调整方向</h2>
+            <p id="direction-task-title"></p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close="direction-dialog"
+            aria-label="关闭"
+          >
+            <svg><use href="#i-x" /></svg>
+          </button>
+        </div>
+        <div class="form-body">
+          <p id="direction-delivery" class="direction-delivery"></p>
+          <div id="direction-history" class="direction-history"></div>
+          <label
+            >你的新要求<textarea
+              id="direction-text"
+              name="text"
+              rows="5"
+              maxlength="4000"
+              required
+              placeholder="例如：先完善登录失败和权限拒绝的处理，再进行页面优化；请说明修改依据并运行相关测试。"
+            ></textarea
+            ><small
+              >补充内容会保留在任务中，并发送给后续执行器及审查器。</small
+            ></label
+          >
+          <label class="checkbox-label" id="direction-pause-label"
+            ><input id="direction-pause" type="checkbox" /><span
+              >提交后在当前轮次结束时暂停<small
+                >先保存新方向，暂停后可确认结果再恢复执行。</small
+              ></span
+            ></label
+          >
+          <div
+            id="direction-error"
+            class="form-error"
+            role="alert"
+            hidden
+          ></div>
+        </div>
+        <div class="dialog-footer">
+          <button
+            type="button"
+            class="button secondary"
+            data-close="direction-dialog"
+          >
+            关闭</button
+          ><button type="submit" class="button primary" id="direction-submit">
+            发送补充要求
+          </button>
+        </div>
+      </form>
+    </dialog>

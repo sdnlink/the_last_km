@@ -1,0 +1,79 @@
+        <section class="panel tasks-panel" id="tasks-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>
+                开发任务 <span id="task-count" class="count-badge">0</span>
+              </h2>
+              <p>跟踪执行进度，查看每一轮实现与审查。</p>
+            </div>
+            <button
+              class="icon-button"
+              id="refresh"
+              title="刷新数据"
+              aria-label="刷新数据"
+            >
+              <svg><use href="#i-refresh" /></svg>
+            </button>
+          </div>
+          <div class="table-toolbar">
+            <div
+              class="filters"
+              id="filters"
+              role="group"
+              aria-label="任务状态筛选"
+            >
+              <button class="filter active" data-filter="all">全部任务</button
+              ><button class="filter" data-filter="active">
+                运行中<span id="filter-active">0</span></button
+              ><button class="filter" data-filter="paused">暂停</button
+              ><button class="filter" data-filter="stopped">停止</button
+              ><button class="filter" data-filter="queued">待启动</button
+              ><button class="filter" data-filter="done">已完成</button
+              ><button class="filter" data-filter="attention">需关注</button>
+            </div>
+            <label class="search"
+              ><svg><use href="#i-search" /></svg
+              ><input
+                id="search"
+                type="search"
+                placeholder="搜索任务、项目或执行器"
+                aria-label="搜索任务"
+            /></label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="task-column">任务名称 / 项目</th>
+                  <th>状态</th>
+                  <th>执行器</th>
+                  <th>模块进度</th>
+                  <th>运行时长</th>
+                  <th>资源占用</th>
+                  <th class="align-right">操作</th>
+                </tr>
+              </thead>
+              <tbody id="task-rows"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="empty-state" hidden>
+            <span class="empty-icon"
+              ><svg><use href="#i-terminal" /></svg
+            ></span>
+            <h3 id="empty-title">下一个交付，从这里开始</h3>
+            <p id="empty-description">
+              添加一个开发任务，让执行器开始实现，让监督器持续跟进。
+            </p>
+            <button class="button secondary" id="empty-create">
+              <svg><use href="#i-plus" /></svg>创建第一个任务
+            </button>
+          </div>
+          <div class="table-footer">
+            <span id="table-caption">正在加载任务…</span
+            ><span
+              ><span class="live-dot"></span>每 3 秒自动更新
+              <span class="footer-dot">·</span
+              ><span id="last-updated">等待同步</span></span
+            >
+          </div>
+        </section>

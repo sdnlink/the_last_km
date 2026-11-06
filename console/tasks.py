@@ -140,9 +140,9 @@ class TaskStore:
         except (OSError, ValueError, KeyError):
             return False
 
-    def _view(self, meta: dict, processes: dict) -> dict:
+    def _view(self, meta: dict, processes: dict, *, include_details: bool = True) -> dict:
         try:
-            return self._view_data(meta, processes)
+            return self._view_data(meta, processes, include_details=include_details)
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             # One damaged run must not hide every other task in the overview.
             return safe({'id': meta['id'], 'title': meta.get('title') or Path(meta['run_dir']).name,
@@ -156,7 +156,7 @@ class TaskStore:
                          'directions': [], 'can_direct': False, 'actions': [], 'checks': [],
                          'audit_issues': {}, 'control': '', 'resume_unavailable': '运行数据需要修复：' + str(exc)})
 
-    def _view_data(self, meta: dict, processes: dict) -> dict:
+    def _view_data(self, meta: dict, processes: dict, *, include_details: bool = True) -> dict:
         run = Path(meta['run_dir'])
         state = read_json(run / 'state.json')
         status = meta.get('status', 'unknown')
@@ -230,9 +230,11 @@ class TaskStore:
         elif status == 'starting':
             control_message = '正在启动监督器并加载任务检查点…'
         current_provider = (provider.get('reviewer' if health.get('phase') == 'reviewing' else 'worker') or {}).get('name')
-        progress = self.activity.snapshot(run, state, health, status, current_provider or meta.get('provider', ''))
+        progress = (self.activity.snapshot(run, state, health, status, current_provider or meta.get('provider', ''))
+                    if include_details else {'events': [], 'role': 'reviewer' if health.get('phase') == 'reviewing' else 'worker',
+                                             'round': health.get('rounds', 0), 'focus': ''})
         try:
-            directions = Directions(run).snapshot()
+            directions = Directions(run).snapshot() if include_details else []
             direction_error = ''
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
@@ -243,7 +245,8 @@ class TaskStore:
         rounds = state.get('rounds')
         if not isinstance(rounds, list):
             rounds = state.get('records') or []
-        work = work_details(state, health, progress, status, heartbeat, guardian,
+        work_state = state if include_details else {**state, 'rounds': [], 'records': []}
+        work = work_details(work_state, health, progress, status, heartbeat, guardian,
                             meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                             meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'))
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
@@ -269,6 +272,58 @@ class TaskStore:
                      'directions': directions, 'can_direct': can_direct,
                      'direction_delivery': delivery, 'direction_error': direction_error,
                      'actions': actions, 'checks': meta.get('checks', state.get('checks', []))})
+
+    @staticmethod
+    def summary(view: dict) -> dict:
+        """Allowlisted task metadata; streams and task instructions stay in detail APIs."""
+        keys = ('id', 'title', 'cwd', 'status', 'provider', 'reviewer', 'created_at', 'updated_at',
+                'resources', 'accepted_modules', 'total_modules', 'actions', 'control', 'control_message',
+                'can_direct', 'resume_unavailable')
+        result = {key: view.get(key) for key in keys}
+        result['health'] = {key: view.get('health', {}).get(key) for key in
+                            ('health', 'phase', 'rounds', 'heartbeat_age_s', 'usage')}
+        result['summary'] = str(view.get('summary') or (view.get('last_worker') or {}).get('summary') or '')[:500]
+        result['roles'] = {role: {'status': item.get('status'), 'current_work': str(item.get('current_work') or '')[:300]}
+                           for role, item in (view.get('work', {}).get('roles') or {}).items()}
+        return result
+
+    def task_summaries(self) -> dict:
+        with self._lock:
+            sample = self.metrics.sample()
+            tasks = [self.summary(self._view(meta, sample['processes'], include_details=False))
+                     for meta in self._catalog().values()]
+            tasks.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+            return {'tasks': tasks, 'at': timestamp(), 'discovery': {'warnings': self._scan_warnings}}
+
+    def dashboard(self) -> dict:
+        with self._lock:
+            data = self.task_summaries()
+            tasks = data['tasks']
+            counts = {'total': len(tasks), 'running': sum(t['status'] in {'running', 'starting'} for t in tasks),
+                      'paused': sum(t['status'] == 'paused' for t in tasks),
+                      'done': sum(t['status'] == 'done' for t in tasks)}
+            sample = self.metrics.sample()
+            return {**data, 'tasks': [t for t in tasks if t['status'] in {'running', 'starting', 'paused'}],
+                    'counts': counts, 'resources': {k: v for k, v in sample.items() if k != 'processes'}}
+
+    def resource_overview(self) -> dict:
+        with self._lock:
+            sample = self.metrics.sample()
+            tasks = [self.summary(self._view(meta, sample['processes'], include_details=False))
+                     for meta in self._catalog().values()]
+            return {'resources': {k: v for k, v in sample.items() if k != 'processes'}, 'at': timestamp(),
+                    'tasks': [{k: t[k] for k in ('id', 'title', 'status', 'resources')} for t in tasks]}
+
+    def progress(self, ident: str) -> dict:
+        view = self.detail(ident)
+        keys = ('id', 'title', 'cwd', 'status', 'health', 'activity', 'work', 'actions', 'control',
+                'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable')
+        result = {key: view.get(key) for key in keys}
+        work = view.get('work') or {}
+        result['work'] = {**work, 'conclusions': [next((c for c in reversed(work.get('conclusions', []))
+                                  if c.get('role') == role), None) for role in ('worker', 'reviewer')]}
+        result['work']['conclusions'] = [c for c in result['work']['conclusions'] if c]
+        return result
 
     def overview(self) -> dict:
         with self._lock:

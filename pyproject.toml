@@ -25,7 +25,7 @@ build-backend = "setuptools.build_meta"
 include = ["auto_moniter*", "console*"]
 
 [tool.setuptools.package-data]
-console = ["static/*"]
+console = ["static/*", "static/pages/*", "static/fragments/*"]
 
 [tool.setuptools.data-files]
 "share/doc/auto-moniter" = ["README.md", "OPERATIONS.md", "CHANGELOG.md"]

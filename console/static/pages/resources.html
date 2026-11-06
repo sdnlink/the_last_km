@@ -1,0 +1,45 @@
+        <section id="resources-panel" class="panel resources-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>资源使用趋势</h2>
+              <p>从打开页面开始采样 · 最近 60 次记录 · 主机整体资源</p>
+            </div>
+            <span class="subtle-badge">LIVE / 3s</span>
+          </div>
+          <div class="charts">
+            <div class="chart-card">
+              <div class="chart-heading">
+                <h3>CPU 使用率</h3>
+                <span id="chart-cpu-value">—</span>
+              </div>
+              <svg
+                id="cpu-chart"
+                class="chart"
+                viewBox="0 0 600 160"
+                role="img"
+                aria-label="CPU 使用率趋势"
+              ></svg>
+              <div class="chart-labels"><span>较早</span><span>现在</span></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-heading">
+                <h3>内存使用率</h3>
+                <span id="chart-memory-value">—</span>
+              </div>
+              <svg
+                id="memory-chart"
+                class="chart blue-chart"
+                viewBox="0 0 600 160"
+                role="img"
+                aria-label="内存使用率趋势"
+              ></svg>
+              <div class="chart-labels"><span>较早</span><span>现在</span></div>
+            </div>
+          </div>
+          <div class="resource-details" id="resource-details"></div>
+          <div class="resource-explainer">
+            任务 CPU 按使用的 CPU 核心计量，可能超过
+            100%；任务内存为本地进程及其子进程的 RSS 合计。通过 Paseo
+            执行的远端或 daemon 进程不计入任务占用。
+          </div>
+        </section>

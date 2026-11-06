@@ -1,0 +1,90 @@
+        <section class="stats-grid" id="stats" aria-label="任务统计">
+          <article class="stat-card">
+            <div class="stat-title">
+              全部任务<svg><use href="#i-task" /></svg>
+            </div>
+            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-note">所有项目的开发任务</div>
+          </article>
+          <article class="stat-card running-stat">
+            <div class="stat-title">正在执行<span class="live-dot"></span></div>
+            <div class="stat-value" id="stat-running">
+              —<span class="stat-unit">个任务</span>
+            </div>
+            <div class="stat-note">
+              <span class="accent">持续推进中</span
+              ><span>· 自动监督与审查</span>
+            </div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-title">
+              已完成交付<svg><use href="#i-check" /></svg>
+            </div>
+            <div class="stat-value" id="stat-done">—</div>
+            <div class="stat-note">已通过独立审查与验收</div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-title">
+              等待处理<svg><use href="#i-clock" /></svg>
+            </div>
+            <div class="stat-value" id="stat-waiting">—</div>
+            <div class="stat-note" id="waiting-note">
+              待启动、暂停或需要关注
+            </div>
+          </article>
+        </section>
+        <section
+          class="resource-strip"
+          id="resource-strip"
+          aria-label="实时主机资源"
+        >
+          <div class="resource-intro">
+            <span class="resource-icon"
+              ><svg><use href="#i-server" /></svg
+            ></span>
+            <div>
+              <strong>运行环境</strong
+              ><span><span class="live-dot"></span>本机实时资源</span>
+            </div>
+          </div>
+          <div class="mini-resource">
+            <div><span>CPU</span><strong id="cpu-value">采样中</strong></div>
+            <div class="meter"><span id="cpu-meter"></span></div>
+            <small id="cpu-description">读取主机数据…</small>
+          </div>
+          <div class="mini-resource">
+            <div><span>内存</span><strong id="memory-value">—</strong></div>
+            <div class="meter blue"><span id="memory-meter"></span></div>
+            <small id="memory-description">—</small>
+          </div>
+          <div class="mini-resource">
+            <div><span>磁盘</span><strong id="disk-value">—</strong></div>
+            <div class="meter purple"><span id="disk-meter"></span></div>
+            <small id="disk-description">—</small>
+          </div>
+          <button class="text-button resource-link" data-page="resources">
+            查看详情<svg><use href="#i-arrow" /></svg>
+          </button>
+        </section>
+        <section class="panel all-tasks-panel" id="all-tasks-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>
+                运行任务概况
+                <span id="board-count" class="count-badge">0</span>
+              </h2>
+              <p>
+                汇总全部运行及暂停任务，点击任意任务进入工作详情。
+              </p>
+            </div>
+            <label class="board-search"
+              ><input
+                id="board-search"
+                type="search"
+                placeholder="搜索任务 / 项目"
+                aria-label="搜索全部任务状态"
+            /></label>
+          </div>
+          <div id="discovery-note" class="discovery-note" hidden></div>
+          <div id="task-board" class="task-board"></div>
+        </section>

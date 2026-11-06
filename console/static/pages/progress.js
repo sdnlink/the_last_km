@@ -17,6 +17,7 @@ function renderCurrent(t){
  const role=Object.values(roles).find(r=>r.status==='running');
  const work=role?.current_work||roles.watcher?.current_work||(isLive?'等待当前轮次发出公开进展':'当前任务未在执行');
  $('#progress-notice').innerHTML=`${!isLive?`<p class="detail-alert">${t.status==='paused'?'任务已暂停，当前展示最近一轮记录。':t.status==='done'?'任务已完成，当前展示最终工作记录。':'任务当前未在执行，以下为最近工作记录。'}</p>`:''}${t.control_message?`<p class="control-hint">${escape(t.control_message)}</p>`:''}`;
+ if(roles.reviewer?.wait_reason)$('#progress-notice').insertAdjacentHTML('beforeend',`<p class="control-hint"><strong>审核调度：</strong>${escape(roles.reviewer.wait_reason)}</p>`);
  $('#progress-focus').innerHTML=`<div class="progress-focus-label">${isLive?'当前工作':'最近工作'} · 第 ${t.activity?.round||t.health.rounds||0} 轮</div><h3>${escape(work)}</h3><div class="board-roles">${Object.entries(roles).map(([name,r])=>`<span>${name} · ${escape(roleStatuses[r.status]||r.status)}</span>`).join('')}</div>`;
  $('#progress-freshness').textContent=t.activity?.last_output_at?`最近输出 ${duration(t.activity.output_age_s)} 前 · 每 3 秒更新`:'尚未收到本轮公开输出；有新活动时自动显示';
  renderWorkflow(t,{role:$('#progress-role').value,currentOnly:$('#progress-round').value==='current',showRoles:false});renderConclusions(t);

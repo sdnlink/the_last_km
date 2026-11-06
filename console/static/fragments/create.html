@@ -67,8 +67,8 @@
                   >审查模型<input
                     name="reviewer_model"
                     maxlength="200"
-                    placeholder="使用审查器默认模型"
-                /></label>
+                    placeholder="留空沿用执行模型或审查器默认模型"
+                /><small>已填写执行模型时，留空会沿用该模型；执行器不同建议明确指定审查模型。</small></label>
               </div>
               <label id="paseo-field" hidden
                 >Paseo 后端<input
@@ -112,7 +112,11 @@
                     required
                 /></label>
               </div>
-              <small>上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
+              <label>审核频率（worker 轮次）
+                <input name="review_every" type="number" min="0" max="100000" value="5" required />
+                <small>1：每轮正常结果后审核；2：每两轮；默认 5。0：仅在完成候选或外部阻塞时审核。失败轮次累计计数，但等待 worker 正常返回后才进入审核。</small>
+              </label>
+              <small>时长、调用和执行轮次上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
             </div>
           </details>
           <label class="checkbox-label"

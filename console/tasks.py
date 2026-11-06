@@ -229,6 +229,9 @@ class TaskStore:
                 control_message = '恢复已请求，正在继续原任务。'
         elif status == 'starting':
             control_message = '正在启动监督器并加载任务检查点…'
+        if status == 'queued' and not health.get('review_schedule'):
+            health = {**health, 'review_schedule': {'enabled': True, 'every_worker_rounds': meta.get('review_every', 5),
+                                                   'rounds_since_review': 0}}
         current_provider = (provider.get('reviewer' if health.get('phase') == 'reviewing' else 'worker') or {}).get('name')
         progress = (self.activity.snapshot(run, state, health, status, current_provider or meta.get('provider', ''))
                     if include_details else {'events': [], 'role': 'reviewer' if health.get('phase') == 'reviewing' else 'worker',
@@ -376,7 +379,8 @@ class TaskStore:
         if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\x00' in c for c in checks):
             raise TaskError('验收命令格式不正确，每行填写一条命令')
         numbers = {}
-        for key, default, maximum in [('max_runtime_minutes', 120, 43200), ('max_agent_calls', 100, 100000), ('max_rounds', 0, 100000)]:
+        for key, default, maximum in [('max_runtime_minutes', 120, 43200), ('max_agent_calls', 100, 100000),
+                                      ('max_rounds', 0, 100000), ('review_every', 5, 100000)]:
             value = data.get(key, default)
             if type(value) is not int or value < 0 or value > maximum:
                 raise TaskError(f'{key} 必须是 0 到 {maximum} 的整数')
@@ -423,7 +427,13 @@ class TaskStore:
         manifest = {'argv': meta['resume_argv']} if meta.get('resume_argv') else read_json(run / 'launch.json')
         if not manifest:
             if meta.get('managed'):
-                manifest = {'argv': self._new_args(meta)}
+                fallback = meta
+                if 'review_every' not in meta:
+                    saved_every = (state.get('review_schedule') or {}).get('every_worker_rounds', 5)
+                    if type(saved_every) is not int or saved_every < 0:
+                        raise TaskError('保存的审核频率无效，请修复检查点后恢复', 409)
+                    fallback = {**meta, 'review_every': saved_every}
+                manifest = {'argv': self._new_args(fallback)}
             else:
                 raise TaskError('缺少原始启动配置 launch.json，请使用原 CLI 配置恢复', 409)
         try:
@@ -435,6 +445,7 @@ class TaskStore:
         argv = ['run', '--cwd', meta['cwd'], '--run-dir', meta['run_dir'],
                 '--provider', meta['provider'], '--reviewer', meta['reviewer'],
                 '--git-history', 'required',
+                '--review-every', str(meta.get('review_every', 5)),
                 '--max-runtime', str(meta['max_runtime_minutes'] * 60),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
         for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend')]:

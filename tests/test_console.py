@@ -70,6 +70,38 @@ class ConsoleTests(unittest.TestCase):
                 self.create(auto_start=True)
         self.assertEqual(self.store.overview()['tasks'], [])
 
+    def test_review_frequency_is_validated_saved_and_forwarded_to_cli(self):
+        from auto_moniter.cli import build_parser
+
+        for frequency in (0, 1, 2, 5):
+            with self.subTest(frequency=frequency):
+                task = self.create(review_every=frequency)
+                meta = self.store._get(task['id'])
+                args = build_parser().parse_args(self.store._new_args(meta))
+                self.assertEqual(args.review_every, frequency)
+                self.assertEqual(meta['review_every'], frequency)
+                self.assertEqual(task['work']['roles']['reviewer']['every_worker_rounds'], frequency)
+        for invalid in (-1, True, '2', 1.5, 100001):
+            with self.subTest(invalid=invalid), self.assertRaises(TaskError):
+                self.create(review_every=invalid)
+        legacy = self.store._get(self.create()['id'])
+        legacy.pop('review_every')
+        self.assertEqual(build_parser().parse_args(self.store._new_args(legacy)).review_every, 5)
+
+    def test_legacy_resume_without_manifest_keeps_saved_review_frequency(self):
+        from auto_moniter.cli import build_parser
+
+        task = self.create()
+        meta = dict(self.store._get(task['id']))
+        meta.pop('review_every')
+        run = Path(task['run_dir'])
+        run.mkdir()
+        (run / 'requirement.md').write_text('saved requirement')
+        state = {'status': 'stopped', 'review_schedule': {'every_worker_rounds': 2}}
+        with patch('console.tasks.resume_arguments', side_effect=lambda manifest, _run, _state: manifest['argv']):
+            arguments = self.store._resume_args(meta, state)
+        self.assertEqual(build_parser().parse_args(arguments).review_every, 2)
+
     def test_discover_existing_run_and_reject_unconfirmed_done(self):
         run = self.project / '.auto-moniter/custom/run'
         run.mkdir(parents=True)

@@ -13,11 +13,16 @@ function roleDetailsHTML(t) {
     const r = t.work?.roles?.[name] || {status:"not_started"};
     const titles = {worker:"任务实现", reviewer:"独立审查", watcher:"监督与调度"};
     const last = r.last_conclusion;
-    const work = r.current_work || (r.status === "waiting" ? "等待本轮调度" : last?.summary || "暂无工作记录");
+    const work = (name === 'reviewer' ? r.wait_reason : '') || r.current_work || (r.status === "waiting" ? "等待本轮调度" : last?.summary || "暂无工作记录");
     const facts = name === "watcher"
       ? [["心跳", r.heartbeat_age_s == null ? "—" : `${duration(r.heartbeat_age_s)} 前`], ["监督进程", r.pid || "—"], ["守护进程", r.guardian_pid || "—"], ["模型调用", `${r.usage?.agent_calls || 0} / ${r.usage?.max_agent_calls || "不限"}`], ["恢复次数", r.recovery_count || 0]]
       : [["执行器", r.provider || "—"], ["工作轮次", r.round == null ? "—" : `第 ${r.round} 轮`], ["执行进程", r.pid || "—"], ["会话", r.session_id || "尚无会话"]];
-    return `<article class="role-card role-${name}" data-role="${name}"><div class="role-card-title"><strong>${name}</strong><span class="role-state ${escape(r.status)}">${escape(roleStatuses[r.status] || r.status)}</span></div><h3>${titles[name]}</h3><p class="role-current">${escape(work)}</p><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl>${last ? `<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p></div>` : ""}<button class="detail-button" data-role-focus="${name}">查看${name === "watcher" ? "监督记录" : "工作记录"} ↓</button></article>`;
+    if(name === 'reviewer'){
+      facts[1][0] = r.status === 'running' ? '当前审核轮次' : '最近审核轮次';
+      facts.push(['周期审核', r.every_worker_rounds == null ? '未记录' : r.every_worker_rounds === 0 ? '仅完成候选及阻塞' : `每 ${r.every_worker_rounds} 轮`]);
+      facts.push(['审核间隔已累计', r.rounds_since_review == null ? '未记录' : `${r.rounds_since_review} 轮${r.due ? ' · 已达到阈值' : ''}`]);
+    }
+    return `<article class="role-card role-${name}" data-role="${name}"><div class="role-card-title"><strong>${name}</strong><span class="role-state ${escape(r.status)}">${escape(name === 'reviewer' && r.status === 'waiting' ? '等待 worker 结果' : roleStatuses[r.status] || r.status)}</span></div><h3>${titles[name]}</h3><p class="role-current">${escape(work)}</p><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join("")}</dl>${last ? `<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p></div>` : ""}<button class="detail-button" data-role-focus="${name}">查看${name === "watcher" ? "监督记录" : "工作记录"} ↓</button></article>`;
   }).join("");
 }
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {

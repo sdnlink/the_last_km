@@ -18,10 +18,13 @@ from auto_moniter.health import read_run_snapshot, run_health
 from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
 from auto_moniter.providers import discover_providers
+from auto_moniter.providers import ProviderError
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
+from auto_moniter.directions import Directions
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
+from console.recovery import resume_arguments
 
 
 PROVIDERS = ('codex', 'claude', 'grok', 'gemini', 'cursor', 'antigravity', 'paseo')
@@ -74,6 +77,7 @@ class TaskStore:
         self._catalog_at = 0.0
         self._external = {}
         self._children = {}
+        self._scan_warnings = []
 
     def config(self) -> dict:
         available = discover_providers()
@@ -85,10 +89,11 @@ class TaskStore:
         tasks = {}
         for path in self.tasks_dir.glob('*.json'):
             meta = read_json(path)
-            if meta.get('id') == path.stem and re.fullmatch(r'[0-9a-f]{32}', path.stem):
+            if meta.get('id') == path.stem and re.fullmatch(r'(?:[0-9a-f]{32}|ext-[0-9a-f]{20})', path.stem):
                 tasks[meta['id']] = meta
         if time.monotonic() - self._catalog_at > 5:
             external = {}
+            warnings = []
             for root in self.runs_dirs:
                 root = root.expanduser().resolve()
                 visited = 0
@@ -101,7 +106,10 @@ class TaskStore:
                     if depth >= 5 or visited > 2000:
                         dirs[:] = []
                     if visited > 2000:
+                        warnings.append(f'目录 {root} 已达到扫描上限，请将 --runs-dir 指向更接近任务的位置')
                         break
+                    if depth >= 5:
+                        warnings.append(f'目录 {root} 有更深层级，请使用 --runs-dir 指定深层任务目录')
                     if 'state.json' not in files:
                         continue
                     dirs[:] = []
@@ -109,6 +117,7 @@ class TaskStore:
                     ident = 'ext-' + hashlib.sha256(os.fsencode(run)).hexdigest()[:20]
                     external[ident] = {'id': ident, 'run_dir': str(run), 'managed': False}
             self._external = external
+            self._scan_warnings = list(dict.fromkeys(warnings))[:10]
             self._catalog_at = time.monotonic()
         managed_paths = {item['run_dir'] for item in tasks.values()}
         tasks.update({key: item for key, item in self._external.items() if item['run_dir'] not in managed_paths})
@@ -131,6 +140,22 @@ class TaskStore:
             return False
 
     def _view(self, meta: dict, processes: dict) -> dict:
+        try:
+            return self._view_data(meta, processes)
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            # One damaged run must not hide every other task in the overview.
+            return safe({'id': meta['id'], 'title': meta.get('title') or Path(meta['run_dir']).name,
+                         'cwd': meta.get('cwd', ''), 'run_dir': meta['run_dir'], 'managed': bool(meta.get('managed')),
+                         'status': 'unknown', 'health': {'health': 'unknown', 'phase': 'unknown', 'rounds': 0, 'usage': {}},
+                         'provider': meta.get('provider', '—'), 'reviewer': meta.get('reviewer', '—'),
+                         'created_at': meta.get('created_at', ''), 'updated_at': '', 'requirement': '',
+                         'resources': {'rss_bytes': 0, 'process_count': 0, 'cpu_percent': None},
+                         'modules': [], 'accepted_modules': 0, 'total_modules': 0, 'summary': '',
+                         'activity': {'events': [], 'focus': '运行数据读取失败：' + str(exc)},
+                         'directions': [], 'can_direct': False, 'actions': [], 'checks': [],
+                         'audit_issues': {}, 'control': '', 'resume_unavailable': '运行数据需要修复：' + str(exc)})
+
+    def _view_data(self, meta: dict, processes: dict) -> dict:
         run = Path(meta['run_dir'])
         state = read_json(run / 'state.json')
         status = meta.get('status', 'unknown')
@@ -152,6 +177,8 @@ class TaskStore:
             else:
                 status = 'interrupted'
         except (OSError, ValueError, TypeError):
+            if state and not live:
+                raise
             if live:
                 status = 'starting'
             elif meta.get('started_at'):
@@ -171,16 +198,47 @@ class TaskStore:
         modules = state.get('modules') or []
         accepted = sum(item.get('status') == 'accepted' for item in modules)
         control = read_json(run / 'control.json').get('action', '')
+        if status == 'paused' and control != 'pause':
+            status = 'running'
+            health = {**health, 'phase': 'resuming'}
         active = status in {'running', 'paused'}
         actions = []
+        resume_unavailable = ''
         if meta.get('managed') and status == 'queued':
             actions = ['start', 'cancel']
         elif active and control != 'stop':
             actions = ['continue' if status == 'paused' or control == 'pause' else 'pause', 'stop']
-        elif meta.get('managed') and status in RESUMABLE and not live and (run / 'state.json').is_file():
-            actions = ['resume']
+        elif status in RESUMABLE and not live and (run / 'state.json').is_file():
+            try:
+                self._resume_args(meta, state)
+                actions = ['resume']
+            except TaskError as exc:
+                resume_unavailable = str(exc)
+        control_message = ''
+        if meta.get('error') and not live:
+            control_message = '上次启动失败：' + str(meta['error'])
+        elif active:
+            if control == 'stop':
+                control_message = '正在停止执行并保存检查点…'
+            elif control == 'pause' and status != 'paused':
+                control_message = '暂停已请求，当前轮次结束后暂停；可取消暂停。'
+            elif status == 'paused':
+                control_message = '已暂停，点击恢复执行后继续原任务。'
+            elif health.get('phase') == 'resuming':
+                control_message = '恢复已请求，正在继续原任务。'
+        elif status == 'starting':
+            control_message = '正在启动监督器并加载任务检查点…'
         current_provider = (provider.get('reviewer' if health.get('phase') == 'reviewing' else 'worker') or {}).get('name')
         progress = self.activity.snapshot(run, state, health, status, current_provider or meta.get('provider', ''))
+        try:
+            directions = Directions(run).snapshot()
+            direction_error = ''
+        except (ValueError, OSError) as exc:
+            directions, direction_error = [], str(exc)
+        can_direct = status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
+        delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
+        if active and state.get('directions_version') != 1:
+            delivery = 'restart_required'
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
@@ -194,6 +252,10 @@ class TaskStore:
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
                      'activity': progress,
+                     'control_message': control_message, 'resume_unavailable': resume_unavailable,
+                     'launch_error': meta.get('error', '') if not live else '',
+                     'directions': directions, 'can_direct': can_direct,
+                     'direction_delivery': delivery, 'direction_error': direction_error,
                      'actions': actions, 'checks': meta.get('checks', state.get('checks', []))})
 
     def overview(self) -> dict:
@@ -202,7 +264,27 @@ class TaskStore:
             tasks = [self._view(meta, sample['processes']) for meta in self._catalog().values()]
             tasks.sort(key=lambda item: item['created_at'], reverse=True)
             return {'tasks': tasks, 'resources': {key: value for key, value in sample.items() if key != 'processes'},
+                    'discovery': {'roots': list(dict.fromkeys(str(p) for p in self.runs_dirs)), 'warnings': self._scan_warnings},
                     'at': timestamp()}
+
+    def add_direction(self, ident: str, data: dict) -> dict:
+        with self._lock:
+            meta = self._get(ident)
+            view = self._view(meta, {})
+            if not view['can_direct']:
+                raise TaskError('该任务已结束，请创建后续任务', 409)
+            pause = data.get('pause', False)
+            if type(pause) is not bool:
+                raise TaskError('pause 必须是布尔值')
+            if pause and 'pause' not in view['actions']:
+                raise TaskError('当前任务无法请求暂停，请刷新状态后重试', 409)
+            try:
+                Directions(Path(meta['run_dir'])).append(data.get('text'))
+            except ValueError as exc:
+                raise TaskError(str(exc)) from exc
+            if pause:
+                write_json(Path(meta['run_dir']) / 'control.json', {'action': 'pause'}, durable=True)
+            return self.detail(ident)
 
     def detail(self, ident: str) -> dict:
         with self._lock:
@@ -253,7 +335,7 @@ class TaskStore:
     def _check_start(self, meta: dict) -> None:
         available = discover_providers()
         for role in ('provider', 'reviewer'):
-            if not available.get(meta[role]):
+            if meta.get(role) and meta[role] != '—' and not available.get(meta[role]):
                 raise TaskError(f'未找到 {meta[role]} 可执行文件，请先安装并完成登录', 409)
         if not Path(meta['cwd']).is_dir():
             raise TaskError('项目目录已不存在', 409)
@@ -264,12 +346,27 @@ class TaskStore:
             if view['cwd'] == meta['cwd'] and view['status'] in {'running', 'starting', 'paused'}:
                 raise TaskError('该项目已有任务执行中，请先停止或等待完成', 409)
 
-    def _launch(self, meta: dict, resume: bool = False) -> None:
+    def _resume_args(self, meta: dict, state: dict | None = None) -> list[str]:
         run = Path(meta['run_dir'])
-        run.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Requirement is supplied by stdin, so even text beginning with '-' stays literal.
-        argv = [sys.executable, '-m', 'auto_moniter', 'run', '--cwd', meta['cwd'],
-                '--run-dir', str(run), '--provider', meta['provider'], '--reviewer', meta['reviewer'],
+        state = state if state is not None else read_json(run / 'state.json')
+        if state.get('status') not in {'running', 'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required'}:
+            raise TaskError('检查点状态不支持恢复，请新建任务', 409)
+        if not (run / 'requirement.md').is_file():
+            raise TaskError('缺少原始需求检查点，无法恢复', 409)
+        manifest = {'argv': meta['resume_argv']} if meta.get('resume_argv') else read_json(run / 'launch.json')
+        if not manifest:
+            if meta.get('managed'):
+                manifest = {'argv': self._new_args(meta)}
+            else:
+                raise TaskError('缺少原始启动配置 launch.json，请使用原 CLI 配置恢复', 409)
+        try:
+            return resume_arguments(manifest, run, state)
+        except (ValueError, ProviderError, TypeError, KeyError, OSError) as exc:
+            raise TaskError('无法恢复：' + str(exc), 409) from exc
+
+    def _new_args(self, meta: dict) -> list[str]:
+        argv = ['run', '--cwd', meta['cwd'], '--run-dir', meta['run_dir'],
+                '--provider', meta['provider'], '--reviewer', meta['reviewer'],
                 '--max-runtime', str(meta['max_runtime_minutes'] * 60),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
         for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend')]:
@@ -277,22 +374,36 @@ class TaskStore:
                 argv.append(flag + '=' + meta[key])
         for check in meta['checks']:
             argv.append('--check=' + check)
-        if resume:
-            argv.append('--resume')
+        return argv
+
+    def _launch(self, meta: dict, resume: bool = False) -> None:
+        run = Path(meta['run_dir'])
+        run.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Requirement is supplied by stdin, so even text beginning with '-' stays literal.
+        arguments = self._resume_args(meta) if resume else self._new_args(meta)
+        argv = [sys.executable, '-m', 'auto_moniter', *arguments]
         env = os.environ.copy()
         package_root = str(Path(__file__).resolve().parent.parent)
         env['PYTHONPATH'] = package_root + os.pathsep + env.get('PYTHONPATH', '')
         env['PYTHONUNBUFFERED'] = '1'
+        previous_control = read_json(run / 'control.json') if resume else {}
         try:
+            if resume:
+                (run / 'control.json').unlink(missing_ok=True)
+            else:
+                write_json(run / 'launch.json', {'argv': arguments}, durable=True)
             with (run / 'console.log').open('ab') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
                                          cwd=package_root, env=env, start_new_session=True)
             # communicate() runs off the request thread and reaps the detached CLI on exit.
             meta.update(status='starting', started_at=timestamp(), launcher=process_identity(child.pid))
+            meta.pop('error', None)
             self._children[meta['id']] = child
             self._save(meta)
             threading.Thread(target=self._wait, args=(meta['id'], child, meta['requirement']), daemon=True).start()
         except OSError as exc:
+            if previous_control:
+                write_json(run / 'control.json', previous_control, durable=True)
             meta.update(status='failed', started_at=timestamp(), error=str(exc))
             self._save(meta)
             raise TaskError(f'启动失败：{exc}', 500) from exc
@@ -315,9 +426,15 @@ class TaskStore:
                 raise TaskError('当前状态不支持此操作，请刷新后重试', 409)
             run = Path(meta['run_dir'])
             if action in {'start', 'resume'}:
+                if action == 'resume' and not meta.get('managed'):
+                    # Keep the discovered task ID and its original run directory.
+                    state = read_json(run / 'state.json')
+                    arguments = self._resume_args(meta, state)
+                    meta = {**meta, 'managed': True, 'imported': True, 'title': view['title'],
+                            'requirement': view['requirement'], 'cwd': view['cwd'],
+                            'provider': view['provider'], 'reviewer': view['reviewer'],
+                            'created_at': view['created_at'], 'resume_argv': arguments}
                 self._check_start(meta)
-                if action == 'resume':
-                    (run / 'control.json').unlink(missing_ok=True)
                 self._launch(meta, resume=action == 'resume')
             elif action == 'cancel':
                 meta['status'] = 'cancelled'

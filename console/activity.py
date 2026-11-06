@@ -140,7 +140,7 @@ class ActivityReader:
         activity = []
         for name in ('live.previous.jsonl', 'live.jsonl'):
             for entry in json_lines(run / name):
-                if entry.get('kind') in {'message', 'command', 'file', 'tool', 'result', 'plan', 'error', 'output', 'phase'}:
+                if entry.get('kind') in {'message', 'command', 'file', 'tool', 'result', 'plan', 'error', 'output', 'phase', 'direction'}:
                     activity.append(entry)
         source = 'live' if activity else 'monitor'
         session = ''
@@ -168,11 +168,12 @@ class ActivityReader:
                 text += '：' + str(event.get('summary') or event.get('status') or '')
             activity.append({'at': event.get('at', ''), 'kind': 'phase', 'text': text,
                              'role': event.get('role', ''), 'round': event.get('round', '')})
-        activity.sort(key=lambda item: item.get('at', ''))
+        activity.sort(key=lambda item: (parse_time(item.get('at', '')) or datetime.min.replace(tzinfo=timezone.utc)))
         current_entries = [e for e in activity if str(e.get('round')) == str(index) and e.get('role') == role]
         unique, seen = [], set()
         for entry in reversed(activity):
-            key = (entry.get('kind'), str(entry.get('text')), str(entry.get('round')))
+            key = (entry.get('id') or entry.get('at'), entry.get('role'), entry.get('kind'),
+                   str(entry.get('text')), str(entry.get('round')))
             if key in seen:
                 continue
             seen.add(key)

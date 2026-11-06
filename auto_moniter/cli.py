@@ -12,6 +12,13 @@ from pathlib import Path
 from auto_moniter import __version__
 from auto_moniter.providers import ProviderError, discover_providers, resolve_provider
 from auto_moniter.supervisor import RunConfig, Supervisor
+from auto_moniter.modules import definitions
+from auto_moniter.health import run_health, read_run_snapshot
+from auto_moniter.guardian import Guardian
+from auto_moniter.storage import write_json
+from auto_moniter.preflight import doctor
+from auto_moniter.redaction import safe, redact
+from auto_moniter.retention import run_storage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,9 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reviewer provider. Required unless --no-review. Use a different provider from the worker when you can.",
     )
     run.add_argument("--reviewer-model", default="", help="Reviewer model id")
-    run.add_argument("--reviewer-mode", default="", help="Reviewer mode; defaults to the provider's review mode")
+    run.add_argument("--reviewer-mode", default="", help="Reviewer mode: read-only (Codex) or plan; writable modes are rejected")
+    run.add_argument("--review-isolation", choices=("provider", "strict"), default="provider", help="strict verifies and enforces read-only filesystem mounts with bwrap (native reviewers only)")
     run.add_argument("--reviewer-paseo-backend", default="", help="Paseo backend for the reviewer")
-    run.add_argument("--reviewer-paseo-mode", default="", help="Paseo reviewer mode; defaults depend on its backend. May also use --reviewer-mode")
+    run.add_argument("--reviewer-paseo-mode", default="", help="Paseo reviewer mode: Claude plan only. May also use --reviewer-mode")
     run.add_argument("--no-review", action="store_true", help="Trust the worker conclusion. Weaker. Prefer a reviewer.")
     run.add_argument(
         "--fresh-review",
@@ -56,10 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start a new reviewer session every round (default). --no-fresh-review resumes it.",
     )
     run.add_argument("--resume", action="store_true", help="Continue an existing --run-dir instead of starting over")
+    run.add_argument("--guard", action="store_true", help="Run a parent guardian that resumes the monitor after an unexpected exit")
+    run.add_argument("--guard-restarts", type=_nonnegative_int, default=3, help="Maximum automatic monitor restarts, cumulative on resume (default: 3)")
+    run.add_argument("--guard-delay", default="5s", help="Initial guardian restart delay; backs off to 60s (default: 5s)")
+    run.add_argument("--guard-stop-timeout", default="30s", help="Graceful monitor shutdown deadline, then SIGKILL (default 30s)")
+    run.add_argument("--worker-isolation", choices=("provider", "strict"), default="provider", help="strict protects external monitor state using bwrap; native workers only")
+    run.add_argument("--protect", action="append", default=[], help="Project validation file/directory mounted read-only for strict worker; repeatable")
+    run.add_argument("--memory-bytes", type=_nonnegative_int, default=0, help="Per-process virtual memory limit, inherited by native worker/check children")
+    run.add_argument("--file-bytes", type=_nonnegative_int, default=0, help="Per-file write size limit for native subprocesses")
+    run.add_argument("--max-run-bytes", type=_nonnegative_int, default=0, help="Monitor run directory storage budget, checked periodically")
     run.add_argument("--max-rounds", type=_nonnegative_int, default=0, help="Stop after N worker rounds. 0 means until accepted.")
-    run.add_argument("--turn-timeout", default="", help="Per-turn limit, for example 30m, 2h. Empty waits.")
-    run.add_argument("--idle-timeout", default="15m", help="Restart a turn with no CLI output for this long (default: 15m). 0 disables.")
-    run.add_argument("--retry-delay", default="5s", help="Initial retry delay for failures, questions, or unchanged gaps; backs off to at most 60s.")
+    run.add_argument("--turn-timeout", default=None, help="Per-turn limit, for example 30m, 2h (default: 0; inherited on resume).")
+    run.add_argument("--idle-timeout", default=None, help="Restart a turn with no CLI output for this long (default: 15m; inherited on resume). 0 disables.")
+    run.add_argument("--retry-delay", default=None, help="Initial retry delay (default: 5s; inherited on resume); backs off to at most 60s.")
     run.add_argument(
         "--stall-limit",
         type=_nonnegative_int,
@@ -73,15 +90,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop after this many consecutive process failures. 0 keeps retrying.",
     )
     run.add_argument("--accept", default="", help="Extra acceptance checks the reviewer must verify")
+    run.add_argument("--check", action="append", default=[], help="Shell acceptance command run by the monitor before final delivery; repeat for multiple checks")
+    run.add_argument("--check-timeout", default=None, help="Timeout for each acceptance command (default: 10m; inherited on resume)")
+    run.add_argument("--restart-after-stall", type=_nonnegative_int, default=3, help="Restart agent sessions after N turns without workspace or module progress; 0 disables (default: 3)")
+    run.add_argument("--review-every", type=_nonnegative_int, default=None, help="Audit unfinished work after N worker turns; 0 only reviews completion/blockers (default: 5; inherited on resume)")
     run.add_argument("--run-dir", type=Path, help="Directory for prompts, logs, and the report")
+    run.add_argument("--keep-rounds", type=_nonnegative_int, default=None, help="Retain artifacts and detailed records for the latest N rounds; 0 retains all (default: 100; inherited on resume)")
+    run.add_argument("--modules", type=Path, help="Optional JSON array of module definitions: id, title, acceptance")
+    run.add_argument("--max-runtime", default="0", help="Total active monitor runtime budget, including resumed runs; 0 disables")
+    run.add_argument("--max-agent-calls", type=_nonnegative_int, default=0, help="Total worker/reviewer turns across resumed runs; 0 disables")
+    run.add_argument("--max-output-bytes", type=_positive_int, default=None, help="Combined output limit per subprocess (default: 8 MiB; inherited on resume)")
     run.add_argument(
         "--exec",
         default="",
         help="Shell template for --provider command. Placeholders: {prompt_file} {prompt} {cwd} {schema} {session_id} {model}",
     )
     run.add_argument("--resume-exec", default="", help="Resume shell template. Same placeholders as --exec.")
-    run.add_argument("--reviewer-exec", default="", help="Shell template when the reviewer provider is command")
-    run.add_argument("--reviewer-resume-exec", default="", help="Resume shell template for the reviewer")
+    run.add_argument("--reviewer-exec", default="", help="Reserved; custom command reviewers are no longer supported")
+    run.add_argument("--reviewer-resume-exec", default="", help="Reserved; custom command reviewers are no longer supported")
     run.add_argument("--extra-arg", action="append", default=[], help="Extra argument passed to the worker CLI")
     run.add_argument("--reviewer-extra-arg", action="append", default=[], help="Extra argument passed to the reviewer CLI")
 
@@ -89,8 +115,26 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("run_dir", type=Path)
     watch.add_argument("--interval", default="2s", help="Poll interval")
     watch.add_argument("--once", action="store_true", help="Print the current state and exit")
+    status = sub.add_parser("status", help="Diagnose run health, pending modules, and resource usage")
+    status.add_argument("run_dir", type=Path)
+    status.add_argument("--stale-after", default="60s", help="Heartbeat age threshold (default: 60s)")
+    for action in ("runs", "cleanup"):
+        storage = sub.add_parser(action, help="List project run storage" if action == "runs" else "Preview removal of old finished runs; use --apply to delete")
+        storage.add_argument("-C", "--cwd", type=Path, default=Path.cwd(), help="Project whose runs to inspect")
+        storage.add_argument("--runs-dir", type=Path, help="Explicit parent of legacy/custom run directories")
+        if action == "cleanup":
+            storage.add_argument("--older-than", default="7d", help="Minimum time since report was written (default: 7d)")
+            storage.add_argument("--keep-runs", type=_nonnegative_int, default=5, help="Always retain newest N finished runs (default: 5)")
+            storage.add_argument("--include-failed", action="store_true", help="Also allow removal of failed/stalled/max_rounds results; resumable runs are always kept")
+            storage.add_argument("--apply", action="store_true", help="Delete selected directories; default only previews")
+    for action in ("pause", "stop", "continue"):
+        control = sub.add_parser(action, help=f"Request {action} for an existing monitor (pause takes effect at turn boundaries)")
+        control.add_argument("run_dir", type=Path)
 
     sub.add_parser("providers", help="Show which agent CLIs are on PATH")
+    diagnostic = sub.add_parser("doctor", help="Offline platform and executable checks; does not call models")
+    diagnostic.add_argument("-C", "--cwd", type=Path, default=Path.cwd())
+    sub.add_parser("selftest", help="Exercise the installed monitor end to end using a local fixture, without models")
     return parser
 
 
@@ -103,12 +147,45 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {'available' if ok else 'missing'}")
         return 0
     try:
+        if args.command == "doctor":
+            result = doctor(args.cwd)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["supported"] else 2
+        if args.command == "selftest":
+            from auto_moniter.selftest import selftest
+            result = selftest()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["passed"] else 1
+        if args.command in {"runs", "cleanup"}:
+            options = {}
+            if args.command == "cleanup":
+                options = {"older_than": _parse_duration(args.older_than), "keep_runs": args.keep_runs,
+                           "include_failed": args.include_failed, "apply": args.apply}
+            result = run_storage(args.cwd, runs_dir=args.runs_dir, **options)
+            print(json.dumps(safe(result), ensure_ascii=False, indent=2))
+            return 1 if result["errors"] else 0
+        if args.command in {"pause", "stop", "continue"}:
+            path = args.run_dir.expanduser().resolve()
+            if not (path / "state.json").is_file():
+                raise ValueError("No run state found")
+            if args.command == "continue":
+                (path / "control.json").unlink(missing_ok=True)
+            else:
+                write_json(path / "control.json", {"action": args.command})
+            print(f"{args.command} requested for {path}")
+            return 0
+        if args.command == "status":
+            threshold = _parse_duration(args.stale_after)
+            if threshold <= 0:
+                raise ValueError("stale-after must be positive")
+            print(json.dumps(run_health(args.run_dir.expanduser().resolve(), threshold), ensure_ascii=False, indent=2))
+            return 0
         if args.command == "watch":
             return _watch(args)
         if args.command == "run":
             return _run(args)
     except (OSError, ValueError) as exc:
-        print(f"auto-moniter: {exc}", file=sys.stderr)
+        print(redact(f"auto-moniter: {exc}"), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 1
@@ -182,9 +259,9 @@ def _run(args: argparse.Namespace) -> int:
         extra_args=list(args.extra_arg),
         reviewer_extra_args=list(args.reviewer_extra_arg),
         max_rounds=args.max_rounds,
-        turn_timeout_s=_parse_duration(args.turn_timeout),
-        idle_timeout_s=_parse_duration(args.idle_timeout),
-        retry_delay_s=_parse_duration(args.retry_delay),
+        turn_timeout_s=_parse_duration(args.turn_timeout) if args.turn_timeout is not None else None,
+        idle_timeout_s=_parse_duration(args.idle_timeout) if args.idle_timeout is not None else None,
+        retry_delay_s=_parse_duration(args.retry_delay) if args.retry_delay is not None else None,
         stall_limit=max(0, args.stall_limit),
         failure_limit=max(0, args.failure_limit),
         acceptance=args.accept,
@@ -192,9 +269,22 @@ def _run(args: argparse.Namespace) -> int:
         no_review=args.no_review,
         fresh_review=args.fresh_review,
         resume=args.resume,
+        checks=list(args.check),
+        check_timeout_s=_parse_duration(args.check_timeout) if args.check_timeout is not None else None,
+        restart_after_stall=args.restart_after_stall,
+        review_every=args.review_every,
+        modules=definitions(json.loads(args.modules.expanduser().read_text(encoding="utf-8"))) if args.modules else [],
+        max_runtime_s=_parse_duration(args.max_runtime),
+        max_agent_calls=args.max_agent_calls,
+        max_output_bytes=args.max_output_bytes,
+        review_isolation=args.review_isolation,
+        keep_rounds=args.keep_rounds,
+        worker_isolation=args.worker_isolation, protect_paths=args.protect,
+        memory_bytes=args.memory_bytes, file_bytes=args.file_bytes, max_run_bytes=args.max_run_bytes,
     )
-    report = Supervisor(config).run()
-    print(json.dumps({"status": report.status, "rounds": report.rounds, "summary": report.summary}, ensure_ascii=False, indent=2))
+    report = (Guardian(config, max_restarts=args.guard_restarts, delay_s=_parse_duration(args.guard_delay), shutdown_s=_parse_duration(args.guard_stop_timeout)).run()
+              if args.guard else Supervisor(config).run())
+    print(json.dumps(safe({"status": report.status, "rounds": report.rounds, "summary": report.summary}), ensure_ascii=False, indent=2))
     if report.stop_reason == "invalid":
         return 2
     return 0 if report.status == "done" else 1
@@ -202,42 +292,33 @@ def _run(args: argparse.Namespace) -> int:
 
 def _watch(args: argparse.Namespace) -> int:
     args.run_dir = args.run_dir.expanduser().resolve()
-    state_path = args.run_dir / "state.json"
-    report_path = args.run_dir / "report.json"
-    heartbeat_path = args.run_dir / "heartbeat"
-    if args.once:
-        target = report_path if report_path.exists() else state_path
-        if not target.exists():
-            print(f"no state in {args.run_dir}", file=sys.stderr)
-            return 1
-        print(_progress_text(target.read_text(encoding="utf-8")))
-        return 0
     seen = ""
     interval = _parse_duration(args.interval)
     if interval <= 0:
         raise ValueError("watch interval must be positive")
     while True:
-        target = report_path if report_path.exists() else state_path
-        if target.exists():
-            text = target.read_text(encoding="utf-8")
-            beat = heartbeat_path.read_text(encoding="utf-8").strip() if heartbeat_path.exists() else ""
-            if beat:
-                try:
-                    activity = json.loads(beat)
-                    beat = str(activity.get("note") or "")
-                except (ValueError, AttributeError):
-                    beat = ""
-            progress = _progress_text(text)
-            rendered = progress if target == report_path else progress + ("\n# heartbeat " + beat if beat else "")
+        try:
+            snapshot = read_run_snapshot(args.run_dir)
+        except FileNotFoundError:
+            if args.once:
+                print(f"no state in {args.run_dir}", file=sys.stderr)
+                return 1
+        else:
+            health = run_health(args.run_dir, snapshot=snapshot)
+            view = json.loads(_progress_text(json.dumps(snapshot["state"], ensure_ascii=False)))
+            view.update({key: health[key] for key in ("health", "phase", "lock_held", "guardian_lock_held", "report_warning", "delivery_confirmed")})
+            rendered = json.dumps(view, ensure_ascii=False, indent=2)
+            if not args.once and health["activity"] and not snapshot["finished"]:
+                rendered += "\n# heartbeat " + health["activity"]
             if rendered != seen:
                 print(rendered, flush=True)
                 seen = rendered
-            if target == report_path:
-                try:
-                    status = json.loads(text).get("status")
-                except json.JSONDecodeError:
-                    status = ""
-                return 0 if status == "done" else 1
+            if args.once:
+                return 0
+            if snapshot["finished"]:
+                return 0 if health["status"] == "done" else 1
+            if health["lock_held"] is not True and health["guardian_lock_held"] is not True:
+                return 1
         time.sleep(interval)
 
 
@@ -246,10 +327,12 @@ def _progress_text(content: str) -> str:
     state = json.loads(content)
     if not isinstance(state, dict):
         raise ValueError("run state must contain an object")
-    keys = ("cwd", "status", "summary", "stop_reason", "session_id", "next_round", "updated_at", "last_worker", "last_review")
+    keys = ("cwd", "status", "summary", "stop_reason", "session_id", "next_round", "updated_at", "last_worker", "last_review", "last_audit", "review_schedule", "audit_issues", "modules", "usage", "stall", "recovery_note", "no_progress_turns", "recovery_count")
     view = {key: state[key] for key in keys if key in state}
     rounds = state.get("rounds", 0)
-    view["rounds"] = sum(record.get("role") == "worker" for record in rounds) if isinstance(rounds, list) else rounds
+    view["rounds"] = sum(record.get("role") == "worker" for record in rounds) + (state.get("history") or {}).get("pruned_worker_rounds", 0) if isinstance(rounds, list) else rounds
+    if "history" in state:
+        view["history"] = state["history"]
     return json.dumps(view, ensure_ascii=False, indent=2)
 
 
@@ -284,6 +367,13 @@ def _parse_duration(value: str) -> float:
     if not math.isfinite(duration) or duration < 0:
         raise ValueError(f"duration must be finite and nonnegative: {value!r}")
     return duration
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return number
 
 
 def _nonnegative_int(value: str) -> int:

@@ -101,7 +101,15 @@ def evidence_paths(
                 path = cwd / candidate
             try:
                 path = path.resolve()
-                if not _under(path, cwd) or not path.is_file() or _ignored(path, ignore_dir, cwd=cwd):
+                if not _under(path, cwd) or _ignored(path, ignore_dir, cwd=cwd):
+                    continue
+                if not path.is_file():
+                    # A removed baseline file is evidence of a deletion task.
+                    # Unknown paths, replacement directories and dangling links
+                    # must not masquerade as removed files.
+                    if (baseline is not None and str(path) in baseline
+                            and not path.exists() and not path.is_symlink()):
+                        found.append(path)
                     continue
                 if not _changed_during_run(path, cwd, created_since, baseline):
                     continue
@@ -137,10 +145,13 @@ def acceptance_problems(
     paths = evidence_paths(cwd, evidence, created_since=created_since, baseline=baseline, ignore_dir=ignore_dir)
     if not paths:
         problems.append(
-            "Review evidence does not name a workspace file created or changed during this run."
+            "Review evidence does not name a workspace file created or changed during this run, or a removed baseline file."
         )
         return problems
-    changed = _git_changed_paths(cwd)
+    try:
+        changed = _git_changed_paths(cwd)
+    except ValueError as exc:
+        return [f"Cannot verify Git workspace diff: {exc}"]
     relatives = {str(path.relative_to(cwd)) for path in paths}
     if changed is not None:
         if not relatives & changed:
@@ -310,6 +321,13 @@ def _workspace_files(cwd: Path, ignore_dir: Path | None = None, ignored_paths: s
 
 
 def _git_changed_paths(cwd: Path) -> set[str] | None:
+    # An unrelated empty .git directory above a plain project is not a repo
+    # Git can discover. At the project root, even broken metadata must fail.
+    marker = cwd / ".git"
+    git_expected = bool(os.environ.get("GIT_DIR")) or marker.exists() or marker.is_symlink() or any(
+        (parent / ".git").is_file() or (parent / ".git/HEAD").exists()
+        for parent in cwd.parents
+    )
     try:
         result = subprocess.run(
             ["git", "-c", "status.relativePaths=true", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
@@ -319,9 +337,13 @@ def _git_changed_paths(cwd: Path) -> set[str] | None:
             ["git", "rev-parse", "--show-prefix"],
             cwd=cwd, capture_output=True, check=False, timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if git_expected:
+            raise ValueError(f"Git query failed ({type(exc).__name__})") from exc
         return None
     if result.returncode or prefix_result.returncode:
+        if git_expected:
+            raise ValueError("Git status or project-prefix query failed")
         return None
     prefix = os.fsdecode(prefix_result.stdout).rstrip("\n")
     names: set[str] = set()
@@ -333,7 +355,9 @@ def _git_changed_paths(cwd: Path) -> set[str] | None:
         if name.startswith(prefix):
             names.add(name[len(prefix):])
         if "R" in entry[:2] or "C" in entry[:2]:
-            next(entries, None)
+            original = next(entries, None)
+            if original is not None and original.startswith(prefix):
+                names.add(original[len(prefix):])
     return names
 
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=AI work monitor task %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=auto-moniter
+Group=auto-moniter
+WorkingDirectory=/srv/auto-moniter/projects/%i
+Environment=HOME=/var/lib/auto-moniter/client-home
+Environment=AUTO_MONITER_STATE_DIR=/var/lib/auto-moniter/state
+Environment=PATH=/opt/auto-moniter/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/auto-moniter/venv/bin/python -m auto_moniter.service /etc/auto-moniter/%i.json
+# Do not restart exit code 1 (budget, authentication, explicit limits) or 2 (configuration).
+Restart=on-abnormal
+RestartSec=10
+TimeoutStopSec=90
+KillMode=control-group
+SendSIGKILL=yes
+MemoryMax=8G
+MemorySwapMax=0
+TasksMax=256
+LimitFSIZE=1G
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/auto-moniter/projects/%i /var/lib/auto-moniter
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -359,14 +359,36 @@ class Provider:
     mode: str = ""
 
     def turn_mode(self, read_only: bool) -> str:
+        if read_only:
+            expected = "read-only" if self.name == "codex" else "plan"
+            if self.mode and self.mode != expected:
+                raise ProviderError(f"Reviewer {self.name} requires {expected!r} mode; writable mode {self.mode!r} is not allowed.")
+            return expected
         if self.mode:
             return self.mode
-        if read_only:
-            return "read-only" if self.name == "codex" else "plan"
         return {
             "claude": "bypassPermissions", "codex": "full-access", "grok": "bypassPermissions",
             "gemini": "yolo", "cursor": "force", "antigravity": "bypass",
         }[self.name]
+
+    def validate_review(self, extra_args: Iterable[str] = ()) -> None:
+        """Review permissions cannot be widened by mode or CLI overrides."""
+        self.turn_mode(True)
+        blocked = {
+            "--sandbox", "-s", "--mode", "--permission-mode", "--approval-mode",
+            "--dangerously-bypass-approvals-and-sandbox", "--dangerously-skip-permissions",
+            "--always-approve", "--force", "--full-auto", "--yolo", "--allow-all",
+            "--config", "-c", "--settings", "--settings-file", "--profile", "-p",
+            "--add-dir", "--include-directories", "--allowedTools", "--tools",
+            "--disallowedTools", "--permission-prompts", "--allow-dangerously-skip-permissions",
+            "--provider", "--cwd", "--workspace", "--trust", "--continue", "--resume",
+            "--conversation", "--session-id", "--backend", "--mcp-config", "--agent",
+            "--directory", "-C", "-r", "--permissionMode", "--allowed-tools", "--disallowed-tools",
+        }
+        for arg in extra_args:
+            flag = arg.split("=", 1)[0]
+            if flag in blocked or (arg.startswith(("-c", "-s", "-p")) and not arg.startswith("--")):
+                raise ProviderError(f"Reviewer extra argument {arg!r} can override read-only permissions; use the review mode defaults.")
 
     def start_command(
         self,
@@ -676,13 +698,24 @@ class PaseoProvider(Provider):
         self.mode = normalize_mode(backend, mode, paseo=True)
         self.role = role
 
+    def turn_mode(self, read_only: bool) -> str:
+        if read_only:
+            if self.backend.split("/", 1)[0] != "claude":
+                raise ProviderError("Paseo read-only review is supported only for Claude plan mode. Use --reviewer codex (native) or --reviewer claude.")
+            if self.mode and self.mode != "plan":
+                raise ProviderError("Paseo reviewer requires 'plan' mode; writable review modes are not allowed.")
+            return "plan"
+        return self.mode
+
     def start_command(self, prompt_file, cwd, schema_file, *, model="", extra_args=(), read_only=False):
-        mode = self.mode
+        if read_only:
+            self.validate_review(extra_args)
+        mode = self.turn_mode(read_only)
         if not mode:
             backend = self.backend.split("/", 1)[0]
-            mode = ({"claude": "plan", "codex": "auto"} if read_only else {
+            mode = {
                 "claude": "bypass", "codex": "full-access",
-            }).get(backend, "")
+            }.get(backend, "")
         # Do not pass --output-schema. Paseo replaces the run record with the
         # structured conclusion, and the supervisor then loses agentId.
         cmd = [
@@ -706,6 +739,8 @@ class PaseoProvider(Provider):
         return PreparedCommand(cmd)
 
     def resume_command(self, session_id, prompt_file, cwd, schema_file, *, model="", extra_args=(), read_only=False):
+        if read_only:
+            raise ProviderError("Paseo read-only review requires a fresh session; existing sessions may have writable permissions.")
         del cwd, schema_file, model, extra_args, read_only
         return PreparedCommand(
             [
@@ -756,15 +791,20 @@ class CommandProvider(Provider):
         )
         return ["sh", "-lc", rendered]
 
+    def validate_review(self, extra_args: Iterable[str] = ()) -> None:
+        raise ProviderError("Custom command reviewers cannot enforce read-only mode. Use --reviewer codex or another native reviewer with plan mode.")
+
     def start_command(self, prompt_file, cwd, schema_file, *, model="", extra_args=(), read_only=False):
-        del read_only
+        if read_only:
+            self.validate_review(extra_args)
         cmd = self._render(self.start_template, prompt_file, cwd, schema_file, "", model)
         if extra_args:
             cmd[-1] = cmd[-1] + " " + " ".join(shlex.quote(arg) for arg in extra_args)
         return PreparedCommand(cmd)
 
     def resume_command(self, session_id, prompt_file, cwd, schema_file, *, model="", extra_args=(), read_only=False):
-        del read_only
+        if read_only:
+            self.validate_review(extra_args)
         template = self.resume_template or self.start_template
         cmd = self._render(template, prompt_file, cwd, schema_file, session_id, model)
         if extra_args:
@@ -803,19 +843,27 @@ def resolve_provider(
         if mode and paseo_mode and mode != paseo_mode:
             raise ProviderError("Pass only one of --mode and --paseo-mode.")
         backend = paseo_backend or "claude"
-        return PaseoProvider(backend=backend, mode=mode or paseo_mode, role=role)
+        provider = PaseoProvider(backend=backend, mode=mode or paseo_mode, role=role)
+        if role == "reviewer":
+            provider.validate_review()
+        return provider
     if key == "command":
         if mode:
             raise ProviderError("--mode is not supported for command; set the mode in --exec.")
         if not command:
             raise ProviderError("--exec is required when --provider command")
-        return CommandProvider(command, resume_command)
+        provider = CommandProvider(command, resume_command)
+        if role == "reviewer":
+            provider.validate_review()
+        return provider
     providers = builtin_providers()
     if key not in providers:
         known = ", ".join([*providers, "paseo", "command"])
         raise ProviderError(f"Unknown provider {name!r}. Known: {known}")
     provider = providers[key]
     provider.mode = normalize_mode(key, mode)
+    if role == "reviewer":
+        provider.validate_review()
     return provider
 
 

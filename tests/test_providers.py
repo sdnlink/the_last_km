@@ -249,17 +249,50 @@ class ModeCompatibilityTests(unittest.TestCase):
                         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", cmd)
                     self.assertLess(resume.index("--sandbox"), resume.index("resume"))
 
-    def test_paseo_review_defaults_match_backend_capabilities(self):
+    def test_paseo_review_requires_claude_plan_and_fresh_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             cwd, prompt, schema = _files(tmp)
-            for backend, expected in [("codex", "auto"), ("claude", "plan"), ("grok", None), ("custom-acp", None)]:
-                with self.subTest(backend=backend):
-                    provider = resolve_provider("paseo", paseo_backend=backend, role="reviewer")
-                    cmd = provider.start_command(prompt, cwd, schema, read_only=True).argv
-                    if expected:
-                        self.assertEqual(cmd[cmd.index("--mode") + 1], expected)
-                    else:
-                        self.assertNotIn("--mode", cmd)
+            provider = resolve_provider("paseo", paseo_backend="claude", role="reviewer")
+            cmd = provider.start_command(prompt, cwd, schema, read_only=True).argv
+            self.assertEqual(cmd[cmd.index("--mode") + 1], "plan")
+            with self.assertRaisesRegex(ProviderError, "fresh session"):
+                provider.resume_command("old-session", prompt, cwd, schema, read_only=True)
+            for backend in ["codex", "codex/model", "grok", "custom-acp"]:
+                with self.subTest(backend=backend), self.assertRaisesRegex(ProviderError, "read-only review"):
+                    resolve_provider("paseo", paseo_backend=backend, role="reviewer")
+
+    def test_review_rejects_writable_mode_in_start_and_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd, prompt, schema = _files(tmp)
+            for name in ["codex", "claude", "grok", "gemini", "cursor", "antigravity"]:
+                with self.subTest(provider=name):
+                    provider = resolve_provider(name, mode="bypass")
+                    for make in [lambda: provider.start_command(prompt, cwd, schema, read_only=True),
+                                 lambda: provider.resume_command("session", prompt, cwd, schema, read_only=True)]:
+                        with self.assertRaisesRegex(ProviderError, "Reviewer"):
+                            make()
+                    with self.assertRaises(ProviderError):
+                        resolve_provider(name, mode="bypass", role="reviewer")
+
+    def test_invalid_reviewer_permissions_fail_before_worker_or_run_directory(self):
+        for name, kwargs, extra in [
+            ("codex", {"mode": "full-access"}, []),
+            ("paseo", {"paseo_backend": "codex"}, []),
+            ("command", {"command": "echo bad"}, []),
+            ("codex", {}, ["--sandbox=workspace-write"]),
+            ("codex", {}, ["-csandbox_mode=\"danger-full-access\""]),
+            ("claude", {}, ["--dangerously-skip-permissions"]),
+            ("paseo", {"paseo_backend": "claude"}, ["--provider=codex"]),
+        ]:
+            with self.subTest(name=name, kwargs=kwargs, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                from tests.test_supervisor import ScriptedProvider
+                worker = ScriptedProvider("worker", [])
+                root = Path(tmp)
+                reviewer = resolve_provider(name, **kwargs)
+                report = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, reviewer_extra_args=extra), log=lambda _: None).run()
+                self.assertEqual(report.status, "invalid")
+                self.assertEqual(worker.calls, [])
+                self.assertFalse((root / ".auto-moniter").exists())
 
     def test_grok_acp_uses_default_and_reports_unsupported_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,6 +302,21 @@ class ModeCompatibilityTests(unittest.TestCase):
                 self.assertNotIn("--mode", cmd)
         with self.assertRaisesRegex(ProviderError, "--provider grok --mode bypass"):
             resolve_provider("paseo", paseo_backend="grok", mode="bypass")
+
+    def test_cli_rejects_unsafe_review_configuration_before_work(self):
+        configurations = [
+            ["--reviewer", "codex", "--reviewer-mode", "full-access"],
+            ["--reviewer", "paseo", "--reviewer-paseo-backend", "codex"],
+            ["--reviewer", "command", "--reviewer-exec", "echo unsafe"],
+            ["--reviewer", "codex", "--reviewer-extra-arg=--sandbox=workspace-write"],
+            ["--reviewer", "paseo", "--reviewer-paseo-backend", "claude", "--no-fresh-review"],
+        ]
+        for arguments in configurations:
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as tmp:
+                with patch("auto_moniter.supervisor.run_command") as run, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(["run", "--cwd", tmp, "--provider", "codex", *arguments, "task"]), 2)
+                    run.assert_not_called()
+                self.assertFalse((Path(tmp) / ".auto-moniter").exists())
 
     def test_custom_paseo_mode_ids_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:

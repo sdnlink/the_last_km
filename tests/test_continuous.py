@@ -31,7 +31,7 @@ class ContinuousLoopTests(unittest.TestCase):
             ])
             reviewer = ScriptedProvider("reviewer", [
                 {"verdict": _verdict("blocked")},
-                {"verdict": _verdict("done", evidence=["app.py"])},
+                {"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])},
             ])
             report = Supervisor(RunConfig("Complete the health endpoint and tests", root, worker, reviewer=reviewer, run_dir=root / "run", retry_delay_s=0), log=lambda _: None).run()
             self.assertEqual(report.status, "done")
@@ -94,35 +94,33 @@ class ContinuousLoopTests(unittest.TestCase):
             self.assertTrue(report.records[0].timed_out)
             self.assertIn("no output", report.records[0].verdict.summary)
 
-    def test_reviewer_edits_are_rolled_back_then_review_runs_again(self):
+    def test_reviewer_changes_stop_run_without_backup_or_rollback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             worker = ScriptedProvider("worker", [
                 {"verdict": _verdict("done", evidence=["app.py"]), "touch": "app.py"},
-                {"verdict": _verdict("done", evidence=["app.py"])},
             ])
-            code = (
-                "from pathlib import Path; import json; "
-                "counter=Path('run/review-attempt'); first=not counter.exists(); counter.write_text('started'); "
-                "Path('app.py').unlink() if first else None; "
-                f"print(json.dumps({_verdict('done', evidence=['app.py'])!r}))"
-            )
-            reviewer = resolve_provider("command", command=shlex.join([sys.executable, "-c", code]))
+            reviewer = ScriptedProvider("reviewer", [{"verdict": _verdict("done"), "touch": "unexpected.py"}])
             report = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, retry_delay_s=0, run_dir=root / "run"), log=lambda _: None).run()
-            self.assertEqual(report.status, "done")
-            self.assertEqual(report.rounds, 2)
+            self.assertEqual(report.status, "failed")
+            self.assertEqual(report.rounds, 1)
+            self.assertIn("Workspace changed during read-only review", report.summary)
             self.assertEqual((root / "app.py").read_text(), "changed\n")
-            self.assertIn("Original files were restored", worker.calls[1]["prompt"])
+            self.assertTrue((root / "unexpected.py").exists())
             self.assertEqual(list((root / "run").glob("review-backup-*")), [])
+            self.assertEqual(json.loads((root / "run/report.json").read_text())["status"], "failed")
 
     def test_retry_wait_is_interruptible_and_capped(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             supervisor = Supervisor(RunConfig("task", root, ScriptedProvider("worker", []), retry_delay_s=5), log=lambda _: None)
             supervisor.run_dir.mkdir(parents=True)
-            with patch.object(supervisor._stop_event, "wait") as wait:
+            messages = []
+            supervisor.log = messages.append
+            with patch.object(supervisor._stop_event, "wait") as wait, patch("auto_moniter.supervisor.time.monotonic", side_effect=[0, 0, 0, 60]):
                 supervisor._retry_pause(1000, "failure")
-                wait.assert_called_once_with(60)
+                wait.assert_called_once_with(0.2)
+            self.assertIn("retrying in 60s", messages[0])
             started = threading.Event()
 
             def wait_for_retry():
@@ -173,8 +171,8 @@ class DeliveryVerdictTests(unittest.TestCase):
     def test_cli_continuous_defaults_and_watchdog(self):
         args = build_parser().parse_args(["run", "task", "--no-review"])
         self.assertEqual((args.max_rounds, args.stall_limit, args.failure_limit), (0, 0, 0))
-        self.assertEqual(args.idle_timeout, "15m")
-        self.assertEqual(args.retry_delay, "5s")
+        self.assertIsNone(args.idle_timeout)
+        self.assertIsNone(args.retry_delay)
 
 
 class ReviewerRollbackTests(unittest.TestCase):
@@ -287,6 +285,8 @@ elif args[0] == 'logs':
     print('Please confirm before I continue.' if phase == 1 else json.dumps({_verdict('done', evidence=['app.py'])!r}))
 elif args[:2] == ['agent', 'stop']:
     Path('run/stopped').write_text('yes')
+elif args[:2] == ['agent', 'archive']:
+    Path('run/archived').write_text('yes')
 else:
     sys.exit(2)
 '''
@@ -298,6 +298,7 @@ else:
             self.assertEqual(report.status, "done")
             self.assertEqual(report.rounds, 2)
             self.assertEqual(report.session_id, SESSION)
+            self.assertTrue((root / "run/archived").exists())
 
 
 if __name__ == "__main__":

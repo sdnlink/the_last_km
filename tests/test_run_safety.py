@@ -97,7 +97,7 @@ class RunLifecycleTests(unittest.TestCase):
             self.assertEqual((run / "report.json").read_text(), "existing report")
             self.assertEqual(worker.calls, [])
 
-    def test_unfinished_worker_continues_before_review_or_backup(self):
+    def test_unfinished_worker_continues_then_reviews_without_copying(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             worker = ScriptedProvider("worker", [
@@ -106,23 +106,34 @@ class RunLifecycleTests(unittest.TestCase):
                 {"verdict": _verdict("done", evidence=["app.py"])},
             ])
             reviewer = ScriptedProvider("reviewer", [{"verdict": _verdict("done", evidence=["app.py"])}])
-            with patch("auto_moniter.supervisor.preserve_tree", wraps=preserve_tree) as backup:
+            with patch("auto_moniter.workspace.shutil.copy2", side_effect=AssertionError("must not copy workspace")) as backup:
                 report = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=root / "run", retry_delay_s=0), log=lambda _: None).run()
             self.assertEqual(report.status, "done")
             self.assertEqual([r.index for r in report.records if r.role == "reviewer"], [3])
-            self.assertEqual(backup.call_count, 1)
+            backup.assert_not_called()
+            self.assertEqual(list((root / "run").glob("review-backup-*")), [])
+            self.assertTrue(reviewer.calls[0]["read_only"])
+            self.assertIn("worker alone implements", reviewer.calls[0]["prompt"])
             self.assertIn("integration tests pending", worker.calls[1]["prompt"])
             self.assertIn("edge case pending", worker.calls[2]["prompt"])
 
-    def test_restore_error_finishes_run_with_a_diagnostic_report(self):
+    def test_review_fingerprint_error_finishes_run_with_a_diagnostic_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             worker = ScriptedProvider("worker", [{"verdict": _verdict("done", evidence=["app.py"]), "touch": "app.py"}])
             reviewer = ScriptedProvider("reviewer", [{"verdict": _verdict("done", evidence=["app.py"])}])
-            with patch("auto_moniter.supervisor.restore_reviewer_writes", side_effect=OSError("workspace restore failed")):
+            from auto_moniter.workspace import workspace_fingerprint as fingerprint
+            calls = 0
+            def fail_after_review(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("review fingerprint failed")
+                return fingerprint(*args, **kwargs)
+            with patch("auto_moniter.supervisor.workspace_fingerprint", side_effect=fail_after_review):
                 report = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=root / "run", retry_delay_s=0), log=lambda _: None).run()
             self.assertEqual(report.status, "failed")
-            self.assertIn("workspace restore failed", report.summary)
+            self.assertIn("review fingerprint failed", report.summary)
             self.assertEqual(json.loads((root / "run/state.json").read_text())["status"], "failed")
             self.assertEqual(json.loads((root / "run/report.json").read_text())["status"], "failed")
 

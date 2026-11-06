@@ -71,3 +71,34 @@ class WorkDetailsTests(unittest.TestCase):
         self.assertEqual(work['roles']['worker']['current_work'], '正在实现任务')
         self.assertEqual(work['roles']['worker']['round'], 2)
         self.assertEqual(work['roles']['reviewer']['current_work'], '')
+
+    def test_overdue_review_explains_failed_worker_rounds_and_running_turn(self):
+        rounds = [{'role': 'reviewer', 'index': 2, 'summary': '发现两项缺口', 'status': 'continue'},
+                  {'role': 'worker', 'index': 3, 'timed_out': True, 'exit_code': -15},
+                  {'role': 'worker', 'index': 4, 'interruption': 'stop command', 'exit_code': -15},
+                  {'role': 'worker', 'index': 5, 'interruption': 'stop command', 'exit_code': -15}]
+        health = {'phase': 'working', 'activity': 'round 6: worker running',
+                  'review_schedule': {'enabled': True, 'every_worker_rounds': 2, 'rounds_since_review': 3}}
+        work = work_details({'rounds': rounds}, health, {}, 'running', {}, {}, 'codex', 'codex')
+        reviewer = work['roles']['reviewer']
+        self.assertEqual(reviewer['status'], 'waiting')
+        self.assertEqual(reviewer['last_review_round'], 2)
+        self.assertEqual(reviewer['failed_worker_rounds'], [3, 4, 5])
+        self.assertTrue(reviewer['due'])
+        self.assertIn('3/2', reviewer['wait_reason'])
+        self.assertIn('正常结束', reviewer['wait_reason'])
+        self.assertIn('未继续进入审核', reviewer['wait_reason'])
+
+    def test_review_waiting_explains_disabled_periodic_review_and_terminal_states(self):
+        health = {'phase': 'working', 'review_schedule': {'enabled': True, 'every_worker_rounds': 0,
+                                                       'rounds_since_review': 10}}
+        work = work_details({}, health, {}, 'running', {}, {}, 'codex', 'codex')
+        self.assertIn('周期审核已关闭', work['roles']['reviewer']['wait_reason'])
+        self.assertFalse(work['roles']['reviewer']['due'])
+        work = work_details({}, health, {}, 'paused', {}, {}, 'codex', 'codex')
+        self.assertIn('已暂停', work['roles']['reviewer']['wait_reason'])
+        work = work_details({}, health, {}, 'stopped', {}, {}, 'codex', 'codex')
+        self.assertIn('尚无审核结论', work['roles']['reviewer']['wait_reason'])
+        work = work_details({'provider_config': {'no_review': True}}, health, {}, 'running', {}, {}, 'codex', 'codex')
+        self.assertEqual(work['roles']['reviewer']['status'], 'disabled')
+        self.assertIn('未启用独立审核', work['roles']['reviewer']['wait_reason'])

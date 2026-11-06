@@ -104,7 +104,7 @@ function bind(name){
   $('#create-form').elements.auto_start.addEventListener('change',e=>$('#create-submit').textContent=e.target.checked?'创建并启动任务':'保存待启动任务');
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
-   for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds'])data[key]=Number(data[key]);
+   for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every'])data[key]=Number(data[key]);
    $('#create-submit').disabled=true;$('#form-error').hidden=true;
    try{const t=await api('/api/tasks',data);location.assign(`/tasks/${t.id}`);}
    catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;}

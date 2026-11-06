@@ -17,6 +17,48 @@ def conclusion_event(event: dict) -> bool:
     return isinstance(value, dict) and 'status' in value and 'summary' in value
 
 
+def review_wait(state: dict, health: dict, status: str, rounds: list, current_round: int | None) -> dict:
+    schedule = health.get('review_schedule') or state.get('review_schedule') or {}
+    every = schedule.get('every_worker_rounds')
+    every = every if type(every) is int and every >= 0 else None
+    elapsed = schedule.get('rounds_since_review')
+    elapsed = elapsed if type(elapsed) is int and elapsed >= 0 else None
+    last = next((item for item in reversed(rounds) if item.get('role') == 'reviewer'), None)
+    last_round = (last or {}).get('index')
+    failures = [item for item in rounds if item.get('role') == 'worker'
+                and (last_round is None or item.get('index', 0) > last_round)
+                and (item.get('exit_code') or item.get('timed_out') or item.get('interruption') or item.get('failure'))]
+    due = bool(every and elapsed is not None and elapsed >= every)
+    disabled = (state.get('provider_config') or {}).get('no_review') or schedule.get('enabled') is False
+    phase = health.get('phase')
+    if disabled:
+        reason = '本任务未启用独立审核。'
+    elif status == 'queued':
+        reason = '任务尚未启动，启动后按审核频率调度。'
+    elif status == 'paused':
+        reason = '任务已暂停，恢复后继续调度审核。'
+    elif status not in {'running', 'starting'}:
+        reason = '任务当前未在执行；下方为最近一次审核结论。' if last else '任务当前未在执行，尚无审核结论。'
+    elif phase == 'reviewing':
+        reason = f'正在独立审核第 {current_round} 轮工作及项目改动。'
+    elif phase == 'validating':
+        reason = 'watcher 正在执行验收检查。'
+    elif due:
+        reason = f'已达到周期审核阈值（{elapsed}/{every} 轮），等待当前 worker 正常结束并返回有效结论后触发审核。'
+    elif every == 0:
+        reason = '周期审核已关闭；worker 提交完成候选或外部阻塞时触发审核。'
+    elif every is not None:
+        reason = f'每 {every} 轮触发周期审核；等待 worker 本轮结果，完成候选及外部阻塞会立即送审。'
+    else:
+        reason = '等待 worker 返回可审核的结果；该运行未保存审核频率。'
+    if failures and not disabled and status in {'running', 'starting', 'paused'}:
+        names = '、'.join(str(item.get('index')) for item in failures[-5:])
+        reason += f' 第 {names} 轮 worker 超时、停止或执行失败，累计到轮次计数，但未继续进入审核。'
+    return {'every_worker_rounds': every, 'rounds_since_review': elapsed,
+            'due': due, 'last_review_round': last_round, 'failed_worker_rounds': [item.get('index') for item in failures],
+            'wait_reason': reason}
+
+
 def work_details(state: dict, health: dict, activity: dict, status: str, heartbeat: dict,
                  guardian: dict, worker: str, reviewer: str) -> dict:
     rounds = state.get('rounds')
@@ -62,6 +104,7 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
                        'current_work': focus or ('正在实现任务' if executing and role == 'worker' else
                                                 '正在核对改动与验收证据' if executing else ''),
                        'last_conclusion': last, 'events': role_events}
+    roles['reviewer'].update(review_wait(state, health, status, rounds, current_round))
     roles['watcher'] = {'role': 'watcher', 'provider': 'auto-moniter',
                         'status': 'monitoring' if active or status == 'paused' else
                                   'not_started' if status == 'queued' else 'stopped',

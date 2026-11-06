@@ -4,6 +4,36 @@ from console.workflow import work_details
 
 
 class WorkDetailsTests(unittest.TestCase):
+    def test_rejected_closure_is_presented_as_rejected_without_rewriting_original(self):
+        record = {'role': 'reviewer', 'index': 6, 'summary': 'AUD-1、AUD-2已独立复核关闭',
+                  'status': 'continue', 'issue_resolutions': [{'id': 'AUD-1'}, {'id': 'AUD-2'}],
+                  'gaps': ['Audit issue update rejected: invalid file evidence'],
+                  'git_checkpoint': {'commit': 'a' * 40}}
+        for state in ({'rounds': [record]}, {'rounds': [], 'last_review': record}):
+            with self.subTest(pruned=not state['rounds']):
+                work = work_details(state, {'phase': 'finished'}, {}, 'stopped', {}, {}, 'codex', 'codex')
+                result = work['roles']['reviewer']['last_conclusion']
+                self.assertIn('未获 watcher 接受', result['summary'])
+                self.assertEqual(result['reported_summary'], record['summary'])
+                self.assertEqual(result['watcher_result']['status'], 'rejected')
+                self.assertEqual(result['git_checkpoint']['commit'], 'a' * 40)
+                self.assertEqual(work['conclusions'][0], result)
+        self.assertEqual(record['summary'], 'AUD-1、AUD-2已独立复核关闭')
+        self.assertNotIn('watcher_result', record)
+
+    def test_proposals_alone_never_imply_watcher_accepted_closure(self):
+        from console.conclusions import present_conclusion
+
+        record = {'role': 'reviewer', 'summary': 'AUD-1已复核', 'issue_resolutions': [{'id': 'AUD-1'}]}
+        self.assertEqual(present_conclusion(record)['watcher_result'], {})
+        outcome = {'status': 'applied', 'closed': ['AUD-1'], 'issues': {'AUD-1': 'resolved'}}
+        record['watcher_result'] = outcome
+        state = {'rounds': [record], 'audit_issues': {'items': [{'id': 'AUD-1', 'status': 'open'}]}}
+        work = work_details(state, {'phase': 'finished'}, {}, 'stopped', {}, {}, 'codex', 'codex')
+        # A later reopening must not rewrite a historical accepted decision.
+        self.assertEqual(work['conclusions'][0]['watcher_result'], outcome)
+        self.assertNotIn('reported_summary', work['conclusions'][0])
+
     def fixture(self, status='running', phase='working'):
         state = {'rounds': [
             {'role': 'worker', 'index': 1, 'status': 'continue', 'summary': '已实现接口', 'gaps': ['补测试'],

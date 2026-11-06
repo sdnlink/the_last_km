@@ -47,7 +47,7 @@ def asset(path: str) -> tuple[Path, str] | None:
         base, dot, extension = name[6:].partition('.')
         allowed = base in {*PAGES, 'work'} and extension in {'js', 'css'} and bool(dot)
     if name.startswith('fragments/'):
-        allowed = name[10:] in {'create.html', 'direction.html', 'confirm.html'}
+        allowed = name[10:] in {'create.html', 'direction.html', 'confirm.html', 'git.html'}
     target = STATIC / name
     if not allowed or not target.is_file():
         return None

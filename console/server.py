@@ -81,6 +81,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.server.store.logs(parts[2], name))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
+                elif len(parts) == 5 and parts[3] == 'git':
+                    self._json(self.server.store.git_record(parts[2], parts[4]))
                 elif len(parts) == 3:
                     self._json(self.server.store.detail(parts[2]))
                 else:

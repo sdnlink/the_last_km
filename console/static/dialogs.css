@@ -152,3 +152,14 @@
   }
 
 }
+/* Git records are loaded only when a conclusion's commit is opened. */
+.git-record-dialog { width:min(960px,calc(100vw - 30px)); }
+.git-record-meta { display:grid; grid-template-columns:120px minmax(0,1fr); gap:12px; font-size:12px; }
+.git-record-meta dt { color:var(--muted); }
+.git-record-meta dd { margin:0; overflow-wrap:anywhere; }
+.git-record-dialog pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:430px; overflow:auto; padding:14px; background:#f3f7fa; border-radius:7px; font-size:11px; }
+.git-record-dialog p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; font-size:12px; }
+.git-record-dialog h3 { font-size:13px; }
+.git-record-dialog details summary { cursor:pointer; font-size:12px; margin:18px 0; }
+.git-record-outcome { background:#fff6e5; border:1px solid #edddb9; border-radius:7px; padding:12px; }
+@media(max-width:640px){.git-record-meta{grid-template-columns:1fr;gap:7px;}.git-record-meta dd{margin-bottom:8px;}}

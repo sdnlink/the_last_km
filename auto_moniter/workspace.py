@@ -94,6 +94,14 @@ def evidence_paths(
     for item in evidence:
         candidates = [item, *item.replace(",", " ").replace("`", " ").split()]
         candidates.extend(part for token in re.findall(r"`([^`]+)`|\]\(([^)]+)\)", item) for part in token if part)
+        # A line reference may be followed immediately by Chinese prose, e.g.
+        # docs/说明.md:694：已核对。 Keep literal candidates as well.
+        references = []
+        for token in candidates:
+            match = re.match(r"^(.*?)[：:]\d+(?:[：:]\d+|[-–]\d+)?(?=$|[：:，,；;。\s\u3400-\u9fff])", token)
+            if match:
+                references.append(match[1])
+        candidates.extend(references)
         for token in candidates:
             candidate = re.sub(r":\d+(?::\d+|[-–]\d+)?$", "", token.strip("\"'()[]{}"))
             path = Path(candidate)

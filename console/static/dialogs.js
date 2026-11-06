@@ -3,6 +3,7 @@ import {api,config,fragment,toast,runAction,refresh} from './core.js';
 const loaded=new Map();
 const state={config:null,directionTask:null,directionPending:new Set()};
 let directionTimer,stopTarget;
+let gitSequence=0,gitController;
 async function ensure(name){
  if(!loaded.has(name))loaded.set(name,(async()=>{
    if(!$('#dialog-styles')){const link=document.createElement('link');link.id='dialog-styles';link.rel='stylesheet';link.href='/dialogs.css';document.head.append(link);}
@@ -97,7 +98,29 @@ export async function confirmStop(id){
  try{await ensure('confirm');stopTarget=id;if(!$('#confirm-dialog').open)$('#confirm-dialog').showModal();}
  catch(error){toast(error.message,true);}
 }
+export async function openGitRecord(id,commit){
+ const seq=++gitSequence;gitController?.abort();const request=new AbortController();gitController=request;
+ try{
+  await ensure('git');if(seq!==gitSequence)return;
+  $('#git-record-error').hidden=true;$('#git-record-body').hidden=true;$('#git-record-loading').hidden=false;
+  if(!$('#git-record-dialog').open)$('#git-record-dialog').showModal();
+  const data=await api(`/api/tasks/${id}/git/${commit}`,undefined,{signal:request.signal});
+  if(seq!==gitSequence||!$('#git-record-dialog').open)return;
+  $('#git-record-project').textContent=data.project;
+  $('#git-record-ref').textContent=data.ref.replace(/^refs\/heads\//,'');
+  $('#git-record-current').textContent=data.current_branch||'未检出业务分支';
+  $('#git-record-commit').textContent=data.commit;$('#git-record-at').textContent=data.committed_at;
+  $('#git-record-file').textContent=data.record;$('#git-record-summary').textContent=data.conclusion.summary;
+  const outcome=data.conclusion.watcher_result;
+  $('#git-record-outcome').textContent=outcome?.status==='rejected'?'系统处理：关闭被拒绝；结论已提交，审计项仍需复核。':outcome?.closed?.length?`系统已登记关闭：${outcome.closed.join('、')}`:'此处展示从 Git 提交读取的结论原文及系统记录。';
+  $('#git-record-json').textContent=JSON.stringify(data.content,null,2);
+  $('#git-record-command').textContent=data.log_command+'\n'+data.show_command;
+  $('#git-record-body').hidden=false;
+ }catch(error){if(seq!==gitSequence||error.name==='AbortError')return;const el=$('#git-record-error');if(el){el.hidden=false;el.textContent=error.message;}else toast(error.message,true);}
+ finally{if(seq===gitSequence&&$('#git-record-loading'))$('#git-record-loading').hidden=true;}
+}
 function bind(name){
+ if(name==='git'){$('#git-record-dialog').addEventListener('close',()=>{gitSequence++;gitController?.abort();});return;}
  if(name==='confirm'){$('#confirm-stop').addEventListener('click',()=>{const id=stopTarget;$('#confirm-dialog').close();if(id)runAction(id,'stop');});return;}
  if(name==='create'){
   $('#provider-select').addEventListener('change',updateProviderHint);$('#reviewer-select').addEventListener('change',updateProviderHint);

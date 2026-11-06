@@ -1,9 +1,16 @@
 [project]
 name = "auto-moniter"
-version = "0.2.0"
+version = "0.4.1"
 description = "Supervise coding agents until an independent review accepts the work."
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = []
 
 [project.scripts]
@@ -15,3 +22,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["auto_moniter*"]
+
+[tool.setuptools.data-files]
+"share/doc/auto-moniter" = ["README.md", "OPERATIONS.md", "CHANGELOG.md"]
+"share/doc/auto-moniter/deploy" = ["deploy/auto-moniter@.service", "deploy/task.example.json"]
+"share/doc/auto-moniter/tools" = ["tools/soak.py", "tools/certify_backend.py"]

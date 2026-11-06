@@ -5,6 +5,20 @@ from auto_moniter.verdict import parse_verdict
 
 
 class VerdictTests(unittest.TestCase):
+    def test_completion_requires_explicit_valid_scope(self) -> None:
+        from tests.test_supervisor import _verdict
+
+        for scope in (None, "", "unknown", "module", "requirement"):
+            payload = _verdict("done")
+            if scope is None:
+                payload.pop("scope")
+            else:
+                payload["scope"] = scope
+            verdict = parse_verdict(json.dumps(payload))
+            self.assertEqual(verdict.status, "done" if scope in {"module", "requirement"} else "continue")
+            if verdict.status == "done":
+                self.assertEqual(verdict.scope, scope)
+
     def test_parses_fenced_json(self) -> None:
         text = """I finished the handler.
 

@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "run", "Implement the documented project requirements, all modules and integration checks.",
+    "--cwd", "/srv/auto-moniter/projects/example",
+    "--run-dir", "/var/lib/auto-moniter/state/example",
+    "--provider", "claude", "--reviewer", "codex",
+    "--worker-isolation", "strict", "--review-isolation", "strict",
+    "--protect", "tests", "--check", "python3 -m unittest discover -s tests -q",
+    "--guard", "--guard-stop-timeout", "30s",
+    "--max-runtime", "2h", "--max-agent-calls", "100",
+    "--max-run-bytes", "536870912", "--file-bytes", "67108864",
+    "--keep-rounds", "100"
+  ]
+}

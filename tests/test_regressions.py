@@ -259,7 +259,7 @@ class LifecycleRegressionTests(unittest.TestCase):
             ])
             reviewer = ScriptedProvider("reviewer", [
                 {"verdict": _verdict("continue", ["verify again"])},
-                {"verdict": _verdict("done", evidence=["app.py"])},
+                {"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])},
             ])
             first = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=run), log=lambda _: None)
             first.log = lambda message: first.request_stop() if message.startswith("round 1: reviewer status=") else None
@@ -304,7 +304,7 @@ class LifecycleRegressionTests(unittest.TestCase):
             root = Path(tmp)
             run = root / "run"
             with file_lock(run / "supervisor.lock"):
-                report = Supervisor(RunConfig("task", root, ScriptedProvider("worker", []), run_dir=run), log=lambda _: None).run()
+                report = Supervisor(RunConfig("task", root, ScriptedProvider("worker", []), no_review=True, run_dir=run), log=lambda _: None).run()
                 self.assertEqual(report.status, "locked")
                 self.assertFalse((run / "verdict.schema.json").exists())
 
@@ -348,7 +348,7 @@ class ProcessAndCliRegressionTests(unittest.TestCase):
                 code = "import os, signal, time; pid=os.fork(); signal.signal(signal.SIGTERM, signal.SIG_IGN) if pid == 0 else None; time.sleep(30) if pid == 0 else None"
                 result = run_command(PreparedCommand([sys.executable, '-c', code]), Path(sys.argv[1]), timeout_s=0.3,
                     on_child=lambda child: Path(sys.argv[2]).write_text(str(child.pid)))
-                assert result.timed_out
+                assert result.interruption == 'background processes', result
             ''')
             try:
                 result = subprocess.run([sys.executable, "-c", helper, str(root), str(pid_file)], capture_output=True, text=True, timeout=4)

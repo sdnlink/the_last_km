@@ -60,15 +60,22 @@ def _verdict(
     gaps: list[str] | None = None,
     actions: list[str] | None = None,
     evidence: list[str] | None = None,
+    scope: str = "requirement",
+    closed: list[str] | None = None,
 ) -> dict:
     return {
         "status": status,
+        "scope": scope,
+        "modules": [{"id": "main", "title": "Original requirement", "acceptance": ["All original behavior and checks pass"]}],
+        "module_ids": ["main"],
         "summary": status,
         "done": [],
         "gaps": gaps or [],
         "next_actions": actions or [],
         "evidence": ["script"] if evidence is None else evidence,
         "blockers": ["need a secret"] if status == "blocked" else [],
+        "issue_resolutions": [{"id": ident, "summary": "Independently verified the correction",
+                               "evidence": evidence or ["app.py"]} for ident in closed or []],
     }
 
 
@@ -77,15 +84,15 @@ class SupervisorTests(unittest.TestCase):
         worker = ScriptedProvider(
             "worker",
             [
-                {"verdict": _verdict("done"), "session_id": "11111111-1111-1111-1111-111111111111", "touch": "app.py"},
-                {"verdict": _verdict("done"), "session_id": "11111111-1111-1111-1111-111111111111"},
+                {"verdict": _verdict("done", evidence=["app.py"]), "session_id": "11111111-1111-1111-1111-111111111111", "touch": "app.py"},
+                {"verdict": _verdict("done", evidence=["app.py"]), "session_id": "11111111-1111-1111-1111-111111111111"},
             ],
         )
         reviewer = ScriptedProvider(
             "reviewer",
             [
                 {"verdict": _verdict("continue", ["missing tests"], ["add tests"])},
-                {"verdict": _verdict("done", evidence=["app.py"])},
+                {"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])},
             ],
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,7 +148,7 @@ class SupervisorTests(unittest.TestCase):
             marker.write_text("0", encoding="utf-8")
 
             def changing_log(message: str) -> None:
-                if message.startswith("round ") and "worker status=" in message:
+                if message.startswith("round ") and "worker running" in message:
                     marker.write_text(str(int(marker.read_text(encoding="utf-8")) + 1), encoding="utf-8")
 
             report = Supervisor(
@@ -193,7 +200,7 @@ class SupervisorTests(unittest.TestCase):
             "reviewer",
             [
                 {"verdict": _verdict("continue", ["blocker is not external"], ["keep going"])},
-                {"verdict": _verdict("done", evidence=["app.py"])},
+                {"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])},
             ],
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,7 +287,7 @@ class SupervisorTests(unittest.TestCase):
         ])
         reviewer = ScriptedProvider("reviewer", [
             {"verdict": _verdict("blocked")},
-            {"verdict": _verdict("done", evidence=["app.py"])},
+            {"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])},
         ])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -325,7 +332,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_resume_uses_saved_session(self) -> None:
         worker = ScriptedProvider("worker", [{"verdict": _verdict("done", evidence=["app.py"]), "touch": "app.py"}])
-        reviewer = ScriptedProvider("reviewer", [{"verdict": _verdict("done", evidence=["app.py"])}])
+        reviewer = ScriptedProvider("reviewer", [{"verdict": _verdict("done", evidence=["app.py"], closed=["AUD-1"])}])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run"

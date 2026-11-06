@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from auto_moniter.audit import resolutions
 
 
 VERDICT_SCHEMA: dict[str, Any] = {
@@ -17,6 +18,13 @@ VERDICT_SCHEMA: dict[str, Any] = {
             "enum": ["continue", "done", "blocked"],
         },
         "summary": {"type": "string"},
+        "scope": {"type": "string", "enum": ["module", "requirement"]},
+        "module_ids": {"type": "array", "items": {"type": "string"}},
+        "modules": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "acceptance": {"type": "array", "items": {"type": "string"}}, "depends_on": {"type": "array", "items": {"type": "string"}}},
+            "required": ["id", "title", "acceptance", "depends_on"],
+        }},
         "done": {
             "type": "array",
             "items": {"type": "string"},
@@ -37,15 +45,25 @@ VERDICT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
         },
+        "issue_resolutions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"id": {"type": "string"}, "summary": {"type": "string"},
+                           "evidence": {"type": "array", "items": {"type": "string"}}},
+            "required": ["id", "summary", "evidence"],
+        }},
     },
     "required": [
         "status",
         "summary",
+        "scope",
+        "module_ids",
+        "modules",
         "done",
         "gaps",
         "next_actions",
         "evidence",
         "blockers",
+        "issue_resolutions",
     ],
 }
 
@@ -80,6 +98,10 @@ class Verdict:
     raw: str = ""
     parse_error: str = ""
     structured: bool = False
+    scope: str = "requirement"
+    module_ids: list[str] = field(default_factory=list)
+    modules: list[dict] = field(default_factory=list)
+    issue_resolutions: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -129,16 +151,33 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
         blockers=_string_list(data.get("blockers")),
         raw=raw,
         structured=structured,
+        scope=str(data.get("scope") or ""),
+        module_ids=_string_list(data.get("module_ids")),
+        modules=data.get("modules", []),
+        issue_resolutions=data.get("issue_resolutions", []),
     )
-    if verdict.status == "done":
-        invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data]
-        invalid.extend(
-            name for name in ("done", "gaps", "next_actions", "evidence", "blockers")
-            if name in data and (not isinstance(data[name], list) or not all(isinstance(item, str) for item in data[name]))
-        )
-        if not isinstance(data.get("summary"), str) or not verdict.summary:
-            invalid.append("summary")
-        if invalid:
+    # Older conclusions may omit the closure array. They cannot close any issue.
+    invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data and name != "issue_resolutions"]
+    invalid.extend(
+        name for name in ("done", "gaps", "next_actions", "evidence", "blockers", "module_ids")
+        if name in data and (not isinstance(data[name], list) or not all(isinstance(item, str) for item in data[name]))
+    )
+    if not isinstance(data.get("summary"), str) or not verdict.summary:
+        invalid.append("summary")
+    if verdict.scope not in {"module", "requirement"}:
+        invalid.append("scope")
+    if not isinstance(verdict.modules, list):
+        invalid.append("modules")
+    if not isinstance(data.get("status"), str) or data["status"] not in _STATUS:
+        invalid.append("status")
+    try:
+        resolutions(verdict.issue_resolutions)
+    except ValueError:
+        invalid.append("issue_resolutions")
+        verdict.issue_resolutions = []
+    if invalid:
+        verdict.parse_error = "invalid conclusion fields"
+        if verdict.status == "done":
             verdict.status = "continue"
             verdict.gaps.append("Completion conclusion has missing or invalid fields: " + ", ".join(sorted(set(invalid))))
     # A claim of done with leftover work is not done.
@@ -153,6 +192,7 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
     request = input_request(verdict.summary)
     if request:
         verdict.status = "continue"
+        verdict.parse_error = "input request instead of completion"
         verdict.gaps.append(f"Agent paused to request input: {request}")
         verdict.next_actions.append("Continue the authorized task using reasonable defaults; do not wait for a reply.")
     return verdict
@@ -239,6 +279,7 @@ def parse_verdict(text: str, *, structured: bool = False) -> Verdict:
         request = input_request(stripped[conclusion_end:])
         if request:
             verdict.status = "continue"
+            verdict.parse_error = "input request after conclusion"
             verdict.gaps.append(f"Agent requested input after its conclusion: {request}")
         return verdict
 
@@ -250,6 +291,7 @@ def parse_verdict(text: str, *, structured: bool = False) -> Verdict:
             gaps=[f"Agent paused to request input: {request}"],
             next_actions=["Continue the authorized task now. Choose reasonable defaults within its scope and emit the required JSON conclusion."],
             raw=raw,
+            parse_error="input request without structured conclusion",
         )
 
     return Verdict(
@@ -257,7 +299,7 @@ def parse_verdict(text: str, *, structured: bool = False) -> Verdict:
         summary="Could not parse a structured conclusion.",
         gaps=["The agent did not end with the required JSON conclusion."],
         next_actions=[
-            "Finish the current work, then emit exactly one JSON object with status, summary, done, gaps, next_actions, evidence, and blockers."
+            "Finish the current work, then emit exactly one JSON object with status, scope, summary, done, gaps, next_actions, evidence, and blockers."
         ],
         raw=raw,
         parse_error=last_error,
@@ -271,14 +313,22 @@ def verdict_instructions() -> str:
         f"{json.dumps({name: value['type'] for name, value in VERDICT_SCHEMA['properties'].items()}, ensure_ascii=False)}\n"
         "Field rules:\n"
         "- status is continue, done, or blocked.\n"
+        "- scope is module or requirement. A module is a bounded part of the original requirement; requirement means the entire original requirement.\n"
+        "- In your first turn, declare ALL modules from the original requirement in modules: [{id, title, acceptance: [criterion, ...], depends_on: [module_id, ...]}]. Use depends_on=[] when there are no dependencies. Include integration and failure-path checks. Do not omit unfinished modules.\n"
+        "- IDs are stable ASCII identifiers. Definitions and criteria cannot be removed or weakened. Later turns may use modules=[] or append newly discovered missing modules.\n"
+        "- module_ids names the modules completed and verified in this conclusion. Reviewers list only IDs they independently accept. The monitor requires joint coverage of every pending module before final delivery.\n"
         "- summary, and every item in done, gaps, next_actions, evidence, and blockers, is a string.\n"
-        "- Use done only when every stated requirement is implemented, checked, and you found no remaining gap.\n"
-        "- A done summary must explicitly confirm that the task is complete and ready for delivery.\n"
-        "- Questions, requests for confirmation, plans, partial progress, and waiting for input are continue, never done.\n"
+        "- Use done only when every item within the declared scope is implemented, checked, and has no remaining gap.\n"
+        "- done with scope=module submits a completed module for review; it does not end the original requirement. Name the module in summary and done.\n"
+        "- A module done verdict has no gaps, next_actions, or blockers within that module; the supervisor continues the remaining original modules after acceptance.\n"
+        "- done with scope=requirement explicitly confirms ALL original modules, integration paths, and acceptance checks are complete and ready for delivery.\n"
+        "- Questions, requests for confirmation, plans, incomplete modules, and waiting for input are continue, never done.\n"
         "- Continue authorized work without waiting for a person to reply. Use reasonable defaults within the stated scope.\n"
-        "- If any requirement, edge case, test, or unwired path is still open, status must be continue and gaps must name it.\n"
+        "- If any requirement, edge case, test, or unwired path within the declared scope is still open, status must be continue and gaps must name it.\n"
         "- next_actions are concrete steps for the next turn.\n"
-        "- evidence lists files, commands, or observations that support the summary. A done review must include evidence.\n"
+        "- Reviewers reporting an existing unresolved issue prefix its gaps entry with the monitor's AUD ID, e.g. AUD-1: assertion still fails. Use plain text for genuinely new findings and never invent AUD IDs.\n"
+        "- issue_resolutions is an array of {id, summary, evidence: [file, ...]}; use [] if none. Only the independent reviewer may close monitor-assigned AUD issues after inspecting the fix or showing why the finding is invalid. Cite current changed project files and explain each closure. Workers implement fixes and leave issue_resolutions=[]. Omitted or unresolved issues stay open; never invent issue IDs.\n"
+        "- evidence lists files, commands, or observations that support the summary. Both worker and reviewer done conclusions must cite a workspace file created, changed or removed during this run and present in the current diff. A removed file must have existed in the initial monitor baseline; cite its original path without recreating it.\n"
         "- blockers are only external facts a person must resolve, such as a missing credential. Missing ideas are not blockers.\n"
         "- Do not stop early. A conclusion is a checkpoint, not permission to idle."
     )

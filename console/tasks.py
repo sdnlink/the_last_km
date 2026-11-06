@@ -25,6 +25,7 @@ from auto_moniter.directions import Directions
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
 from console.recovery import resume_arguments
+from console.workflow import work_details
 
 
 PROVIDERS = ('codex', 'claude', 'grok', 'gemini', 'cursor', 'antigravity', 'paseo')
@@ -242,6 +243,9 @@ class TaskStore:
         rounds = state.get('rounds')
         if not isinstance(rounds, list):
             rounds = state.get('records') or []
+        work = work_details(state, health, progress, status, heartbeat, guardian,
+                            meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
+                            meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'))
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
@@ -259,6 +263,7 @@ class TaskStore:
                                          for item in rounds[-20:] if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
                      'activity': progress,
+                     'work': work,
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
                      'launch_error': meta.get('error', '') if not live else '',
                      'directions': directions, 'can_direct': can_direct,

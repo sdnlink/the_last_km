@@ -9,13 +9,36 @@ export async function config() {
   if(!configPromise) configPromise=api('/api/config').catch(error=>{configPromise=null;throw error;});
   return configPromise;
 }
+function requestScope(signal) {
+  // Support browsers with AbortController but without AbortSignal.timeout/any.
+  const request = new AbortController();
+  const sources = [...new Set([controller.signal, signal].filter(Boolean))];
+  const cancel = () => request.abort();
+  let timedOut = false;
+  const timeout = setTimeout(() => {timedOut=true;cancel();},15000);
+  for(const source of sources){
+    source.addEventListener('abort',cancel,{once:true});
+    if(source.aborted)cancel();
+  }
+  return {
+    signal:request.signal,
+    timedOut:()=>timedOut,
+    dispose(){clearTimeout(timeout);for(const source of sources)source.removeEventListener('abort',cancel);},
+  };
+}
 export async function api(path, body, {signal} = {}) {
   const headers = body ? {'Content-Type':'application/json','X-Console-Token':(await config()).csrf_token} : {};
-  const signals=[controller.signal,AbortSignal.timeout(15000)];if(signal)signals.push(signal);
-  const response=await fetch(path,{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.any(signals)});
-  let value;try{value=await response.json();}catch{throw new Error(`服务返回异常（${response.status}）`);}
-  if(!response.ok){const error=new Error(value.error||`请求失败（${response.status}）`);error.status=response.status;throw error;}
-  return value;
+  const scope=requestScope(signal);
+  try {
+    const response=await fetch(path,{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',signal:scope.signal});
+    let value;
+    try{value=await response.json();}catch(error){if(scope.signal.aborted)throw error;throw new Error(`服务返回异常（${response.status}）`);}
+    if(!response.ok){const error=new Error(value.error||`请求失败（${response.status}）`);error.status=response.status;throw error;}
+    return value;
+  }catch(error){
+    if(scope.timedOut())throw new Error('请求超时，请稍后重试');
+    throw error;
+  }finally{scope.dispose();}
 }
 export async function fragment(name){
   const response=await fetch(`/fragments/${name}.html`,{cache:'no-store',signal:controller.signal});

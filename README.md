@@ -4,6 +4,15 @@
 
 当前交付版本：**0.4.1，本地 Linux CLI**。需要 Python 3.11+；本次完整验证环境为 Linux / Python 3.12。版本变更见 [CHANGELOG.md](CHANGELOG.md)，部署和故障处理见 [OPERATIONS.md](OPERATIONS.md)。
 
+新增独立的 [Web 控制台](console/README.md)，支持创建开发任务、启动/暂停/继续/停止、查看模块验收与执行日志，以及实时 CPU、内存和磁盘监控。在项目根目录执行：
+
+```bash
+python3 -m console
+# 浏览器打开 http://127.0.0.1:8765
+```
+
+默认会发现本机的标准运行记录和当前项目 `.auto-moniter/` 中的记录。创建任务后可立即启动，也可保存为待启动任务；实际执行复用现有 CLI 和独立审核流程。详细配置见 [console/README.md](console/README.md)。
+
 安装后先运行两项离线检查，不调用模型：
 
 ```bash

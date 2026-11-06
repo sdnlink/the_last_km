@@ -52,6 +52,7 @@ from auto_moniter.history import prune_files
 from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
+from auto_moniter.live import LiveOutput
 
 
 LogFn = Callable[[str], None]
@@ -926,6 +927,8 @@ class Supervisor:
                 return False
             self._beat(f"round {index}: acceptance check {number}")
             completed = False
+            live_check = LiveOutput(self.run_dir, 'check', index, '验收检查')
+            live_check.emit({'kind': 'command', 'text': redact(command), 'status': 'running'})
             try:
                 result = run_command(
                     PreparedCommand(["sh", "-lc", command]), self.config.cwd,
@@ -935,9 +938,11 @@ class Supervisor:
                     max_output_bytes=self.config.max_output_bytes,
                     memory_bytes=self.config.memory_bytes, file_bytes=self.config.file_bytes,
                     heartbeat=self._heartbeat, heartbeat_note=f"round {index}: acceptance check {number}",
+                    on_output=live_check.feed,
                 )
                 completed = True
             finally:
+                live_check.close()
                 self._forget_child(completed=completed)
             self._check_budget()
             path = self.run_dir / f"{index:03d}-check-{number:02d}.log"
@@ -1530,6 +1535,7 @@ class Supervisor:
         self._beat(f"round {index}: {role} pid pending")
         prepared = PreparedCommand([])
         completed = False
+        live_output = LiveOutput(self.run_dir, role, index, provider.name)
         try:
             if session_id and provider.resume_supported:
                 prepared = provider.resume_command(
@@ -1553,11 +1559,13 @@ class Supervisor:
                 should_stop=self._should_stop,
                 max_output_bytes=self.config.max_output_bytes,
                 memory_bytes=self.config.memory_bytes, file_bytes=self.config.file_bytes,
+                on_output=live_output.feed,
             )
             completed = True
         except (OSError, ValueError, ProviderError) as exc:
             result = TurnResult(text="", stderr=f"Could not invoke {provider.name}: {exc}", exit_code=127)
         finally:
+            live_output.close()
             self._forget_child(completed=completed)
         elapsed = time.monotonic() - started
         if self._stop_requested:
@@ -1627,6 +1635,7 @@ class Supervisor:
         last_activity = time.monotonic()
         previous_text = ""
         latest = launch
+        live = LiveOutput(self.run_dir, role, index, provider.name, announce=False)
         while not self._stop:
             if self._should_stop():
                 latest = TurnResult("", exit_code=-1, interruption="runtime budget")
@@ -1668,6 +1677,8 @@ class Supervisor:
             transcript = paseo_transcript(provider.binary, session_id, self.config.cwd)
             if transcript != previous_text:
                 last_activity = time.monotonic()
+                # Public daemon output is observable while its turn is still active.
+                live.emit({'kind': 'message', 'text': redact(transcript[-4000:])})
                 previous_text = transcript
             self._stop_event.wait(2)
         if self._stop or latest.timed_out or latest.interruption or latest.exit_code:
@@ -1905,6 +1916,7 @@ def run_command(
     max_output_bytes: int = 8 * 1024 * 1024,
     memory_bytes: int = 0,
     file_bytes: int = 0,
+    on_output: Callable[[int, bytes], None] | None = None,
 ) -> TurnResult:
     if max_output_bytes <= 0:
         raise ValueError("max_output_bytes must be positive")
@@ -1972,6 +1984,8 @@ def run_command(
                                 break
                             kept = chunk[:max(0, max_output_bytes - output_size)]
                             buffers[key.data].extend(kept)
+                            if kept and on_output:
+                                on_output(key.data, kept)
                             output_size += len(kept)
                     break
                 for key, _mask in selector.select(0.05):
@@ -1998,6 +2012,8 @@ def run_command(
                     last_output_at = time.monotonic()
                     kept = chunk[:max(0, max_output_bytes - output_size)]
                     buffers[key.data].extend(kept)
+                    if kept and on_output:
+                        on_output(key.data, kept)
                     output_size += len(kept)
                     if detect_input_requests:
                         watchers[key.data].feed_chunk(kept)

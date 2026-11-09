@@ -173,3 +173,29 @@ class GitMaintenanceTests(unittest.TestCase):
         self.assertTrue(bundle.is_file())
         self.assertEqual(result['errors'],[])
         self.assertEqual(result['archives'][0]['reason'],'live_ref_preserved')
+
+    def test_corrupt_existing_bundle_does_not_allow_live_ref_deletion(self):
+        run,history,_=self.task()
+        self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+        bundle=archive_path(handle(self.root),history['ref'].split('/')[-1])
+        restore(self.root,run)
+        contents=bundle.read_bytes();header_end=contents.index(b'\n\n')+2
+        bundle.write_bytes(contents[:header_end]+b'PACK-corrupt')
+        result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+        self.assertTrue(result['errors'])
+        self.assertEqual(handle(self.root).git('rev-parse',history['ref']).decode().strip(),history['head'])
+
+    def test_cleanup_and_console_deletion_preserve_pending_work_checkpoints(self):
+        from console.deletion import inactive_run
+        for name in ('publication.json','work-checkpoint.json'):
+            with self.subTest(name=name):
+                run,history,_=self.task(name.replace('.','-'))
+                (run/name).write_text('{}')
+                result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+                row=next(v for v in result['runs'] if v['run_dir']==str(run))
+                self.assertFalse(row['selected'])
+                storage=run_storage(self.root,runs_dir=self.runs,keep_runs=0,older_than=0,apply=True)
+                self.assertTrue(run.exists())
+                with self.assertRaisesRegex(ValueError,'待恢复的提交记录'):
+                    with inactive_run(run):
+                        self.fail('Pending recovery cannot be deleted')

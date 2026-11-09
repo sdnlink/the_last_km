@@ -44,11 +44,11 @@ class BusinessPublicationTests(unittest.TestCase):
         history.prepare_review(1, before)
         return history
 
-    def submit(self, history):
+    def submit(self, history, index=1):
         worker = _verdict('done', evidence=['app.py'])
         review = _verdict('done', evidence=['app.py', history.candidate['commit']])
         tree = workspace_fingerprint(history.cwd, ignore_dir=self.run)
-        return publish(history, 1, {**worker, 'tree': tree}, {**review, 'tree': tree},
+        return publish(history, index, {**worker, 'tree': tree}, {**review, 'tree': tree},
                        json.dumps(worker), json.dumps(review))
 
     def test_code_is_published_to_current_branch_and_audit_remains_hidden(self):
@@ -267,3 +267,98 @@ class BusinessPublicationTests(unittest.TestCase):
         restore(self.root,self.run)
         shown=read_git_record(self.root,json.loads((self.run/'git-history.json').read_text()),second)
         self.assertEqual(shown['commit'],second['commit'])
+
+    def test_later_round_deletes_file_created_by_previous_approved_round(self):
+        history=ApprovedHistory(self.root,self.run)
+        before=history.begin_round(1)
+        (self.root/'new.py').write_text('temporary capability\n')
+        history.prepare_review(1,before)
+        self.submit(history)
+        self.assertEqual(git(self.root,'show','HEAD:new.py'),'temporary capability')
+        before=history.begin_round(2)
+        (self.root/'new.py').unlink()
+        history.prepare_review(2,before)
+        self.submit(history,2)
+        self.assertNotIn('new.py',git(self.root,'ls-tree','-r','--name-only','HEAD').splitlines())
+        self.assertEqual(git(self.root,'status','--porcelain'),'')
+
+    def test_file_directory_transitions_publish_exact_candidate(self):
+        history=ApprovedHistory(self.root,self.run)
+        before=history.begin_round(1)
+        (self.root/'app.py').unlink();(self.root/'app.py').mkdir()
+        (self.root/'app.py/child.py').write_text('nested source\n')
+        history.prepare_review(1,before)
+        self.submit(history)
+        self.assertEqual(git(self.root,'show','HEAD:app.py/child.py'),'nested source')
+        before=history.begin_round(2)
+        (self.root/'app.py/child.py').unlink();(self.root/'app.py').rmdir()
+        (self.root/'app.py').write_text('back to file\n')
+        history.prepare_review(2,before)
+        self.submit(history,2)
+        self.assertEqual(git(self.root,'show','HEAD:app.py'),'back to file')
+        self.assertEqual(git(self.root,'status','--porcelain'),'')
+
+    def test_round_checkpoint_interrupted_after_work_ref_update_recovers(self):
+        history=ApprovedHistory(self.root,self.run)
+        before=history.begin_round(1)
+        (self.root/'app.py').write_text('review candidate survives interruption\n')
+        original=history._save
+        def crash_before_save():
+            raise OSError('interrupted before work checkpoint save')
+        with patch.object(history,'_save',side_effect=crash_before_save):
+            with self.assertRaisesRegex(OSError,'interrupted before work'):
+                history.prepare_review(1,before)
+        restored=ApprovedHistory(self.root,self.run)
+        self.assertEqual(restored.candidate['round'],1)
+        self.assertEqual(git(self.root,'show',restored.candidate['commit']+':app.py'),
+                         'review candidate survives interruption')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), self.before)
+
+    def test_creation_interrupted_after_work_ref_creation_recovers(self):
+        def crash_before_save(obj):
+            raise OSError('interrupted initial checkpoint save')
+        with patch.object(ApprovedHistory,'_save',crash_before_save):
+            with self.assertRaisesRegex(OSError,'interrupted initial'):
+                ApprovedHistory(self.root,self.run)
+        restored=ApprovedHistory(self.root,self.run)
+        self.assertTrue(restored.work_head)
+        self.assertEqual(git(self.root,'show',restored.initial+':app.py'),'baseline')
+        self.assertEqual(git(self.root,'rev-parse','HEAD'),self.before)
+
+    def test_interrupted_partial_index_write_recovers_without_losing_staging(self):
+        history=self.history()
+        (self.root/'human.txt').write_text('keep staged\n')
+        subprocess.run(['git','-C',str(self.root),'add','human.txt'],check=True)
+        sync=os.fsync
+        interrupted=False
+        def partial_sync(fd):
+            nonlocal interrupted
+            target=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if not interrupted and target==Path(str(index_path(history))+'.lock') and (self.run/'publication-index.next').exists():
+                interrupted=True
+                os.ftruncate(fd,17)
+                sync(fd)
+                raise OSError('interrupted in partial Git index write')
+            return sync(fd)
+        with patch('auto_moniter.publication.os.fsync',side_effect=partial_sync):
+            with self.assertRaisesRegex(OSError,'partial Git index'):
+                self.submit(history)
+        restored=ApprovedHistory(self.root,self.run)
+        self.assertEqual(git(self.root,'show',':app.py'),'reviewed code')
+        self.assertEqual(git(self.root,'show',':human.txt'),'keep staged')
+        self.assertEqual(git(self.root,'diff','--cached','--name-only'),'human.txt')
+        self.assertFalse((self.run/'publication.json').exists())
+        self.assertEqual(restored.business_head['commit'],git(self.root,'rev-parse','HEAD'))
+
+    def test_checkpoint_recovery_refuses_external_work_ref_change(self):
+        history=ApprovedHistory(self.root,self.run)
+        before=history.begin_round(1)
+        (self.root/'app.py').write_text('pending candidate\n')
+        with patch.object(history,'_save',side_effect=OSError('interrupt checkpoint')):
+            with self.assertRaises(OSError):
+                history.prepare_review(1,before)
+        history.git('update-ref',history.work_ref,self.before)
+        with self.assertRaisesRegex(GitHistoryError,'changed externally'):
+            ApprovedHistory(self.root,self.run)
+        self.assertEqual(git(self.root,'rev-parse',history.work_ref),self.before)
+        self.assertTrue((self.run/'work-checkpoint.json').is_file())

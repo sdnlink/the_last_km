@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -15,6 +16,11 @@ from auto_moniter.retention import _FLAGS, _locks, _json_at, _check_mounts, _roo
 from auto_moniter.storage import write_json
 
 FINAL = {'done', 'failed', 'stalled', 'max_rounds'}
+
+
+def recovery_pending(run):
+    return any((run/name).exists() or (run/name).is_symlink()
+               for name in ('process.json', 'publication.json', 'work-checkpoint.json'))
 
 
 def handle(cwd):
@@ -71,6 +77,14 @@ def ref_value(git, ref):
     return git.git('rev-parse', '--verify', ref, check=False).decode().strip()
 
 
+def verify_bundle(git, path):
+    """Verify the pack, not only the advertised refs/prerequisite header."""
+    git.git('bundle', 'verify', str(path))
+    with tempfile.TemporaryDirectory(prefix='auto-moniter-bundle-verify-') as directory:
+        git.git('-C', directory, 'init', '--bare', '-q')
+        git.git('-C', directory, 'bundle', 'unbundle', str(path))
+
+
 def migrate(git, run, docs, key):
     old, new = 'refs/heads/auto-moniter/' + key, 'refs/auto-moniter/' + key
     head = docs['git-history.json']['head']
@@ -112,10 +126,12 @@ def archive(git, run, docs, key):
         raise ValueError('Unsafe archive path')
     if not target.exists():
         git.git('bundle', 'create', str(temporary), ref)
-        git.git('bundle', 'verify', str(temporary))
+        verify_bundle(git, temporary)
         with temporary.open('rb') as stream:
             os.fsync(stream.fileno())
         temporary.replace(target)
+    else:
+        verify_bundle(git, target)
     if not any(line.split()[:2] == [head, ref] for line in
                git.git('bundle', 'list-heads', str(target)).decode().splitlines()):
         raise ValueError('Existing archive does not match task history')
@@ -181,7 +197,7 @@ def maintenance(cwd, *, runs_dirs=None, operation='list', apply=False, older_tha
                         if (Path(state['cwd']).resolve() != git.cwd or history.get('project') != str(git.cwd)
                                 or history.get('ref') not in ('refs/auto-moniter/'+key, 'refs/heads/auto-moniter/'+key)):
                             raise ValueError('Task does not match project or run identity')
-                        if (run/'process.json').exists() or (run/'publication.json').exists():
+                        if recovery_pending(run):
                             raise ValueError('Process or publication recovery is pending')
                         archived = history.get('archived')
                         row.update(status=state['status'], ref=history['ref'], head=history['head'], archived=bool(archived))
@@ -229,7 +245,7 @@ def maintenance(cwd, *, runs_dirs=None, operation='list', apply=False, older_tha
                     try:
                         with _locks(directory):
                             docs = documents(run)
-                            if docs != original or (run/'process.json').exists() or (run/'publication.json').exists():
+                            if docs != original or recovery_pending(run):
                                 raise ValueError('Task changed since preview')
                             if operation == 'migrate':
                                 migrate(git, run, docs, key)
@@ -302,7 +318,7 @@ def expire_archives(git, keep, age, *, apply, errors):
                     stack.callback(os.close, fd)
                     stack.enter_context(_locks(fd))
                     state = _json_at(fd, 'state.json')
-                    if state.get('status') not in FINAL or (run/'process.json').exists() or (run/'publication.json').exists():
+                    if state.get('status') not in FINAL or recovery_pending(run):
                         raise ValueError('Archived task is active or recoverable')
                 if ref_value(git, row['ref']):
                     raise ValueError('Archive was restored; live ref retained')
@@ -336,7 +352,7 @@ def restore(cwd, run):
                 stack.enter_context(_locks(directory))
                 docs = documents(run)
                 history = docs['git-history.json']
-                if (run/'process.json').exists() or (run/'publication.json').exists():
+                if recovery_pending(run):
                     raise ValueError('Task recovery is pending')
             else:
                 manifest_path = target.with_suffix('.json')
@@ -356,6 +372,7 @@ def restore(cwd, run):
             actual = ref_value(git, ref)
             if actual and actual != head:
                 raise ValueError('Ref has changed; refusing to overwrite it')
+            verify_bundle(git, target)
             git.git('bundle', 'unbundle', str(target))
             if not actual:
                 git.git('update-ref', ref, head, '0'*len(head))

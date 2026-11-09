@@ -30,4 +30,7 @@ def inactive_run(run):
         # the only UI recovery path just because the heartbeat is old.
         if (run / 'process.json').exists() or (run / 'process.json').is_symlink():
             raise ValueError('任务仍有待回收进程记录，请先停止或处理恢复异常')
+        if any((run/name).exists() or (run/name).is_symlink()
+               for name in ('publication.json', 'work-checkpoint.json')):
+            raise ValueError('任务仍有待恢复的提交记录，请先恢复或处理异常')
         yield

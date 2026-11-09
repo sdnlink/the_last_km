@@ -34,9 +34,11 @@ def business_tree(history, code_index):
     history.git('read-tree', history.business_head['commit'] or empty, env=env)
     original = entries(history, history.initial)
     candidate = entries(history, history.candidate['commit'])
+    published_tree = history.last_business_commit.get('candidate_tree')
+    published = entries(history, published_tree) if published_tree else {}
     scope = os.fsencode(history.cwd.relative_to(history.root).as_posix())
     runtime = b'.auto-moniter/' if scope == b'.' else scope + b'/.auto-moniter/'
-    selected = {p for p in original.keys() | candidate.keys() if not p.startswith(runtime)}
+    selected = {p for p in original.keys() | candidate.keys() | published.keys() if not p.startswith(runtime)}
     zero = b'0' * len(empty)
     changes = b''.join(candidate.get(p, b'0 ' + zero + b'\t' + p + b'\0') for p in sorted(selected))
     if changes:
@@ -100,8 +102,12 @@ def recover(history):
         stat = lock.stat()
         if [stat.st_dev, stat.st_ino] != saved['lock_identity']:
             raise GitHistoryError('Another Git operation owns the index lock')
-        if digest(lock.read_bytes()) not in (saved['lock_hash'], saved['next_index_hash']):
-            raise GitHistoryError('Publication index lock changed')
+        retained = read_index(lock)
+        if digest(retained) not in (saved['lock_hash'], saved['next_index_hash']):
+            replacement = read_index(history.run_dir / 'publication-index.next')
+            if ((actual, audit) != after or replacement is None
+                    or digest(replacement) != saved['next_index_hash'] or not replacement.startswith(retained)):
+                raise GitHistoryError('Publication index lock changed')
     if (actual, audit) == before:
         if current_hash != saved['old_index_hash']:
             raise GitHistoryError('Index changed before interrupted publication; refusing recovery')
@@ -110,8 +116,8 @@ def recover(history):
         if current_hash not in (saved['old_index_hash'], saved['next_index_hash']):
             raise GitHistoryError('User staging changed after interrupted publication; preserve it and inspect journal')
         if current_hash != saved['next_index_hash']:
-            data = (history.run_dir / 'publication-index.next').read_bytes()
-            if digest(data) != saved['next_index_hash']:
+            data = read_index(history.run_dir / 'publication-index.next')
+            if data is None or digest(data) != saved['next_index_hash']:
                 raise GitHistoryError('Publication recovery index is corrupt')
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
             if not lock.exists():

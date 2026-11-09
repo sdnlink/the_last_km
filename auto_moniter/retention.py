@@ -112,6 +112,9 @@ def _metadata(directory: int, cwd: Path, run: Path, include_failed: bool) -> dic
     else:
         result["reason"] = "process_record_present"
         return result
+    if any((run/name).exists() or (run/name).is_symlink() for name in ('publication.json','work-checkpoint.json')):
+        result['reason'] = 'publication_recovery_pending'
+        return result
     result["reason"] = "eligible" if status == "done" or include_failed else "failed_run_preserved"
     return result
 

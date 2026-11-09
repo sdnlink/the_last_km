@@ -24,6 +24,8 @@ class ApprovedHistory(GitHistory):
         self.audit_initial=''
         self.work_ref=''
         self.work_head=''
+        from auto_moniter.work_checkpoint import recover as recover_work
+        recover_work(self)
         if self.state_path.exists():
             saved=json.loads(self.state_path.read_text())
             if not saved.get('approval_only') or saved.get('project')!=str(self.cwd) or saved.get('ref') not in (self.ref, 'refs/heads/auto-moniter/'+self.key):
@@ -55,8 +57,8 @@ class ApprovedHistory(GitHistory):
             self.work_head=self.git('commit-tree',self.initial,
                 *(['-p',self.business_head['commit']] if self.business_head['commit'] else []),
                 data=b'Unpublished task input\n').decode().strip()
-            self.git('update-ref',self.work_ref,self.work_head,'0'*len(self.work_head))
-            self._save()
+            from auto_moniter.work_checkpoint import persist
+            persist(self, '')
 
     def verify(self):
         if self._business_identity()!=self.business_head:
@@ -98,9 +100,12 @@ class ApprovedHistory(GitHistory):
                 self.candidate['business_tree'] = business_tree(self, Path(tmp)/'index')
             next_work=self.git('commit-tree',self.candidate['commit'],'-p',self.work_head,
                                data=f'Pending task round {index}\n'.encode()).decode().strip()
-            self.git('update-ref',self.work_ref,next_work,self.work_head)
+            previous=self.work_head
             self.work_head=next_work
-        self._save()
+            from auto_moniter.work_checkpoint import persist
+            persist(self, previous)
+        else:
+            self._save()
 
     def review_context(self):
         self.verify()

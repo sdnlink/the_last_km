@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--check", action="append", default=[], help="Shell acceptance command run by the monitor before final delivery; repeat for multiple checks")
     run.add_argument("--check-timeout", default=None, help="Timeout for each acceptance command (default: 10m; inherited on resume)")
     run.add_argument("--restart-after-stall", type=_nonnegative_int, default=3, help="Restart agent sessions after N turns without workspace or module progress; 0 disables (default: 3)")
-    run.add_argument("--review-every", type=_nonnegative_int, default=None, help="Audit unfinished work after N worker turns; 0 only reviews completion/blockers (default: 5; inherited on resume)")
+    run.add_argument("--review-every", type=_nonnegative_int, default=None, help="Audit unfinished work after N worker turns; 0 disables turn-based audits, retaining completion/blockers and quality-policy checkpoints (default: 5; inherited on resume)")
     run.add_argument("--run-dir", type=Path, help="Directory for prompts, logs, and the report")
     run.add_argument("--keep-rounds", type=_nonnegative_int, default=None, help="Retain artifacts and detailed records for the latest N rounds; 0 retains all (default: 100; inherited on resume)")
     run.add_argument("--modules", type=Path, help="Optional JSON array of module definitions: id, title, acceptance")

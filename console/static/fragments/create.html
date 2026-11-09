@@ -114,7 +114,7 @@
               </div>
               <label>审核频率（worker 轮次）
                 <input name="review_every" type="number" min="0" max="100000" value="5" required />
-                <small>1：每轮正常结果后审核；2：每两轮；默认 5。0：仅在完成候选或外部阻塞时审核。失败轮次累计计数，但等待 worker 正常返回后才进入审核。</small>
+                <small>1：每轮正常结果后审核；2：每两轮；默认 5。0：关闭按轮次审核，仍审核完成候选和外部阻塞；质量策略的时间或文件数检查点也可提前触发。失败轮次累计计数，但等待 worker 正常返回后才进入审核。</small>
               </label>
               <small>时长、调用和执行轮次上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
               <div class="form-grid">

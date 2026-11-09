@@ -1,11 +1,38 @@
 import {$,escape,icon,timeLabel} from './ui.js';
 import {api,config,fragment,toast,runAction,refresh} from './core.js';
 const loaded=new Map();
-const state={config:null,directionTask:null,directionPending:new Set()};
+const state={config:null,rolesConfig:null,directionTask:null,directionPending:new Set()};
 let directionTimer,stopTarget;
 let gitSequence=0,gitController;
-let resumeTarget,rolesTarget;
 let acceptanceScan=null,acceptanceSequence=0;
+let acceptanceScanRequest=0,preflightRequest=0;
+let createSequence=0;
+const createPending=new Set();
+const taskDialogs=Object.fromEntries(['roles','resume','delete'].map(name=>[name,{sequence:0,target:null,pending:new Set()}]));
+const submitButtons={roles:'roles-submit',resume:'resume-submit',delete:'confirm-delete'};
+function beginTaskDialog(name){
+ const view=taskDialogs[name];view.target=null;
+ const button=$('#'+submitButtons[name]);if(button)button.disabled=true;
+ return ++view.sequence;
+}
+function currentTaskDialog(name,sequence,id){
+ const view=taskDialogs[name];
+ return sequence===view.sequence&&(id===undefined||(view.target===id&&$('#'+name+'-dialog').open));
+}
+function showTaskDialog(name,id){
+ const view=taskDialogs[name];view.target=id;
+ $('#'+submitButtons[name]).disabled=view.pending.has(id);
+ if(!$('#'+name+'-dialog').open)$('#'+name+'-dialog').showModal();
+}
+function bindTaskDialog(name){
+ $('#'+name+'-dialog').addEventListener('close',()=>{taskDialogs[name].sequence++;taskDialogs[name].target=null;});
+}
+function settleTaskDialog(name,id){
+ const view=taskDialogs[name];view.pending.delete(id);
+ // Reopening the same task must still reflect its outstanding operation.
+ if(view.target===id)$('#'+submitButtons[name]).disabled=false;
+}
+function currentCreate(sequence){return sequence===createSequence&&$('#create-dialog')?.open!==false;}
 const CUSTOM_MODEL='__custom_model__';
 export function selectedModels(form,data){
  for(const key of ['model','reviewer_model']){
@@ -18,9 +45,10 @@ export function selectedModels(form,data){
  }
  return data;
 }
-export function modelChoices(form,cfg,{preserve=false,values={}}={}){
+export function modelChoices(form,cfg,{preserve=false,values={},roles=['worker','reviewer']}={}){
  const catalog=cfg.agent_catalog||{};
  for(const [role,providerKey,modelKey,backendKey] of [['worker','provider','model','paseo_backend'],['reviewer','reviewer','reviewer_model','reviewer_paseo_backend']]){
+  if(!roles.includes(role))continue;
   const field=form.elements[modelKey];if(!field)continue;
   const provider=form.elements[providerKey].value;
   const backend=form.elements[backendKey];
@@ -49,7 +77,7 @@ function backendChoices(form,cfg){
  }
 }
 function bindModels(form,cfg){
- for(const key of ['provider','reviewer','paseo_backend','reviewer_paseo_backend'])form.elements[key]?.addEventListener('change',()=>modelChoices(form,cfg()));
+ for(const [key,role] of [['provider','worker'],['reviewer','reviewer'],['paseo_backend','worker'],['reviewer_paseo_backend','reviewer']])form.elements[key]?.addEventListener('change',()=>modelChoices(form,cfg(),{roles:[role]}));
  for(const key of ['model','reviewer_model'])form.elements[key]?.addEventListener('change',()=>{
   const custom=form.elements[key+'_custom'];if(custom)custom.hidden=form.elements[key].value!==CUSTOM_MODEL;
  });
@@ -57,17 +85,17 @@ function bindModels(form,cfg){
 function acceptanceContext(){const f=$('#create-form');return {cwd:f.elements.cwd.value.trim(),task_type:f.elements.task_type.value,python:f.elements.acceptance_python.value.trim()};}
 function acceptanceChanged(){acceptanceSequence++;acceptanceScan=null;$('#acceptance-options').textContent='';$('#acceptance-notice').textContent='项目目录、类型或解释器已改变，请重新扫描。';}
 async function scanAcceptance(){
- const context=acceptanceContext(),seq=++acceptanceSequence;$('#scan-acceptance').disabled=true;
+ const context=acceptanceContext(),seq=++acceptanceSequence,windowSequence=createSequence,request=++acceptanceScanRequest;$('#scan-acceptance').disabled=true;
  $('#acceptance-notice').textContent='正在只读扫描项目入口…';
  try{
   const data=await api('/api/acceptance/scan',context);
-  if(seq!==acceptanceSequence||JSON.stringify(context)!==JSON.stringify(acceptanceContext()))return null;
+  if(!currentCreate(windowSequence)||seq!==acceptanceSequence||JSON.stringify(context)!==JSON.stringify(acceptanceContext()))return null;
   acceptanceScan={...data,context};
   $('#acceptance-options').innerHTML=data.checks.map(c=>`<article class="acceptance-option"><label class="checkbox-label"><input type="checkbox" data-check-id="${escape(c.id)}" ${c.recommended?'checked':''}><span>${escape(c.title)}<small>${escape(c.purpose)}</small></span></label><small>耗时：${escape(c.estimate)}。${escape(c.effects)}</small><details><summary>命令与运行前提</summary><pre>${escape(c.command)}</pre><p>程序：${escape(c.executable)}${c.dependencies.length?'；依赖：'+escape(c.dependencies.join('、')):''}</p></details></article>`).join('')||'<p>没有发现可识别的检查入口。可选择“先制定验收方案”，或由熟悉项目的人补充高级命令；不能据此宣称功能已经验证。</p>';
   $('#acceptance-notice').textContent=`找到 ${data.checks.length} 项检查入口。${data.notice}`;
   return acceptanceScan;
- }catch(error){if(seq===acceptanceSequence)$('#acceptance-notice').textContent=error.message;return null;}
- finally{$('#scan-acceptance').disabled=false;}
+ }catch(error){if(currentCreate(windowSequence)&&seq===acceptanceSequence)$('#acceptance-notice').textContent=error.message;return null;}
+ finally{if(currentCreate(windowSequence)&&request===acceptanceScanRequest)$('#scan-acceptance').disabled=false;}
 }
 /** Modes that must not carry executable checks or selected scan IDs. */
 export function modeOmitsExecution(mode){
@@ -122,35 +150,41 @@ function acceptancePlan(){
 export function setAcceptanceScanForTest(scan){acceptanceScan=scan;acceptanceSequence+=1;}
 /** Test hook: bind create-form listeners after HTML is inserted. */
 export function bindCreateFormForTest(){bind('create');}
-let deleteTarget;
 export async function confirmDelete(id){
+ const sequence=beginTaskDialog('delete');
  try{
-  await ensure('delete');const task=await api(`/api/tasks/${id}`);
+  await ensure('delete');if(!currentTaskDialog('delete',sequence))return;
+  const task=await api(`/api/tasks/${id}`);if(!currentTaskDialog('delete',sequence))return;
   if(!task.actions.includes('delete'))throw new Error('任务仍在执行或状态尚未确认，请先停止');
-  deleteTarget=id;$('#delete-task-title').textContent=task.title;$('#delete-error').hidden=true;
-  if(!$('#delete-dialog').open)$('#delete-dialog').showModal();
- }catch(error){toast(error.message,true);}
+  $('#delete-task-title').textContent=task.title;$('#delete-error').hidden=true;
+  showTaskDialog('delete',id);
+ }catch(error){if(currentTaskDialog('delete',sequence))toast(error.message,true);}
 }
 export async function openResume(id){
+ const sequence=beginTaskDialog('resume');
  try{
-  await ensure('resume');const task=await api(`/api/tasks/${id}`);resumeTarget=id;
+  await ensure('resume');if(!currentTaskDialog('resume',sequence))return;
+  const task=await api(`/api/tasks/${id}`);if(!currentTaskDialog('resume',sequence))return;
   const u=task.usage||task.health?.usage||{};
   $('#resume-usage').textContent=`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
-  $('#resume-form').reset();$('#resume-error').hidden=true;$('#resume-dialog').showModal();
- }catch(error){toast(error.message,true);}
+  $('#resume-form').reset();$('#resume-error').hidden=true;showTaskDialog('resume',id);
+ }catch(error){if(currentTaskDialog('resume',sequence))toast(error.message,true);}
 }
 export async function openRoles(id){
+ const sequence=beginTaskDialog('roles');
  try{
-  await ensure('roles');const task=await api(`/api/tasks/${id}`);const cfg=await config();
+  await ensure('roles');if(!currentTaskDialog('roles',sequence))return;
+  const task=await api(`/api/tasks/${id}`);if(!currentTaskDialog('roles',sequence))return;
+  const cfg=await config();if(!currentTaskDialog('roles',sequence))return;
   if(!task.actions.includes('roles'))throw new Error('请先停止任务并等待检查点保存，再调整角色');
-  rolesTarget=id;const f=$('#roles-form');
+  state.rolesConfig=cfg;const f=$('#roles-form');
   const options=cfg.providers.filter(p=>p.name!=='paseo').map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
   f.elements.provider.innerHTML=options;f.elements.reviewer.innerHTML=options;
   for(const key of ['provider','reviewer','model','reviewer_model'])f.elements[key].value=task[key]||'';
   modelChoices(f,cfg,{preserve:true,values:task});
-  if(!f.dataset.modelsBound){bindModels(f,()=>state.config||cfg);f.dataset.modelsBound='1';}
-  $('#roles-error').hidden=true;$('#roles-dialog').showModal();
- }catch(error){toast(error.message,true);}
+  if(!f.dataset.modelsBound){bindModels(f,()=>state.rolesConfig);f.dataset.modelsBound='1';}
+  $('#roles-error').hidden=true;showTaskDialog('roles',id);
+ }catch(error){if(currentTaskDialog('roles',sequence))toast(error.message,true);}
 }
 async function ensure(name){
  if(!loaded.has(name))loaded.set(name,(async()=>{
@@ -232,8 +266,9 @@ function renderDirectionHistory(task) {
 }
 
 export async function openCreate(){
- try{await ensure('create');state.config=await config();configureForm();$('#form-error').hidden=true;if(!$('#create-dialog').open)$('#create-dialog').showModal();}
- catch(error){toast(error.message,true);}
+ const sequence=++createSequence;
+ try{await ensure('create');const cfg=await config();if(sequence!==createSequence)return;state.config=cfg;configureForm();$('#form-error').hidden=true;$('#create-submit').disabled=false;if(!$('#create-dialog').open)$('#create-dialog').showModal();}
+ catch(error){if(sequence===createSequence)toast(error.message,true);}
 }
 function refreshDirection(task){if(state.directionTask===task.id){state.currentDirection=task;renderDirectionHistory(task);}}
 async function pollDirection(){
@@ -273,89 +308,110 @@ export async function openGitRecord(id,commit){
  finally{if(seq===gitSequence&&$('#git-record-loading'))$('#git-record-loading').hidden=true;}
 }
 function bind(name){
+ if(taskDialogs[name])bindTaskDialog(name);
  if(name==='roles'){
   $('#roles-form').addEventListener('submit',async e=>{
-   e.preventDefault();const id=rolesTarget;if(!id)return;
+   e.preventDefault();const view=taskDialogs.roles,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
+   view.pending.add(id);
    $('#roles-submit').disabled=true;$('#roles-error').hidden=true;
-   try{const data=selectedModels(e.target,Object.fromEntries(new FormData(e.target)));await api(`/api/tasks/${id}/roles`,data);$('#roles-dialog').close();toast('角色配置已保存，恢复执行后生效');await refresh();}
-   catch(error){$('#roles-error').hidden=false;$('#roles-error').textContent=error.message;}
-   finally{$('#roles-submit').disabled=false;}
+   try{
+    const data=selectedModels(e.target,Object.fromEntries(new FormData(e.target)));await api(`/api/tasks/${id}/roles`,data);
+    if(currentTaskDialog('roles',sequence,id))$('#roles-dialog').close();
+    toast(`任务 ${id} 的角色配置已保存，恢复执行后生效`);await refresh();
+   }catch(error){if(currentTaskDialog('roles',sequence,id)){$('#roles-error').hidden=false;$('#roles-error').textContent=error.message;}else toast(`任务 ${id} 调整角色失败：${error.message}`,true);}
+   finally{settleTaskDialog('roles',id);}
   });return;
  }
 
  if(name==='delete'){
   $('#confirm-delete').addEventListener('click',async()=>{
-   const id=deleteTarget;if(!id)return;
+   const view=taskDialogs.delete,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
+   view.pending.add(id);
    $('#confirm-delete').disabled=true;$('#delete-error').hidden=true;
    try{
     await api(`/api/tasks/${id}/delete`,{confirm:id});
     localStorage.removeItem(`auto-moniter-direction-${id}`);
-    $('#delete-dialog').close();
-    if(document.body.dataset.taskId===id||new URLSearchParams(location.search).get('task')===id){location.assign('/tasks');return;}
-    toast('任务已删除，项目与运行记录已保留');await refresh();
-   }catch(error){$('#delete-error').hidden=false;$('#delete-error').textContent=error.message;}
-   finally{$('#confirm-delete').disabled=false;}
+    if(currentTaskDialog('delete',sequence,id)){
+     $('#delete-dialog').close();
+     if(document.body.dataset.taskId===id||new URLSearchParams(location.search).get('task')===id){location.assign('/tasks');return;}
+    }
+    toast(`任务 ${id} 已删除，项目与运行记录已保留`);await refresh();
+   }catch(error){if(currentTaskDialog('delete',sequence,id)){$('#delete-error').hidden=false;$('#delete-error').textContent=error.message;}else toast(`任务 ${id} 删除失败：${error.message}`,true);}
+   finally{settleTaskDialog('delete',id);}
   });return;
  }
  if(name==='resume'){
   $('#resume-form').addEventListener('submit',async e=>{
-   e.preventDefault();const id=resumeTarget;const data=Object.fromEntries(new FormData(e.target));
+   e.preventDefault();const view=taskDialogs.resume,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
+   const data=Object.fromEntries(new FormData(e.target));
    for(const key of Object.keys(data))data[key]=Number(data[key]);
+   view.pending.add(id);
    $('#resume-submit').disabled=true;$('#resume-error').hidden=true;
-   try{await api(`/api/tasks/${id}/resume`,data);$('#resume-dialog').close();toast('已请求恢复');await refresh();}
-   catch(error){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;}
-   finally{$('#resume-submit').disabled=false;}
+   try{await api(`/api/tasks/${id}/resume`,data);if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();toast(`任务 ${id} 已请求恢复`);await refresh();}
+   catch(error){if(currentTaskDialog('resume',sequence,id)){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;}else toast(`任务 ${id} 恢复失败：${error.message}`,true);}
+   finally{settleTaskDialog('resume',id);}
   });return;
  }
  if(name==='git'){$('#git-record-dialog').addEventListener('close',()=>{gitSequence++;gitController?.abort();});return;}
  if(name==='confirm'){$('#confirm-stop').addEventListener('click',()=>{const id=stopTarget;$('#confirm-dialog').close();if(id)runAction(id,'stop');});return;}
  if(name==='create'){
+  $('#create-dialog')?.addEventListener('close',()=>{
+   createSequence++;acceptanceSequence++;acceptanceScan=null;
+   for(const id of ['refresh-agents','create-submit','scan-acceptance','preflight-acceptance'])$('#'+id).disabled=false;
+  });
   for(const key of ['cwd','task_type','acceptance_python'])$('#create-form').elements[key].addEventListener('input',acceptanceChanged);
   $('#scan-acceptance').addEventListener('click',scanAcceptance);
   $('#preflight-acceptance').addEventListener('click',async()=>{
-   const sequence=acceptanceSequence;
+   const sequence=acceptanceSequence,windowSequence=createSequence,request=++preflightRequest;
    $('#preflight-acceptance').disabled=true;
    try{
     const plan=acceptancePlan();if(!plan.selected_ids.length)throw new Error('请先选择需要检查运行前提的项目检查项');
     const result=await api('/api/acceptance/preflight',{cwd:acceptanceContext().cwd,acceptance_plan:plan});
-    if(sequence!==acceptanceSequence)return;
+    if(!currentCreate(windowSequence)||sequence!==acceptanceSequence)return;
     $('#acceptance-notice').textContent=(result.ready?'运行前提已就绪，尚未执行业务检查。':'运行环境尚未就绪，尚未执行业务检查。')+result.checks.map(c=>`${c.title}：${c.errors.join('；')||'前提就绪'}`).join('。');
-   }catch(error){if(sequence===acceptanceSequence)$('#acceptance-notice').textContent=error.message;}
-   finally{$('#preflight-acceptance').disabled=false;}
+   }catch(error){if(currentCreate(windowSequence)&&sequence===acceptanceSequence)$('#acceptance-notice').textContent=error.message;}
+   finally{if(currentCreate(windowSequence)&&request===preflightRequest)$('#preflight-acceptance').disabled=false;}
   });
   $('#provider-select').addEventListener('change',updateProviderHint);$('#reviewer-select').addEventListener('change',updateProviderHint);
   bindModels($('#create-form'),()=>state.config);
   $('#refresh-agents')?.addEventListener('click',async()=>{
-   const button=$('#refresh-agents');button.disabled=true;
+   const button=$('#refresh-agents');if(button.disabled)return;button.disabled=true;
+   const sequence=createSequence;
    try{
-    const values=Object.fromEntries(new FormData($('#create-form')));
-    await api('/api/agents/refresh',{});state.config=await config(true);
+    await api('/api/agents/refresh',{});const cfg=await config(true);
+    if(sequence!==createSequence||!$('#create-dialog').open)return;
     const form=$('#create-form');
-    // Refresh options without resetting the user's requirement or acceptance plan.
+    // Read live values after the response; users may edit while discovery runs.
+    const values=Object.fromEntries(['provider','reviewer','model','reviewer_model'].map(key=>[key,form.elements[key].value]));
+    state.config=cfg;
     const options=state.config.providers.map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
     for(const key of ['provider','reviewer']){form.elements[key].innerHTML=options;form.elements[key].value=values[key];}
-    backendChoices(form,state.config);modelChoices(form,state.config,{preserve:true});updateProviderHint();
-    $('#agent-catalog-status').textContent=`目录已更新：${new Date(state.config.agent_catalog.at).toLocaleString()}`;
-   }catch(error){$('#agent-catalog-status').textContent=error.message;}finally{button.disabled=false;}
+    backendChoices(form,state.config);modelChoices(form,state.config,{preserve:true,values});updateProviderHint();
+    const catalog=state.config.agent_catalog||{};
+    $('#agent-catalog-status').textContent=`目录已更新：${catalog.at?new Date(catalog.at).toLocaleString():'未查询'}。${catalog.note||'目录不等同于账户鉴权或功能验收通过。'}`;
+   }catch(error){if(sequence===createSequence)$('#agent-catalog-status').textContent=error.message;}finally{if(sequence===createSequence)button.disabled=false;}
   });
   $('#create-form').elements.auto_start.addEventListener('change',e=>$('#create-submit').textContent=e.target.checked?'创建并启动任务':'保存待启动任务');
   $('#create-form').addEventListener('submit',async e=>{
-   e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
+   e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
+   const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
    try{selectedModels(form,data);}catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;return;}
    for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
    data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);
    try{data.modules=JSON.parse(data.modules||'[]');}catch(error){$('#form-error').hidden=false;$('#form-error').textContent='模块清单需要有效 JSON 数组';return;}
    try{data.quality_policy=JSON.parse(data.quality_policy||'{}');}catch(error){$('#form-error').hidden=false;$('#form-error').textContent='质量策略需要有效 JSON 对象';return;}
-   $('#create-submit').disabled=true;
+   createPending.add(sequence);$('#create-submit').disabled=true;$('#form-error').hidden=true;
+   let submitted=false;
    try{
     if(!acceptanceScan&&data.verification_mode!=='executable')await scanAcceptance();
+    if(!currentCreate(sequence))return;
     data.acceptance_plan=acceptancePlan();
     applyVerificationModeToCreatePayload(data);
-   }catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;$('#create-submit').disabled=false;return;}
-   $('#create-submit').disabled=true;$('#form-error').hidden=true;
-   try{const t=await api('/api/tasks',data);location.assign(`/tasks/${t.id}`);}
-   catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;}
-   finally{$('#create-submit').disabled=false;}
+    submitted=true;const t=await api('/api/tasks',data);
+    if(currentCreate(sequence))location.assign(`/tasks/${t.id}`);
+    else toast(`任务“${data.title}”已创建（${t.id}），可在任务列表查看`);
+   }catch(error){if(currentCreate(sequence)){$('#form-error').hidden=false;$('#form-error').textContent=error.message;}else if(submitted)toast(`任务“${data.title}”创建失败：${error.message}`,true);}
+   finally{createPending.delete(sequence);if(currentCreate(sequence))$('#create-submit').disabled=false;}
   });return;
  }
  $('#direction-text').addEventListener('input',e=>{if(state.directionTask)localStorage.setItem(`auto-moniter-direction-${state.directionTask}`,e.target.value);});

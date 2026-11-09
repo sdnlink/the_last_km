@@ -4,6 +4,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from auto_moniter.requirements_review import requests_follow_up
@@ -237,6 +238,66 @@ class RequirementFollowUpTests(unittest.TestCase):
         state = json.loads((self.root / 'run/state.json').read_text())
         self.assertEqual(state['status'], 'done')
         self.assertEqual(state.get('requirement_cycles', []), [])
+
+    def test_negated_follow_up_does_not_authorize_another_requirement(self):
+        for request in (
+            '当前需求完成后，不要继续下一轮功能需求补充。',
+            '不需要下一轮需求补充，实现当前功能后退出。',
+            '禁止继续下一轮功能需求补充。',
+            'Do not continue with another requirement.',
+            "Don't continue with the next requirement.",
+            'Implement this; never continue with another requirement.',
+        ):
+            with self.subTest(request=request):
+                self.assertFalse(requests_follow_up(request))
+        for request in (FOLLOW, 'Continue with another requirement.',
+                        '完成需求，不要删除现有数据。继续下一轮需求补充。'):
+            with self.subTest(request=request):
+                self.assertTrue(requests_follow_up(request))
+
+    def test_negated_request_finishes_without_extra_reviewer_call(self):
+        worker = ScriptedProvider('worker', [self.done(touch='app.py')])
+        reviewer = CitingReviewer([{'verdict': {}, 'text': json.dumps(BRIEF)}, self.done(cite=True)], self.root)
+        result = self.loop(worker, reviewer, requirement='实现当前需求，不要继续下一轮功能需求补充。', max_rounds=1)
+        self.assertEqual(result.status, 'done', result.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+
+    def test_cycle_limit_stops_before_new_review_and_keeps_checkpoint_resumable(self):
+        worker = ScriptedProvider('worker', [self.done(touch='app.py')])
+        reviewer = CitingReviewer([{'verdict': {}, 'text': json.dumps(BRIEF)}, self.done(cite=True)], self.root)
+        with patch('auto_moniter.requirements_review.MAX_CYCLES', 1):
+            result = self.loop(worker, reviewer)
+            self.assertEqual(result.status, 'action_required', result.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            saved = json.loads((self.root/'run/state.json').read_text())
+            self.assertEqual(len(saved['requirement_cycles']),1)
+            committed = _git(self.root,'rev-parse','HEAD')
+            resumed_worker = ScriptedProvider('worker', [])
+            resumed_reviewer = CitingReviewer([],self.root)
+            resumed = self.loop(resumed_worker,resumed_reviewer,resume=True)
+            self.assertEqual(resumed.status,'action_required',resumed.summary)
+            self.assertEqual((len(resumed_worker.calls),len(resumed_reviewer.calls)),(0,0))
+            self.assertEqual(_git(self.root,'rev-parse','HEAD'),committed)
+
+    def test_resumed_follow_up_does_not_overwrite_initial_requirement_artifacts(self):
+        worker = ScriptedProvider('worker', [self.done(touch='app.py')])
+        reviewer = CitingReviewer([{'verdict': {}, 'text': json.dumps(BRIEF)}, self.done(cite=True)], self.root)
+        supervisor = Supervisor(RunConfig(FOLLOW, self.root, worker, reviewer=reviewer,
+            workflow='review-first', run_dir=self.root/'run', git_history='required',
+            retry_delay_s=0), log=lambda _: None)
+        supervisor.log = lambda message: supervisor.request_stop() if 'elaborating next requirement' in message else None
+        self.assertEqual(supervisor.run().status, 'stopped')
+        originals = {p.name:p.read_bytes() for p in (self.root/'run').glob('000-reviewer*') if p.is_file()}
+        self.assertTrue(originals)
+        resumed = Supervisor(RunConfig(FOLLOW, self.root, ScriptedProvider('worker', []),
+            reviewer=CitingReviewer([{'verdict': {}, 'text': json.dumps(NEXT)}], self.root),
+            workflow='auto', resume=True, run_dir=self.root/'run', git_history='required',
+            retry_delay_s=0), log=lambda _: None)
+        resumed.log = lambda message: resumed.request_stop() if 'worker running' in message else None
+        self.assertEqual(resumed.run().status, 'stopped')
+        for name, contents in originals.items():
+            self.assertEqual((self.root/'run'/name).read_bytes(), contents, name)
+        self.assertTrue((self.root/'run/900001-reviewer-text.md').is_file())
 
 
 if __name__ == '__main__':

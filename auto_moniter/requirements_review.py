@@ -1,5 +1,8 @@
 """Read-only reviewer elaboration; preserve the person's original scope."""
 import json
+import re
+
+MAX_CYCLES = 32
 
 SCHEMA = {'type':'object','additionalProperties':False,'properties':{
     'status':{'type':'string','enum':['ready','needs_input']},
@@ -37,7 +40,6 @@ def requests_follow_up(text):
     """
     if not isinstance(text, str) or not text.strip():
         return False
-    normalized = ''.join(text.split()).lower()
     markers = (
         '继续下一轮功能需求补充',
         '继续下一轮需求补充',
@@ -47,7 +49,21 @@ def requests_follow_up(text):
         'continuewiththenextrequirement',
         'nextrequirementelaboration',
     )
-    return any(marker in normalized for marker in markers)
+    authorized = False
+    for clause in re.split(r'[。！？!?;；\n]', text):
+        normalized = ''.join(clause.split()).lower()
+        for marker in markers:
+            position = normalized.find(marker)
+            if position < 0:
+                continue
+            prefix = normalized[:position]
+            # A mentioned feature is not permission to start another task when
+            # the same instruction explicitly forbids that continuation.
+            if (re.search(r'不要|无需|禁止|不得|不必|不再|不需要|不允许|停止|取消', prefix)
+                    or re.search(r"donot|don't|never|without|noneedto|notto|mustnot|stop|cancel", prefix)):
+                return False
+            authorized = True
+    return authorized
 
 
 def prompt(config, modules, *, follow_up=None):

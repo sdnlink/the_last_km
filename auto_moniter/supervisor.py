@@ -403,6 +403,9 @@ class Supervisor:
             self._recover_interrupted_run()
         (self.run_dir / "report.json").unlink(missing_ok=True)
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
+        if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
+            return self._finish('action_required',
+                'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
                 or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
@@ -912,7 +915,6 @@ class Supervisor:
             'handoff': handoff,
         })
         self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
-        self._follow_up_index = 900000 + handoff['cycle']
         self.requirements_review = {}
         self.worker_session_id = ''
         self.reviewer_session_id = ''
@@ -921,6 +923,10 @@ class Supervisor:
         self._audit_feedback = None
         self._review_feedback = None
         self._write_state(records, 'running', 0, '', self._delivery_tree)
+        if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
+            self._stop = True
+            self._stop_reason = 'Next requirement not ready: requirement cycle limit reached; committed work saved. Start a new run to continue.'
+            return True
         if not self._elaborate_requirement(records):
             self._stop = True
             if not self._stop_requested and not self._stop_reason.startswith('Next requirement not ready'):
@@ -955,7 +961,7 @@ class Supervisor:
             if self._stop:
                 return False
             turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None),'',
-                              role='reviewer',index=getattr(self,'_follow_up_index',0),model=self._reviewer_model(),
+                              role='reviewer',index=900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
             if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
                 raise ValueError('Requirement reviewer changed the read-only workspace')
@@ -2450,7 +2456,7 @@ def _audit_findings(verdict: Verdict) -> list[str]:
 
 
 def _restore_requirement_cycles(value):
-    if not isinstance(value, list) or len(value) > 32:
+    if not isinstance(value, list) or len(value) > requirements_review.MAX_CYCLES:
         raise ValueError('Invalid saved requirement cycles')
     cycles = []
     for item in value:

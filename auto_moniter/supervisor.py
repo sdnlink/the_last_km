@@ -241,6 +241,7 @@ class Supervisor:
         self.quality = Quality({}, {})
         self.meter = UsageMeter()
         self.requirements_review = {}
+        self.requirement_cycles = []
 
     def request_stop(self) -> None:
         self._stop = True
@@ -402,10 +403,16 @@ class Supervisor:
             self._recover_interrupted_run()
         (self.run_dir / "report.json").unlink(missing_ok=True)
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
-        if self.config.workflow=='review-first' and not self._stop and self.requirements_review.get('status')!='ready':
+        if self.config.workflow=='review-first' and not self._stop and (
+                self.requirements_review.get('status')!='ready'
+                or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
             if not self._elaborate_requirement(records):
                 return self._finish('stopped' if self._stop_requested else 'action_required',
                                     self.requirements_review.get('summary','Requirement review did not complete; worker was not started.'), records, None)
+
+        if (self.requirement_cycles
+                and self._next_round == self.requirement_cycles[-1]['handoff']['round'] + 1):
+            last_worker = last_review = None
 
         while not self._stop:
             self._process_control()
@@ -451,6 +458,9 @@ class Supervisor:
                 if impact_before is None and worker_start_tree == previous_tree:
                     impact_before = before_files
                 self.log(f"round {round_index}: worker running")
+                if self._stop:
+                    self._next_round = round_index
+                    break
                 reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session
                 turn = self._invoke(
                     self.config.provider,
@@ -598,8 +608,10 @@ class Supervisor:
                         self._retry_pause(stall + 1, "unfinished worker turn")
                     continue
 
-                periodic_review = (self.config.workflow == 'review-first' and tree != worker_start_tree) or bool(
-                    self.config.review_every and self._rounds_since_review >= self.config.review_every)
+                # Source edits are normal implementation progress, not a reason
+                # to interrupt every worker turn with another model audit.
+                periodic_review = bool(self.config.review_every
+                                       and self._rounds_since_review >= self.config.review_every)
                 if self.config.quality_policy:
                     threshold = self.quality.config['review_changed_files']
                     periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
@@ -804,14 +816,21 @@ class Supervisor:
                                     + ". The reviewer must explicitly close each issue with evidence.")
             if _accepted(review) and not problems:
                 if verdict.scope == "requirement" and review.scope == "requirement":
-                    if self._delivery_checks(round_index, review, expected_tree=review_tree) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
+                    accepted = self._delivery_checks(round_index, review, expected_tree=review_tree) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree)
+                    if accepted:
                         self.modules.accept(verdict, review, round_index, review_tree)
+                        if self._begin_follow_up(records, review, review_record):
+                            self.log(f"round {round_index}: requirement accepted and committed; continuing next requirement elaboration")
+                            last_worker = last_review = None
+                            stall, previous_gap_key, previous_tree = 0, "", review_tree
+                            continue
                         return self._finish(
                             "done",
                             review.summary or verdict.summary or "Reviewer accepted the work.",
                             records,
                             review,
                         )
+                    review_record.verdict = review
                 else:
                     joint_ids = set(verdict.module_ids) & set(review.module_ids)
                     if self._delivery_checks(round_index, review, final=False, expected_tree=review_tree, module_ids=joint_ids) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
@@ -820,6 +839,8 @@ class Supervisor:
                         review.module_ids = sorted(joint_ids)
                         self._complete_module(review)
                         self.log(f"round {round_index}: module accepted; continuing original requirement")
+                    else:
+                        review_record.verdict = review
             if _accepted(review) and problems:
                 review.status = "continue"
                 review.gaps.extend(problems)
@@ -855,21 +876,86 @@ class Supervisor:
                 )
             self._retry_pause(stall + 1, "unfinished review")
 
-        return self._finish('action_required' if self._stop_reason.startswith(('Verified progress','Acceptance environment')) else 'stopped',
-                            f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
+        follow_up_stopped = self._stop_reason.startswith('Next requirement not ready')
+        return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(('Verified progress','Acceptance environment')) else 'stopped',
+                            self._stop_reason if follow_up_stopped else f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
+
+    def _begin_follow_up(self, records, review, review_record=None):
+        """Start another reviewed requirement only when the saved request asks for one.
+
+        A jointly accepted requirement still finishes the run unless the original
+        request asks to continue with the next requirement elaboration. Repair
+        rounds are not follow-ups: open audit issues stay with the worker.
+        """
+        if not requirements_review.requests_follow_up(self.config.requirement):
+            return False
+        if self.audit.pending():
+            return False
+        if self._pending_directions():
+            return False
+        self._close_follow_up_sessions()
+        handoff = {
+            'cycle': len(self.requirement_cycles) + 1,
+            'round': review_record.index if review_record is not None else next((record.index for record in reversed(records) if record.role == 'reviewer'), 0),
+            'tree': self._delivery_tree,
+            'commit': (self.git_history.last_business_commit or {}).get('commit', '') if self.git_history else '',
+            'ref': (self.git_history.business_head or {}).get('ref', '') if getattr(self.git_history, 'business_commits', False) else (self.git_history.ref if self.git_history else ''),
+            'summary': review.summary,
+            'evidence': list(review.evidence[:4]),
+            'acceptance': self.config.acceptance,
+            'modules': self.modules.export(),
+        }
+        self.requirement_cycles.append({
+            'index': handoff['cycle'],
+            'status': 'committed',
+            'requirements_review': self.requirements_review,
+            'handoff': handoff,
+        })
+        self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
+        self._follow_up_index = 900000 + handoff['cycle']
+        self.requirements_review = {}
+        self.worker_session_id = ''
+        self.reviewer_session_id = ''
+        self._active_reviewer_id = ''
+        self._drop_worker_session = False
+        self._audit_feedback = None
+        self._review_feedback = None
+        self._write_state(records, 'running', 0, '', self._delivery_tree)
+        if not self._elaborate_requirement(records):
+            self._stop = True
+            if not self._stop_requested and not self._stop_reason.startswith('Next requirement not ready'):
+                self._stop_reason = 'Next requirement not ready: ' + self.requirements_review.get(
+                    'summary', 'Next requirement elaboration did not become ready; worker was not started.')
+            return True
+        if self.requirements_review.get('status') != 'ready':
+            self._stop = True
+            self._stop_reason = self._stop_reason or 'Next requirement review stopped before it was ready'
+            return True
+        return True
+
+    def _close_follow_up_sessions(self):
+        errors = self._close_delivered_sessions()
+        if errors:
+            raise RuntimeError('Requirement accepted, but agent cleanup failed: ' + '; '.join(errors))
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != self._delivery_tree:
+            raise RuntimeError('Workspace changed while closing delivered agents; revalidation required')
 
     def _elaborate_requirement(self,records):
-        self.requirements_review={'status':'reviewing','summary':'Reviewer is elaborating the original requirement before implementation.'}
+        follow_up = [item['handoff'] for item in self.requirement_cycles]
+        self.requirements_review={'status':'reviewing','summary':'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
+                                  'cycle': len(self.requirement_cycles) + 1}
         self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
         before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
         schema.write_text(json.dumps(requirements_review.SCHEMA))
         self.schema_path=schema
-        self.log('requirements: reviewer elaborating original request; worker has not started')
+        self.log('requirements: reviewer elaborating next requirement; worker has not started' if follow_up else 'requirements: reviewer elaborating original request; worker has not started')
         try:
-            turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export()),'',
-                              role='reviewer',index=0,model=self._reviewer_model(),
+            if self._stop:
+                return False
+            turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None),'',
+                              role='reviewer',index=getattr(self,'_follow_up_index',0),model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
             if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
                 raise ValueError('Requirement reviewer changed the read-only workspace')
@@ -877,6 +963,7 @@ class Supervisor:
             if turn.exit_code or turn.timed_out or turn.interruption:
                 raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
             brief=requirements_review.parse(turn.text)
+            brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=hashlib.sha256(self.config.requirement.strip().encode()).hexdigest()
             self.requirements_review=brief
@@ -885,7 +972,11 @@ class Supervisor:
             self._event('requirements_reviewed',status=brief['status'])
             return brief['status']=='ready'
         except ValueError as exc:
-            self.requirements_review={'status':'failed','summary':redact(str(exc))}
+            self.requirements_review={'status':'failed','summary':redact(str(exc)),
+                                      'cycle': len(self.requirement_cycles) + 1}
+            if follow_up and not self._stop_requested:
+                self._stop = True
+                self._stop_reason = 'Next requirement not ready: ' + self.requirements_review['summary']
             return False
         finally:
             self.schema_path=original_schema
@@ -1380,6 +1471,7 @@ class Supervisor:
         write_json(path, safe({**report.to_dict(), "modules": self.modules.export(), "usage": self._usage(),
                                          "quality_policy": self.config.quality_policy, "quality_state": self.quality.state,
                                          "workflow":self.config.workflow,"requirements_review":self.requirements_review,
+                                         "requirement_cycles": self.requirement_cycles,
                                          "no_progress_turns": self._no_progress, "recovery_count": self._recovery_count, "accepted_tree": self._delivery_tree,
                                          "review_schedule": self._review_schedule(),
                                          "audit_issues": self.audit.export(),
@@ -1456,6 +1548,7 @@ class Supervisor:
             "state_version": 1,
             "workflow": self.config.workflow,
             "requirements_review": self.requirements_review,
+            "requirement_cycles": self.requirement_cycles,
             "quality_policy": self.config.quality_policy,
             "quality_state": self.quality.state,
             "acceptance_baseline_paths": list(self.quality.protected(self.config.cwd)),
@@ -1537,11 +1630,14 @@ class Supervisor:
         self.requirements_review=state.get('requirements_review',{})
         if not isinstance(self.requirements_review,dict):
             raise ValueError('Invalid saved requirement elaboration')
+        self.requirement_cycles = _restore_requirement_cycles(state.get('requirement_cycles', []))
+        original=(self.run_dir/'requirement.md').read_text().strip()
         if self.requirements_review.get('status')=='ready':
             requirements_review.parse(json.dumps({k:v for k,v in self.requirements_review.items() if k in requirements_review.SCHEMA['required']}))
-            original=(self.run_dir/'requirement.md').read_text().strip()
             if self.requirements_review.get('original_sha256')!=hashlib.sha256(original.encode()).hexdigest():
                 raise ValueError('Requirement elaboration belongs to another original request')
+        if self.requirement_cycles and not requirements_review.requests_follow_up(original):
+            raise ValueError('Saved follow-up cycles do not belong to this requirement')
         if not isinstance(saved_policy, dict):
             raise ValueError('Invalid saved quality policy')
         Quality(saved_policy, {}, state.get('quality_state'))
@@ -1707,7 +1803,7 @@ class Supervisor:
 
     def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None) -> str:
         snapshot = workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-        if index == 1 and last_worker is None and last_review is None:
+        if (index == 1 or self.requirement_cycles) and last_worker is None and last_review is None:
             parts = [
                 "You are the implementation agent in an unattended development loop.",
                 "A person stated the requirement below. Implement it in the working directory.",
@@ -1723,6 +1819,15 @@ class Supervisor:
                 "Requirement:",
                 self.config.requirement.strip(),
             ]
+            if self.requirement_cycles:
+                parts.extend([
+                    "",
+                    "Committed requirement cycles (preserve this accepted work; do not reopen it as a new requirement):",
+                    json.dumps(self.requirement_cycles, ensure_ascii=False),
+                    "",
+                    "The reviewer elaborated the next requirement after the previous local commit. "
+                    "Implement that elaboration. A repair of an already accepted defect is not a new requirement cycle.",
+                ])
             if self.config.acceptance.strip():
                 parts.extend(["", "Acceptance checks:", self.config.acceptance.strip()])
             if self.config.checks:
@@ -1854,6 +1959,9 @@ class Supervisor:
                 "The supervisor then continues the original requirement. "
                 "Use scope=requirement only after independently checking ALL original modules, integration, "
                 "and acceptance checks. Do not treat one deliverable module as completion of the entire requirement.",
+                "When the saved request asks for another requirement after delivery, accept only the current elaborated requirement. "
+                "The supervisor starts the next read-only elaboration after the local commit. "
+                "Do not invent that next requirement, and do not treat a repair of the same defect as a new requirement.",
                 "",
                 f"Review round: {index}",
                 "Checkpoint: completion candidate" if _accepted(worker) else "Checkpoint: in-progress audit; steer unfinished work without accepting it as delivered",
@@ -2339,6 +2447,29 @@ def _audit_findings(verdict: Verdict) -> list[str]:
     synthetic = {"Unresolved dependency: " + blocker for blocker in verdict.blockers}
     findings = [gap for gap in verdict.gaps if gap not in synthetic] + verdict.blockers
     return list(dict.fromkeys(findings or verdict.next_actions))
+
+
+def _restore_requirement_cycles(value):
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError('Invalid saved requirement cycles')
+    cycles = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {'index', 'status', 'requirements_review', 'handoff'}:
+            raise ValueError('Invalid saved requirement cycle')
+        if type(item['index']) is not int or item['index'] < 1 or item['status'] != 'committed':
+            raise ValueError('Invalid saved requirement cycle index')
+        review = item['requirements_review']
+        handoff = item['handoff']
+        if not isinstance(review, dict) or not isinstance(handoff, dict):
+            raise ValueError('Invalid saved requirement cycle payload')
+        requirements_review.parse(json.dumps({k: v for k, v in review.items() if k in requirements_review.SCHEMA['required']}))
+        for key in ('cycle', 'round', 'tree', 'commit', 'ref', 'summary', 'evidence', 'acceptance', 'modules'):
+            if key not in handoff:
+                raise ValueError('Saved requirement handoff is incomplete')
+        if not isinstance(handoff['evidence'], list) or not isinstance(handoff['modules'], list):
+            raise ValueError('Saved requirement handoff evidence is invalid')
+        cycles.append(item)
+    return cycles
 
 
 def _continue_remaining_modules(verdict: Verdict) -> None:

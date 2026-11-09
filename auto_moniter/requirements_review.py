@@ -28,7 +28,29 @@ def parse(text):
     return value
 
 
-def prompt(config, modules):
+def requests_follow_up(text):
+    """True only when the saved request asks for another requirement after delivery.
+
+    Ordinary tasks still finish when the current requirement is accepted. A
+    follow-up is another reviewed requirement inside the same run, not a queue
+    and not another repair round for the same defect.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    normalized = ''.join(text.split()).lower()
+    markers = (
+        '继续下一轮功能需求补充',
+        '继续下一轮需求补充',
+        '下一轮功能需求补充',
+        '下一轮需求补充',
+        'continuewithanotherrequirement',
+        'continuewiththenextrequirement',
+        'nextrequirementelaboration',
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def prompt(config, modules, *, follow_up=None):
     return ('You are the independent requirement reviewer. Before any worker implementation, read the project and elaborate the original request. '
             'You are strictly read-only: no edits, commits, configuration changes, deployments or external writes. '
             'Return only the supplied requirement-elaboration JSON schema, not an implementation completion verdict. '
@@ -36,5 +58,18 @@ def prompt(config, modules):
             'Add concrete acceptance criteria, failure/edge cases, constraints and reasonable assumptions within the original scope. '
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
+            + _follow_up_block(follow_up) +
             'Original request:\n'+config.requirement+'\n\nHuman acceptance criteria:\n'+config.acceptance+
             '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(config.checks,ensure_ascii=False))
+
+
+def _follow_up_block(follow_up):
+    if not follow_up:
+        return ''
+    return ('This is the next requirement elaboration after a locally committed, jointly accepted delivery. '
+            'Read the current project and name one concrete unfinished capability inside the original request. '
+            'Cite files or symbols, expected behavior, failure or boundary conditions, and how to verify it. '
+            'Do not resubmit a defect that already has an open audit issue, and do not treat a repair round as a new requirement. '
+            'needs_input is required when no concrete remaining capability can be named from the project. '
+            'Preserve the original request, human acceptance criteria, fixed modules, checks, quality limits and accepted work.\n\n'
+            'Accepted deliveries already committed in this run:\n'+json.dumps(follow_up,ensure_ascii=False)+'\n\n')

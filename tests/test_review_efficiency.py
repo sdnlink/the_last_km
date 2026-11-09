@@ -137,6 +137,98 @@ class ReviewEfficiencyTests(unittest.TestCase):
         self.assertEqual(report.status, 'max_rounds')
         self.assertEqual(len(reviewer.calls), 1)
 
+    def test_source_changes_do_not_bypass_progress_review_interval(self):
+        worker = ScriptedProvider('worker', [
+            {'verdict': _verdict('continue', gaps=['implementing']), 'touch': f'part{i}.py'}
+            for i in range(3)
+        ])
+        reviewer = ScriptedProvider('reviewer', [self.brief()])
+        report = Supervisor(RunConfig('Implement the requirement', self.root, worker,
+            reviewer=reviewer, workflow='review-first', git_history='off', run_dir=self.run,
+            max_rounds=3, retry_delay_s=0), log=lambda _: None).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (3, 1))
+
+    def test_progress_review_runs_at_configured_interval(self):
+        worker = ScriptedProvider('worker', [
+            {'verdict': _verdict('continue', gaps=['implementing']), 'touch': f'part{i}.py'}
+            for i in range(3)
+        ])
+        reviewer = ScriptedProvider('reviewer', [self.brief(),
+            {'verdict': _verdict('continue', gaps=['part2.py: finish input handling'])}])
+        report = Supervisor(RunConfig('Implement the requirement', self.root, worker,
+            reviewer=reviewer, workflow='review-first', git_history='off', run_dir=self.run,
+            max_rounds=3, review_every=3, retry_delay_s=0), log=lambda _: None).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (3, 2))
+
+    def test_disabling_progress_review_still_reviews_completion(self):
+        worker = ScriptedProvider('worker', [
+            {'verdict': _verdict('continue', gaps=['implementing']), 'touch': 'part.py'},
+            {'verdict': _verdict('done', evidence=['app.py']), 'touch': 'app.py'},
+        ])
+        reviewer = ScriptedProvider('reviewer', [self.brief(), self.done()])
+        report = Supervisor(RunConfig('Implement the requirement', self.root, worker,
+            reviewer=reviewer, workflow='review-first', git_history='off', run_dir=self.run,
+            max_rounds=2, review_every=0, retry_delay_s=0), log=lambda _: None).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (2, 2))
+
+    def test_local_repair_preserves_verified_code_and_closes_exact_audit(self):
+        (self.root / 'verified.py').write_text('verified behavior\n')
+        worker = ScriptedProvider('worker', [
+            {'verdict': _verdict('done', evidence=['app.py']), 'touch': 'app.py'},
+            {'verdict': _verdict('done', evidence=['boundary.py']), 'touch': 'boundary.py'},
+        ])
+        reviewer = ScriptedProvider('reviewer', [self.brief(),
+            {'verdict': _verdict('continue', gaps=['app.py: empty input raises instead of returning []'],
+                actions=['Fix empty-input branch only; add boundary.py regression. Preserve verified.py.'])},
+            {'verdict': _verdict('done', evidence=['boundary.py'], closed=['AUD-1'])},
+        ])
+        report = Supervisor(RunConfig('Implement the requirement', self.root, worker,
+            reviewer=reviewer, workflow='review-first', git_history='off', run_dir=self.run,
+            max_rounds=2, retry_delay_s=0), log=lambda _: None).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (2, 3))
+        repair = worker.calls[1]['prompt']
+        self.assertIn('AUD-1', repair)
+        self.assertIn('empty input raises', repair)
+        self.assertIn('bounded repair', repair)
+        self.assertIn('Preserve verified.py', repair)
+        self.assertEqual((self.root / 'verified.py').read_text(), 'verified behavior\n')
+
+    def test_happy_path_uses_one_worker_and_two_read_only_reviewer_calls(self):
+        worker = self.worker()
+        reviewer = ScriptedProvider('reviewer', [self.brief(), self.done()])
+        report = self.monitor(worker, reviewer).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        self.assertTrue(all(call['read_only'] for call in reviewer.calls))
+
+    def test_external_blocker_is_reviewed_even_with_periodic_reviews_disabled(self):
+        worker = ScriptedProvider('worker', [{'verdict': _verdict('blocked')}])
+        reviewer = ScriptedProvider('reviewer', [self.brief(),
+            {'verdict': _verdict('continue', gaps=['Dependency unavailable; independent work remains'])}])
+        report = self.monitor(worker, reviewer, review_every=0).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+
+    def test_worker_start_stop_does_not_spend_an_agent_call(self):
+        worker = ScriptedProvider('worker', [])
+        reviewer = ScriptedProvider('reviewer', [self.brief()])
+        supervisor = self.monitor(worker, reviewer)
+        supervisor.log = lambda message: supervisor.request_stop() if 'worker running' in message else None
+        report = supervisor.run()
+        self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertEqual(worker.calls, [])
+        state = json.loads((self.run / 'state.json').read_text())
+        self.assertEqual(state['next_round'], 1)
+        resumed_worker = self.worker()
+        resumed_reviewer = ScriptedProvider('reviewer', [self.done()])
+        resumed = self.monitor(resumed_worker, resumed_reviewer, resume=True).run()
+        self.assertEqual(resumed.status, 'done', resumed.summary)
+        self.assertEqual((len(resumed_worker.calls), len(resumed_reviewer.calls)), (1, 1))
+
     def test_acceptance_inherits_the_configured_executable_path(self):
         binary = self.root / 'private-bin'
         binary.mkdir()

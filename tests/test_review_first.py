@@ -39,7 +39,7 @@ class ReviewFirstTests(unittest.TestCase):
  def test_resume_reuses_ready_requirement_and_rejects_workflow_change(self):
   worker=ScriptedProvider('worker',[{'verdict':_verdict('continue',['unfinished']),'touch':'app.py'}])
   reviewer=ScriptedProvider('reviewer',[self.brief(),{'verdict':_verdict('continue',['still unfinished'])}])
-  supervisor=Supervisor(RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',run_dir=self.root/'run',git_history='off',retry_delay_s=0),log=lambda _:None)
+  supervisor=Supervisor(RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',run_dir=self.root/'run',git_history='off',retry_delay_s=0,review_every=1),log=lambda _:None)
   supervisor.log=lambda message:supervisor.request_stop() if 'reviewer status=continue' in message else None
   self.assertEqual(supervisor.run().status,'stopped')
   worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py'])}]);reviewer=ScriptedProvider('reviewer',[{'verdict':_verdict('done',evidence=['app.py'],closed=['AUD-1'])}])

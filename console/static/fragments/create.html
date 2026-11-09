@@ -54,6 +54,18 @@
             ></label>
           </div>
           <div id="provider-hint" class="form-hint"></div>
+          <div class="form-grid">
+            <div class="agent-role-fields">
+            <label id="paseo-field" hidden>Worker Paseo 后端<select name="paseo_backend"></select></label>
+            <label>Worker 模型<select name="model"></select><input name="model_custom" hidden maxlength="200" placeholder="自定义模型 ID"><small data-model-note="worker"></small></label>
+            </div>
+            <div class="agent-role-fields">
+            <label id="reviewer-paseo-field" hidden>Reviewer Paseo 后端<select name="reviewer_paseo_backend"></select><small>Paseo 只读审核目前支持 Claude plan，需选择 provider 隔离。</small></label>
+            <label>Reviewer 模型<select name="reviewer_model"></select><input name="reviewer_model_custom" hidden maxlength="200" placeholder="自定义模型 ID"><small data-model-note="reviewer"></small></label>
+            </div>
+          </div>
+          <button type="button" id="refresh-agents" class="button secondary">重新枚举执行器与模型</button>
+          <p id="agent-catalog-status" role="status"></p>
           <section class="acceptance-guide" aria-label="验收方案">
             <h3>完成标准与检查方案</h3>
             <label>任务类型<select name="task_type"><option value="code">代码功能</option><option value="documentation">文档完善</option><option value="service">接口服务</option><option value="other">其他</option></select></label>
@@ -72,25 +84,6 @@
           <details class="advanced">
             <summary>高级执行配置<span>可选</span></summary>
             <div class="advanced-body">
-              <div class="form-grid">
-                <label
-                  >执行模型<input
-                    name="model"
-                    maxlength="200"
-                    placeholder="使用执行器默认模型" /></label
-                ><label
-                  >审查模型<input
-                    name="reviewer_model"
-                    maxlength="200"
-                    placeholder="留空沿用执行模型或审查器默认模型"
-                /><small>已填写执行模型时，留空会沿用该模型；执行器不同建议明确指定审查模型。</small></label>
-              </div>
-              <label id="paseo-field" hidden
-                >Paseo 后端<input
-                  name="paseo_backend"
-                  value="claude"
-                  maxlength="200" /></label
-              >
                 <label>质量策略（JSON）<textarea name="quality_policy" rows="5">{"protect_tests":true,"verified_progress":true,"no_progress_limit":12,"review_interval_s":600,"review_changed_files":20,"blocked_review_limit":3,"requirements":[],"validation_paths":[],"review_tools":"provider","max_tokens":0,"max_cost_usd":0}</textarea><small>需求条目：id、text、module_ids、evidence_paths。已存在的测试/验收配置自动保护；新测试可新增。没有验证进展会停止；files_only 审核工具仅支持原生 Claude。调用轮次不等于模型请求数，token/费用预算仅依据后端实际报告。</small></label>
               <div class="form-grid thirds">
                 <label

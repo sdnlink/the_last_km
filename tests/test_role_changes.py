@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from auto_moniter.cli import build_parser
 from auto_moniter.providers import resolve_provider
+from auto_moniter.providers import _which
 from auto_moniter.role_changes import authorized_change
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
@@ -22,6 +23,16 @@ class RoleChangeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='am-role-', dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        # These tests validate configuration/checkpoints, never model execution.
+        # A fail-fast executable satisfies real preflight without depending on
+        # locally installed AI CLIs or silently invoking a paid model.
+        fixture = self.root / 'offline-agent'
+        fixture.write_text('#!/bin/sh\necho "Unexpected model execution in role fixture" >&2\nexit 97\n')
+        fixture.chmod(0o700)
+        discovery = patch('auto_moniter.providers._which',
+                          side_effect=lambda name: str(fixture) if name in {'codex', 'grok', 'claude'} else _which(name))
+        discovery.start()
+        self.addCleanup(discovery.stop)
         self.run = self.root / 'run'
         self.run.mkdir()
         self.argv = ['run', '--cwd', str(self.root), '--run-dir', str(self.run), '--provider', 'codex',

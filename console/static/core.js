@@ -5,7 +5,8 @@ export function toast(message, error = false) {
   const el = $('#toast');el.textContent=message;el.classList.toggle('error',error);el.hidden=false;
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.hidden=true,5000);
 }
-export async function config() {
+export async function config(force=false) {
+  if(force)configPromise=null;
   if(!configPromise) configPromise=api('/api/config').catch(error=>{configPromise=null;throw error;});
   return configPromise;
 }

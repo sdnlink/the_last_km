@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from auto_moniter import __version__
-from auto_moniter.providers import ProviderError, discover_providers, resolve_provider
+from auto_moniter.providers import DEFAULT_PASEO_BACKEND, ProviderError, discover_providers, resolve_provider
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.modules import definitions
 from auto_moniter.health import run_health, read_run_snapshot
@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--model", default="", help="Worker model id")
     run.add_argument("--mode", default="", help="Worker mode; translated for the selected provider (e.g. bypass, full-access, plan)")
-    run.add_argument("--paseo-backend", default="claude", help="Provider id used when --provider paseo")
+    run.add_argument("--paseo-backend", default=DEFAULT_PASEO_BACKEND, help="Provider id used when --provider paseo (default: paseo)")
     run.add_argument("--paseo-mode", default="", help="Paseo worker mode; compatible aliases are translated per backend. May also use --mode")
     run.add_argument(
         "--reviewer",

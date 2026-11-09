@@ -146,12 +146,18 @@ def recover(history):
     (history.run_dir / 'publication-index.next').unlink(missing_ok=True)
 
 
-def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text):
+class PublicationRefused(GitHistoryError):
+    """Stop or budget refused a new publication before refs moved."""
+
+
+def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text, boundary=None):
     history.verify()
     previous = history.last_business_commit
     if (previous.get('round') == index and previous.get('candidate_tree') == history.candidate['commit']
             and previous.get('commit') == history.business_head['commit']):
         return history.last_worker, history.last_record
+    if boundary and boundary() is False:
+        raise PublicationRefused('Publication refused before preparation: watcher stop or budget is active')
     before_business = dict(history.business_head)
     if not before_business['ref'].startswith('refs/heads/'):
         raise GitHistoryError('Business publication requires a checked-out local branch')
@@ -198,6 +204,10 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
             if updates:
                 history.git('-C', str(history.root), 'update-index', '-z', '--index-info', data=updates, env=sync_env)
             next_index = synced.read_bytes()
+            # Stop during tree and index preparation, before commit objects or
+            # deferred audit records are created.
+            if boundary and boundary() is False:
+                raise PublicationRefused('Publication refused during preparation: watcher stop or budget is active')
             commit = parent
             if code_tree != parent_tree:
                 commit = history.git('commit-tree', code_tree, *(['-p', parent] if parent else []),
@@ -228,6 +238,11 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
                 'next_index_hash': digest(next_index), 'lock_hash': digest(marker),
                 'lock_identity': [stat.st_dev, stat.st_ino]}, durable=True)
             prepared = True
+            # Recheck immediately before the irreversible ref transaction. A stop
+            # or exhausted budget here must not advance main or the audit ref.
+            # Preparation remains recoverable through the existing journal.
+            if boundary and boundary() is False:
+                raise PublicationRefused('Publication refused before ref transaction: watcher stop or budget is active')
             # A single --stdin batch is one ref transaction, including on Git
             # 2.20 which predates explicit start/prepare/commit commands.
             transaction = (f'update {business["ref"]} {commit} {parent or "0" * len(empty)}\n'

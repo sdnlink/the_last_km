@@ -2,6 +2,7 @@
 from pathlib import Path
 from auto_moniter.modules import ModuleLedger
 from auto_moniter.quality import policy
+from auto_moniter.providers import DEFAULT_PASEO_BACKEND
 
 DEFAULTS = {'review_isolation': 'strict', 'worker_isolation': 'provider',
             'turn_timeout': 1800, 'idle_timeout': 900, 'check_timeout': 600,
@@ -44,7 +45,7 @@ def settings(data, cwd):
     if data.get('reviewer', 'claude') == 'paseo':
         if result['review_isolation'] == 'strict':
             raise ValueError('Paseo daemon 不支持 strict 审核；请选择原生 reviewer 或明确选择 provider 隔离')
-        if data.get('paseo_backend', 'claude') != 'claude':
+        if (data.get('reviewer_paseo_backend') or data.get('paseo_backend', DEFAULT_PASEO_BACKEND)) != 'claude':
             raise ValueError('Paseo reviewer 仅支持 Claude plan')
     if data.get('provider', 'codex') == 'paseo' and result['worker_isolation'] == 'strict':
         raise ValueError('Paseo daemon 不支持 strict worker')

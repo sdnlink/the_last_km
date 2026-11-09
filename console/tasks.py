@@ -18,7 +18,7 @@ from auto_moniter.health import read_run_snapshot, run_health
 from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
 from auto_moniter.providers import discover_providers
-from auto_moniter.providers import ProviderError
+from auto_moniter.providers import DEFAULT_PASEO_BACKEND, ProviderError
 from auto_moniter.locking import workspaces_overlap
 from console.settings import settings, DEFAULTS
 from console.deletion import run_key, inactive_run
@@ -103,11 +103,21 @@ class TaskStore:
         self._external = {}
         self._children = {}
         self._scan_warnings = []
+        self.agent_catalog = None
+
+    def refresh_agents(self):
+        from console.agent_catalog import discover
+        self.agent_catalog = discover(self.cwd, discover_providers(), live=True)
+        return self.config()
 
     def config(self) -> dict:
         available = discover_providers()
+        if self.agent_catalog is None:
+            from console.agent_catalog import discover
+            self.agent_catalog = discover(self.cwd, available)
         return {'cwd': str(self.cwd), 'data_dir': str(self.data_dir),
                 'providers': [{'name': name, 'available': bool(available.get(name))} for name in PROVIDERS],
+                'agent_catalog': self.agent_catalog,
                 'poll_interval_ms': 3000}
 
     def _catalog(self) -> dict:
@@ -297,6 +307,8 @@ class TaskStore:
                      'provider': meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                      'reviewer': meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'),
                      'model': meta.get('model', ''), 'reviewer_model': meta.get('reviewer_model', ''),
+                     'paseo_backend': meta.get('paseo_backend', 'claude'),
+                     'reviewer_paseo_backend': meta.get('reviewer_paseo_backend', '') or meta.get('paseo_backend', 'claude'),
                      'role_changes': meta.get('role_changes', []) if include_details else [],
                      'created_at': meta.get('created_at') or state.get('updated_at', ''),
                      'updated_at': state.get('updated_at') or meta.get('created_at', ''),
@@ -525,7 +537,8 @@ class TaskStore:
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
                     'model': text('model', maximum=200), 'reviewer_model': text('reviewer_model', maximum=200),
-                    'paseo_backend': text('paseo_backend', 'claude', 200),
+                    'paseo_backend': text('paseo_backend', DEFAULT_PASEO_BACKEND, 200),
+                    'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200),
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
             if guided:
@@ -563,7 +576,7 @@ class TaskStore:
             from auto_moniter.providers import resolve_provider
             try:
                 reviewer = resolve_provider(meta['reviewer'], role='reviewer',
-                                             paseo_backend=meta.get('paseo_backend', 'claude'))
+                                             paseo_backend=meta.get('reviewer_paseo_backend') or meta.get('paseo_backend', 'claude'))
                 reviewer.validate_review()
                 if meta.get('review_isolation') == 'strict':
                     ReviewIsolation(Path(meta['cwd']), Path(meta['run_dir'])).verify(meta['reviewer'])
@@ -610,7 +623,7 @@ class TaskStore:
                 '--review-every', str(meta.get('review_every', 5)),
                 '--max-runtime', str(meta['max_runtime_minutes'] * 60),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
-        for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend')]:
+        for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend'), ('reviewer_paseo_backend', '--reviewer-paseo-backend')]:
             if meta.get(key):
                 argv.append(flag + '=' + meta[key])
         for check in meta['checks']:

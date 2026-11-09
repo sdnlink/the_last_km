@@ -215,6 +215,7 @@ class Supervisor:
         self._review_feedback: Verdict | None = None
         self._audit_feedback: Verdict | None = None
         self._rounds_since_review = 0
+        self._worker_seconds_since_review = 0.0
         self._stop_reason = ""
         self._baseline_saved = False
         self._recovery_note = ""
@@ -481,6 +482,7 @@ class Supervisor:
                     self.log(f"round {round_index}: no worker session id; the next round starts a new session")
                 verdict = self._verdict_from_turn(turn, role="worker")
                 self._rounds_since_review += 1
+                self._worker_seconds_since_review += turn.elapsed_s
                 tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
                 after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
                 protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
@@ -615,6 +617,9 @@ class Supervisor:
                 # to interrupt every worker turn with another model audit.
                 periodic_review = bool(self.config.review_every
                                        and self._rounds_since_review >= self.config.review_every)
+                if self.config.workflow == 'review-first':
+                    interval = self.quality.config.get('review_interval_s', 0)
+                    periodic_review |= bool(interval and self._worker_seconds_since_review >= interval)
                 if self.config.quality_policy:
                     threshold = self.quality.config['review_changed_files']
                     periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
@@ -724,6 +729,7 @@ class Supervisor:
                     if isinstance(self.git_history, ApprovedHistory):
                         self.git_history.remember_review(round_index)
                     self._rounds_since_review = 0
+                    self._worker_seconds_since_review = 0.0
             review_record = RoundRecord(
                 index=round_index,
                 role="reviewer",
@@ -999,15 +1005,45 @@ class Supervisor:
         with self.directions.lock():
             return self._commit_approved_locked(worker,reviewer,worker_text,review_text,tree)
 
+    def _publication_boundary(self, reviewer) -> bool:
+        """Refuse a new local publication once stop or the cumulative budget is known.
+
+        An already atomic publication is left intact. This gate runs at the commit
+        entry and again immediately before irreversible ref updates.
+        """
+        self._process_control(active=True)
+        if self._stop or self._stop_requested:
+            reviewer.verdict.status = 'continue'
+            reviewer.verdict.gaps.append(
+                'Publication refused: ' + (self._stop_reason or 'stop requested') + '. Committed work is unchanged.')
+            reviewer.verdict.next_actions.append('Do not start another publication or requirement round after stop.')
+            self._event('publication_refused', reason=self._stop_reason or 'stop requested')
+            return False
+        try:
+            self._check_budget()
+        except BudgetExceeded as exc:
+            self._stop = True
+            self._stop_reason = str(exc)
+            reviewer.verdict.status = 'continue'
+            reviewer.verdict.gaps.append('Publication refused: ' + str(exc) + '. Committed work is unchanged.')
+            reviewer.verdict.next_actions.append('Do not start another publication after the runtime budget is exhausted.')
+            self._event('publication_refused', reason=str(exc))
+            return False
+        return True
+
     def _commit_approved_locked(self,worker,reviewer,worker_text,review_text,tree):
+        if not self._publication_boundary(reviewer):
+            return False
         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=tree:
             raise RuntimeError('Workspace changed after review; refusing local commit')
         if self._pending_directions():
             reviewer.verdict.status='continue'
             reviewer.verdict.gaps.append('New instructions arrived before commit; implement and review them first.')
             return False
+        if not self._publication_boundary(reviewer):
+            return False
         if self.git_history.business_commits:
-            from auto_moniter.publication import publish
+            from auto_moniter.publication import PublicationRefused, publish
             write_json(self.run_dir / 'approval-ready.json', {'round': worker.index, 'tree': tree,
                 'candidate_tree': self.git_history.candidate['commit'], 'review': reviewer.verdict.to_dict(),
                 'business_head': self.git_history.business_head, 'provider_config': self._provider_config(),
@@ -1021,7 +1057,10 @@ class Supervisor:
                 return data
             try:
                 worker.git_checkpoint, reviewer.git_checkpoint = publish(
-                    self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text)
+                    self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text,
+                    boundary=lambda: self._publication_boundary(reviewer))
+            except PublicationRefused:
+                return False
             except (OSError, GitHistoryError) as exc:
                 raise RecoveryError('Business publication incomplete; preserve staging and resume after resolving: ' + str(exc)) from exc
             for record in (worker, reviewer):
@@ -1143,7 +1182,8 @@ class Supervisor:
 
     def _review_schedule(self) -> dict:
         return {"enabled": not self.config.no_review, "every_worker_rounds": self.config.review_every,
-                "rounds_since_review": self._rounds_since_review}
+                "rounds_since_review": self._rounds_since_review,
+                "worker_seconds_since_review": self._worker_seconds_since_review}
 
     def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str) -> dict:
         modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope == "module" else []
@@ -1189,7 +1229,9 @@ class Supervisor:
 
     def _reviewer_model(self):
         # Different providers have different model namespaces.
-        return self.config.reviewer_model or (self.config.model if self.config.reviewer and self.config.reviewer.name == self.config.provider.name else '')
+        same_backend = (self.config.reviewer and self.config.reviewer.name == self.config.provider.name
+                        and getattr(self.config.reviewer, 'backend', None) == getattr(self.config.provider, 'backend', None))
+        return self.config.reviewer_model or (self.config.model if same_backend else '')
 
     def _provider_config(self) -> dict:
         def identity(provider):
@@ -1301,6 +1343,25 @@ class Supervisor:
                 verdict.status = 'continue'
                 verdict.gaps.extend(coverage_errors)
                 return False
+        # Candidate verification itself consumes the cumulative budget. Expire
+        # here, before the check loop, so a late fingerprint cannot launch work.
+        self._process_control(active=True)
+        if not self._stop and not self._stop_requested:
+            try:
+                self._check_budget()
+            except BudgetExceeded as exc:
+                self._stop = True
+                self._stop_reason = str(exc)
+                verdict.status = "continue"
+                verdict.gaps.append("Acceptance not started: " + str(exc) + ".")
+                self._write_acceptance_snapshot(index, before, final, [], verdict.gaps, True, False)
+                raise
+        if self._stop or self._stop_requested:
+            verdict.status = "continue"
+            reason = self._stop_reason or "stop requested"
+            verdict.gaps.append("Acceptance not started: " + reason + ".")
+            self._write_acceptance_snapshot(index, before, final, [], verdict.gaps, True, False)
+            return False
         if expected_tree and before != expected_tree:
             self.modules.invalidate(before)
             self.audit.invalidate(before)
@@ -1308,21 +1369,45 @@ class Supervisor:
             verdict.gaps.append("Workspace changed after the conclusion; acceptance evidence is stale. Review the current source again.")
             self._event("stale_evidence", expected=expected_tree, actual=before)
             return False
-        commands = list(self.config.checks) if final else []
+        # Module acceptance uses the same fixed commands as final delivery.
+        # Agent-supplied module checks stay forbidden; only the saved user plan is appended.
+        # Review-first module delivery must run the saved fixed checks. Legacy
+        # module milestones keep the previous contract: user checks run only on
+        # final requirement delivery, never because a module was accepted.
+        commands = list(self.config.checks) if final or self.config.workflow == "review-first" else []
         ids = set(verdict.module_ids) if module_ids is None else set(module_ids)
         if final:
             ids.update(key for key, item in self.modules.items.items() if item["status"] == "accepted")
         commands.extend(self.modules.checks_for(ids))
         failures = []
         check_results = []
+        budget_stop = None
         for number, command in enumerate(dict.fromkeys(commands), 1):
-            if self._stop:
+            # Read stop and the cumulative budget before Popen. A fingerprint
+            # wait or a control.json stop must not launch a check that can finish
+            # before the in-process should_stop poll notices.
+            self._process_control(active=True)
+            if not self._stop and not self._stop_requested:
+                try:
+                    self._check_budget()
+                except BudgetExceeded as exc:
+                    self._stop = True
+                    self._stop_reason = str(exc)
+                    budget_stop = exc
+            if self._stop or self._stop_requested or budget_stop:
                 verdict.status = "continue"
+                reason = self._stop_reason or 'stop requested'
+                failures.append('Acceptance not started: ' + reason + '.')
+                self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
+                if budget_stop:
+                    verdict.gaps.extend(failures)
+                    raise budget_stop
                 return False
             self._beat(f"round {index}: acceptance check {number}")
             completed = False
             live_check = LiveOutput(self.run_dir, 'check', index, '验收检查')
             live_check.emit({'kind': 'command', 'text': redact(command), 'status': 'running'})
+            result = None
             try:
                 result = run_command(
                     PreparedCommand(["sh", "-c", command]), self.config.cwd,
@@ -1338,35 +1423,39 @@ class Supervisor:
             finally:
                 live_check.close()
                 self._forget_child(completed=completed)
-            self._check_budget()
-            path = self.run_dir / f"{index:03d}-check-{number:02d}.log"
-            path.write_text(
-                f"$ {redact(command)}\nexit={result.exit_code} timed_out={result.timed_out} interruption={result.interruption or '-'}\n"
-                + clipped(redact(result.stdout[-16000:]), 16000) + "\n" + clipped(redact(result.stderr[-8000:]), 8000), encoding="utf-8",
-            )
-            if result.exit_code or result.timed_out or result.interruption:
-                failures.append(f"Acceptance check failed: {command} (exit={result.exit_code}, interruption={result.interruption or '-'}). See {path}.")
-                verdict.evidence.append(clipped((result.stderr or result.stdout)[-2000:], 2000))
-            self.log(f"acceptance check {number}: {'failed' if result.exit_code or result.timed_out or result.interruption else 'passed'}")
-            self._event("check_finished", command=command, exit=result.exit_code, tree=before)
-            status = check_outcome(result)
-            check_results.append({'command':redact(command),'status':status,'exit_code':result.exit_code,'log':path.name})
-            write_json(self.run_dir/'acceptance-results.json', {'round':index,'tree':before,'scope':'requirement' if final else 'module',
-                       'checks':check_results,'complete':False,'note':'Only executed checks are verified; uncovered behavior remains unverified.'})
-            if status == 'environment_unavailable':
+                if result is not None:
+                    path = self._record_check_result(index, number, command, result, before, final, check_results, failures, verdict)
+            if result is None:
+                self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
+                raise
+            try:
+                self._check_budget()
+            except BudgetExceeded as exc:
+                budget_stop = exc
+                failures.append('Acceptance interrupted: ' + str(exc) + '. See ' + path.name + '.')
+                break
+            if check_results[-1]['status'] == 'environment_unavailable':
                 self._stop = True
                 self._stop_reason = 'Acceptance environment unavailable; prepare dependencies before resuming. See ' + path.name
                 failures.append(self._stop_reason)
                 break
             self._progress_reset |= self.quality.check_result(command, not (result.exit_code or result.timed_out or result.interruption))
         after = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        published_source_changed = after == before and self._checks_changed_published_source(before)
+        if published_source_changed:
+            # A fixed check can restore tracked bytes to the last published
+            # content. The workspace hash is then unchanged, but the reviewed
+            # candidate is no longer what publication would commit.
+            after = before + ':check-source'
         if after != before:
             self.modules.invalidate(after)
             self.audit.invalidate(after)
             failures.append("Acceptance commands changed workspace source content. Previous review and evidence are stale; review the new content before accepting.")
-        write_json(self.run_dir/'acceptance-results.json', {'round':index,'tree':before,'scope':'requirement' if final else 'module',
-                   'checks':check_results,'complete':bool(check_results) and not failures and not self._stop,'source_changed':after!=before,
-                   'note':'This is a check snapshot, not final delivery approval. Unexecuted behavior remains unverified.'})
+        self._write_acceptance_snapshot(index, before, final, check_results, failures, bool(self._stop or budget_stop), after != before)
+        if budget_stop:
+            verdict.status = "continue"
+            verdict.gaps.extend(failures)
+            raise budget_stop
         if failures:
             verdict.status = "continue"
             verdict.gaps.extend(failures)
@@ -1378,6 +1467,45 @@ class Supervisor:
             verdict.next_actions.append('Read the new human instructions before the next delivery attempt.')
             return False
         return not self._stop
+
+    def _checks_changed_published_source(self, before: str) -> bool:
+        history = getattr(self, 'git_history', None)
+        candidate = (getattr(history, 'candidate', {}) or {}).get('commit')
+        if not history or not getattr(history, 'business_commits', False) or not candidate or candidate == before:
+            return False
+        try:
+            current = history._tree()
+        except (OSError, GitHistoryError, ValueError):
+            return True
+        # Compare content trees. An unchanged candidate hash means the check
+        # did not rewrite tracked source, even when the index still holds an
+        # unrelated staged path.
+        return current != candidate
+
+    def _record_check_result(self, index, number, command, result, before, final, check_results, failures, verdict):
+        path = self.run_dir / f"{index:03d}-check-{number:02d}.log"
+        path.write_text(
+            f"$ {redact(command)}\nexit={result.exit_code} timed_out={result.timed_out} interruption={result.interruption or '-'}\n"
+            + clipped(redact(result.stdout[-16000:]), 16000) + "\n" + clipped(redact(result.stderr[-8000:]), 8000), encoding="utf-8",
+        )
+        if result.exit_code or result.timed_out or result.interruption:
+            failures.append(f"Acceptance check failed: {command} (exit={result.exit_code}, interruption={result.interruption or '-'}). See {path}.")
+            verdict.evidence.append(clipped((result.stderr or result.stdout)[-2000:], 2000))
+        self.log(f"acceptance check {number}: {'failed' if result.exit_code or result.timed_out or result.interruption else 'passed'}")
+        self._event("check_finished", command=command, exit=result.exit_code, tree=before)
+        status = check_outcome(result)
+        check_results.append({'command':redact(command),'status':status,'exit_code':result.exit_code,
+                              'timed_out':bool(result.timed_out),'interruption':result.interruption or '','log':path.name})
+        self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
+        return path
+
+    def _write_acceptance_snapshot(self, index, tree, final, check_results, failures, incomplete, source_changed):
+        write_json(self.run_dir/'acceptance-results.json', {
+            'round':index,'tree':tree,'scope':'requirement' if final else 'module',
+            'checks':check_results,
+            'complete':bool(check_results) and not failures and not incomplete and not source_changed and all(item.get('status') == 'passed' for item in check_results),
+            'source_changed':source_changed,
+            'note':'This is a check snapshot, not final delivery approval. Unexecuted behavior remains unverified.'}, durable=True)
 
     def _pending_directions(self) -> bool:
         return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
@@ -1703,6 +1831,10 @@ class Supervisor:
         if self.config.review_every is None:
             self.config.review_every = schedule.get("every_worker_rounds", 5)
         self._rounds_since_review = schedule.get("rounds_since_review", 0)
+        self._worker_seconds_since_review = schedule.get('worker_seconds_since_review', 0.0)
+        if (type(self._worker_seconds_since_review) not in (int, float)
+                or not math.isfinite(self._worker_seconds_since_review) or self._worker_seconds_since_review < 0):
+            raise ValueError('invalid saved review elapsed time')
         if (not isinstance(self.config.review_every, int) or self.config.review_every < 0
                 or not isinstance(self._rounds_since_review, int) or self._rounds_since_review < 0):
             raise ValueError("invalid saved review schedule")
@@ -2149,6 +2281,16 @@ class Supervisor:
             prompt += '\n\nMonitor-owned quality policy (immutable):\n' + json.dumps(self.quality.config, ensure_ascii=False)
             prompt += '\nMap each named requirement to actual file evidence and its modules. File edits alone are not verified progress. '
             prompt += 'When blocked, continue independent modules before repeating the same dependency. Never modify existing protected test assertions.\n'
+        if role == 'worker' and self.config.workflow == 'review-first':
+            prompt += ('\nWorker time management: implement one reviewer-approved item or bounded repair at a time. '
+                       'Complete a coherent change with focused verification and return the required JSON conclusion. '
+                       'Do not bundle all remaining items into one long coding turn or repeat equivalent full suites. '
+                       'The review interval schedules an audit after you return; it does not interrupt active work. '
+                       f'Turn hard limit: {self.config.turn_timeout_s:g}s (0 means no turn limit). '
+                       f'Idle-output limit: {self.config.idle_timeout_s:g}s. ')
+            if self.config.max_runtime_s:
+                prompt += f'Remaining total budget now: {max(0, self.config.max_runtime_s - self._elapsed()):.0f}s. '
+            prompt += 'Preserve time to report evidence, remaining gaps and a safe handoff before these hard limits.\n'
         messages = self.directions.messages()
         if role == 'worker' and self.git_history:
             destination = (self.git_history.business_head['ref'] if getattr(self.git_history, 'business_commits', False)
@@ -2200,7 +2342,7 @@ class Supervisor:
             if not read_only and self._worker_isolation:
                 prepared = self._worker_isolation.wrap(prepared, provider.name)
             timeout = self.config.turn_timeout_s
-            if role == 'worker' and self.quality.config.get('review_interval_s'):
+            if role == 'worker' and self.config.workflow != 'review-first' and self.quality.config.get('review_interval_s'):
                 interval = self.quality.config['review_interval_s']
                 timeout = min(timeout, interval) if timeout else interval
             result = run_command(
@@ -2224,6 +2366,9 @@ class Supervisor:
             result.interruption = self._stop_reason or "stop requested"
         text, structured = extract_text(result.stdout)
         found = extract_session_id(result.stdout, result.stderr) or session_id
+        # Persist captured output before session cleanup or the post-turn budget
+        # check. A forced stop must not erase the interrupted round.
+        output_path = self._write_turn_log(provider, prepared, role, index, found, result, text, elapsed)
         if provider.name == "paseo" and found:
             if role == "worker":
                 self.worker_session_id = found
@@ -2234,8 +2379,16 @@ class Supervisor:
                 result = self._wait_for_paseo(provider, found, result, started, role, index)
                 elapsed = time.monotonic() - started
                 text, structured = extract_text(result.stdout)
+                # Waiting puts an already captured transcript in text. A later
+                # empty transcript read must not discard it.
+                if result.text and result.text not in (text or ""):
+                    text, structured = result.text, False
             else:
                 if not _paseo_stop(provider.binary, found, self.config.cwd):
+                    result.exit_code = result.exit_code or 1
+                    result.interruption = result.interruption or self._stop_reason or "paseo stop failed"
+                    result.stderr = (result.stderr + "\n" if result.stderr else "") + f"Cannot stop interrupted Paseo {role} {found}; no new turn will start"
+                    self._write_turn_log(provider, prepared, role, index, found, result, text, elapsed)
                     raise RecoveryError(f"Cannot stop interrupted Paseo {role} {found}; no new turn will start")
         elif provider.name == "paseo" and result.exit_code == 0:
             result.exit_code = 1
@@ -2247,6 +2400,14 @@ class Supervisor:
             if transcript:
                 text = transcript
                 structured = False
+            elif result.text:
+                text, structured = result.text, False
+        if provider.name == "paseo" and found:
+            # Launch output is not the turn. Rewrite the round log with the
+            # waited result and transcript before any budget or stop exception.
+            output_path = self._write_turn_log(provider, prepared, role, index, found, result, text, elapsed)
+        if "Cannot stop interrupted Paseo" in (result.stderr or ""):
+            raise RecoveryError(next(line for line in result.stderr.splitlines() if "Cannot stop interrupted Paseo" in line))
         self.meter.record(result.stdout)
         if self.config.quality_policy and (
                 self.quality.config['max_tokens'] and not self.meter.last_tokens_reported
@@ -2255,22 +2416,8 @@ class Supervisor:
         current_state = json.loads(state_path.read_text())
         current_state['usage'] = self._usage()
         write_json(state_path, current_state, durable=True)
+        # Captured output is already on disk. A budget stop must not discard it.
         self._check_budget()
-        output_path = self.run_dir / f"{index:03d}-{role}.log"
-        output_path.write_text(
-            "\n".join(
-                [
-                    f"$ {redact_command(prepared.argv[:2])}",
-                    f"role={role} provider={provider.name} session={found or '-'}",
-                    f"exit={result.exit_code} timed_out={result.timed_out} interruption={result.interruption or '-'} elapsed_s={elapsed:.2f}",
-                    "----- conclusion -----",
-                    clipped(redact(text)),
-                    redact(diagnostic_summary(result.stdout, result.stderr, failed=result.exit_code != 0)),
-                ]
-            ),
-            encoding="utf-8",
-        )
-        (self.run_dir / f"{index:03d}-{role}-text.md").write_text(clipped(redact(text)), encoding="utf-8")
         return _CompletedTurn(
         text=text,
             session_id=found,
@@ -2283,6 +2430,40 @@ class Supervisor:
             stderr=extract_error(result.stderr, result.stdout) if result.exit_code else result.stderr,
             interruption=result.interruption,
         )
+
+    def _write_turn_log(self, provider, prepared, role, index, found, result, text, elapsed):
+        output_path = self.run_dir / f"{index:03d}-{role}.log"
+        # Successful command listings stay out of the durable round log. Keep
+        # the conclusion, the exit line, and failed-command diagnostics only.
+        diagnosis = diagnostic_summary(result.stdout, result.stderr, failed=result.exit_code != 0)
+        # A stopped turn has no structured conclusion yet. Keep a short plain
+        # prefix of what was already captured, never a successful command dump.
+        partial = ""
+        if result.interruption and not text:
+            plain = []
+            for line in (result.stdout or "").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped[:1] in "{[":
+                    continue
+                plain.append(stripped)
+                if len(plain) == 4:
+                    break
+            partial = "\n".join(plain)[:1000]
+        output_path.write_text(
+            "\n".join(
+                [
+                    f"$ {redact_command(prepared.argv[:2])}",
+                    f"role={role} provider={provider.name} session={found or '-'}",
+                    f"exit={result.exit_code} timed_out={result.timed_out} interruption={result.interruption or '-'} elapsed_s={elapsed:.2f}",
+                    "----- conclusion -----",
+                    clipped(redact(text or partial)),
+                    redact(diagnosis),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.run_dir / f"{index:03d}-{role}-text.md").write_text(clipped(redact(text or partial)), encoding="utf-8")
+        return output_path
 
     def _save_external_session(self, role: str, session_id: str) -> None:
         path = self.run_dir / "state.json"
@@ -2297,8 +2478,13 @@ class Supervisor:
         latest = launch
         live = LiveOutput(self.run_dir, role, index, provider.name, announce=False)
         while not self._stop:
-            if self._should_stop():
-                latest = TurnResult("", exit_code=-1, interruption="runtime budget")
+            try:
+                self._check_budget()
+            except BudgetExceeded:
+                self._stop = True
+                self._stop_reason = self._stop_reason or "runtime budget"
+            if self._should_stop() or self._stop:
+                latest = TurnResult(previous_text, stdout=previous_text, exit_code=-1, interruption=self._stop_reason or "runtime budget")
                 break
             elapsed = time.monotonic() - started
             if self.config.turn_timeout_s and elapsed >= self.config.turn_timeout_s:
@@ -2342,8 +2528,17 @@ class Supervisor:
                 previous_text = transcript
             self._stop_event.wait(2)
         if self._stop or latest.timed_out or latest.interruption or latest.exit_code:
+            captured = previous_text or latest.text or ""
+            if captured:
+                # Keep the text in stdout. The caller re-reads stdout, not text.
+                latest.text = captured
+                latest.stdout = captured
             if not _paseo_stop(provider.binary, session_id, self.config.cwd):
-                raise RecoveryError(f"Cannot stop interrupted Paseo {role} {session_id}; no new turn will start")
+                # Save happens in the caller before this failure leaves _invoke.
+                latest.exit_code = latest.exit_code if latest.exit_code not in (0, None) else 1
+                latest.interruption = latest.interruption or self._stop_reason or "paseo stop failed"
+                latest.stderr = (latest.stderr + "\n" if latest.stderr else "") + f"Cannot stop interrupted Paseo {role} {session_id}; no new turn will start"
+            return latest
         latest.stdout = launch.stdout + "\n" + latest.stdout
         return latest
 

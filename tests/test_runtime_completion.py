@@ -16,6 +16,7 @@ from auto_moniter.selftest import selftest
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.workspace import LockError, file_snapshot
+from tests.test_supervisor import ScriptedProvider
 from console.tasks import TaskStore, TaskError
 
 
@@ -120,12 +121,13 @@ class RuntimeCompletionTests(unittest.TestCase):
         self.assertEqual(before, (run / 'state.json').read_bytes())
 
     def test_history_quota_stops_before_any_agent_call(self):
-        provider = resolve_provider('codex')
+        provider = ScriptedProvider('worker', [])
         with patch('auto_moniter.quota.account', return_value={'history_bytes': 100, 'agent_state_bytes': 0}):
             result = Supervisor(RunConfig('task', self.project, provider, no_review=True,
                                  git_history='off', max_history_bytes=10, run_dir=self.root/'run'), log=lambda _:None).run()
         self.assertEqual(result.status, 'budget_exceeded')
         self.assertEqual(result.rounds, 0)
+        self.assertEqual(provider.calls, [])
         self.assertIn('history_bytes', result.summary)
 
     def test_documentation_baseline_does_not_allow_contract_or_test_changes(self):

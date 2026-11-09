@@ -6,6 +6,54 @@ let directionTimer,stopTarget;
 let gitSequence=0,gitController;
 let resumeTarget,rolesTarget;
 let acceptanceScan=null,acceptanceSequence=0;
+const CUSTOM_MODEL='__custom_model__';
+export function selectedModels(form,data){
+ for(const key of ['model','reviewer_model']){
+  if(data[key]===CUSTOM_MODEL){
+   const value=form.elements[key+'_custom']?.value.trim();
+   if(!value)throw new Error('请填写自定义模型 ID');
+   data[key]=value;
+  }
+  delete data[key+'_custom'];
+ }
+ return data;
+}
+export function modelChoices(form,cfg,{preserve=false,values={}}={}){
+ const catalog=cfg.agent_catalog||{};
+ for(const [role,providerKey,modelKey,backendKey] of [['worker','provider','model','paseo_backend'],['reviewer','reviewer','reviewer_model','reviewer_paseo_backend']]){
+  const field=form.elements[modelKey];if(!field)continue;
+  const provider=form.elements[providerKey].value;
+  const backend=form.elements[backendKey];
+  let rows=catalog.models?.[provider]?.models||[];
+  let note=catalog.models?.[provider]?.note||'未枚举到模型，可选择执行器默认或填写自定义 ID。';
+  if(provider==='paseo'){
+   const entry=(catalog.paseo_backends||[]).find(p=>p.id===backend?.value);
+   rows=entry?.models||[];note=entry?.note||(entry?.available?'Paseo 后端目录；账户权限以实际调用为准。':'未确认此 Paseo 后端可用，请刷新目录或选择已发现的后端。');
+  }
+  const previous=values[modelKey]??field.value;
+  const items=[...rows];
+  if(preserve&&previous&&previous!==CUSTOM_MODEL&&!items.some(m=>m.id===previous))items.push({id:previous,label:previous+'（已保存，未在当前目录发现）'});
+  const label=role==='reviewer'?'自动选择（同执行器及后端沿用 Worker，否则使用默认模型）':'使用执行器默认模型';
+  field.innerHTML=`<option value="">${label}</option>`+items.map(m=>`<option value="${escape(m.id)}">${m.label&&m.label!==m.id?escape(m.label)+' — ':''}${escape(m.id)}</option>`).join('')+`<option value="${CUSTOM_MODEL}">自定义模型 ID…</option>`;
+  field.value=items.some(m=>m.id===previous)||(preserve&&previous===CUSTOM_MODEL)?previous:'';
+  const custom=form.elements[modelKey+'_custom'];if(custom)custom.hidden=field.value!==CUSTOM_MODEL;
+  const hint=form.querySelector(`[data-model-note="${role}"]`);if(hint)hint.textContent=note;
+ }
+}
+function backendChoices(form,cfg){
+ for(const [key,initial] of [['paseo_backend','paseo'],['reviewer_paseo_backend','claude']]){
+  const field=form.elements[key];if(!field)continue;
+  const previous=field.value||initial;const items=[...(cfg.agent_catalog?.paseo_backends||[])];
+  if(!items.some(p=>p.id===previous))items.unshift({id:previous,label:previous,available:false});
+  field.innerHTML=items.map(p=>`<option value="${escape(p.id)}" ${key==='reviewer_paseo_backend'&&p.id!=='claude'?'disabled':''}>${escape(p.label||p.id)} — ${escape(p.id)}${p.available?'':'（未确认可用）'}</option>`).join('');field.value=previous;
+ }
+}
+function bindModels(form,cfg){
+ for(const key of ['provider','reviewer','paseo_backend','reviewer_paseo_backend'])form.elements[key]?.addEventListener('change',()=>modelChoices(form,cfg()));
+ for(const key of ['model','reviewer_model'])form.elements[key]?.addEventListener('change',()=>{
+  const custom=form.elements[key+'_custom'];if(custom)custom.hidden=form.elements[key].value!==CUSTOM_MODEL;
+ });
+}
 function acceptanceContext(){const f=$('#create-form');return {cwd:f.elements.cwd.value.trim(),task_type:f.elements.task_type.value,python:f.elements.acceptance_python.value.trim()};}
 function acceptanceChanged(){acceptanceSequence++;acceptanceScan=null;$('#acceptance-options').textContent='';$('#acceptance-notice').textContent='项目目录、类型或解释器已改变，请重新扫描。';}
 async function scanAcceptance(){
@@ -99,6 +147,8 @@ export async function openRoles(id){
   const options=cfg.providers.filter(p=>p.name!=='paseo').map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
   f.elements.provider.innerHTML=options;f.elements.reviewer.innerHTML=options;
   for(const key of ['provider','reviewer','model','reviewer_model'])f.elements[key].value=task[key]||'';
+  modelChoices(f,cfg,{preserve:true,values:task});
+  if(!f.dataset.modelsBound){bindModels(f,()=>state.config||cfg);f.dataset.modelsBound='1';}
   $('#roles-error').hidden=true;$('#roles-dialog').showModal();
  }catch(error){toast(error.message,true);}
 }
@@ -127,6 +177,9 @@ function configureForm() {
     providers.find((p) => p.available && p.name !== $("#provider-select").value)
       ?.name || $("#provider-select").value;
   $("#create-form").elements.cwd.value = state.config.cwd;
+  backendChoices($('#create-form'),state.config);
+  modelChoices($('#create-form'),state.config);
+  const status=$('#agent-catalog-status');if(status)status.textContent=`模型目录：${state.config.agent_catalog?.at?new Date(state.config.agent_catalog.at).toLocaleString():'未查询'}。${state.config.agent_catalog?.note||''}`;
   $("#workspace-name").textContent =
     state.config.cwd.split("/").filter(Boolean).at(-1) || "/";
   updateProviderHint();
@@ -145,7 +198,8 @@ function updateProviderHint() {
       ? "执行与审查使用同一执行器，将分别运行独立会话。"
       : "执行器负责实现，审查器独立检查完成情况。";
   $("#provider-hint").textContent = message;
-  $("#paseo-field").hidden = worker !== "paseo" && reviewer !== "paseo";
+  $("#paseo-field").hidden = worker !== "paseo";
+  const reviewerField=$('#reviewer-paseo-field');if(reviewerField)reviewerField.hidden=reviewer!=='paseo';
 }
 function renderDirectionHistory(task) {
   if (!task || state.directionTask !== task.id) return;
@@ -223,7 +277,7 @@ function bind(name){
   $('#roles-form').addEventListener('submit',async e=>{
    e.preventDefault();const id=rolesTarget;if(!id)return;
    $('#roles-submit').disabled=true;$('#roles-error').hidden=true;
-   try{await api(`/api/tasks/${id}/roles`,Object.fromEntries(new FormData(e.target)));$('#roles-dialog').close();toast('角色配置已保存，恢复执行后生效');await refresh();}
+   try{const data=selectedModels(e.target,Object.fromEntries(new FormData(e.target)));await api(`/api/tasks/${id}/roles`,data);$('#roles-dialog').close();toast('角色配置已保存，恢复执行后生效');await refresh();}
    catch(error){$('#roles-error').hidden=false;$('#roles-error').textContent=error.message;}
    finally{$('#roles-submit').disabled=false;}
   });return;
@@ -270,9 +324,24 @@ function bind(name){
    finally{$('#preflight-acceptance').disabled=false;}
   });
   $('#provider-select').addEventListener('change',updateProviderHint);$('#reviewer-select').addEventListener('change',updateProviderHint);
+  bindModels($('#create-form'),()=>state.config);
+  $('#refresh-agents')?.addEventListener('click',async()=>{
+   const button=$('#refresh-agents');button.disabled=true;
+   try{
+    const values=Object.fromEntries(new FormData($('#create-form')));
+    await api('/api/agents/refresh',{});state.config=await config(true);
+    const form=$('#create-form');
+    // Refresh options without resetting the user's requirement or acceptance plan.
+    const options=state.config.providers.map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
+    for(const key of ['provider','reviewer']){form.elements[key].innerHTML=options;form.elements[key].value=values[key];}
+    backendChoices(form,state.config);modelChoices(form,state.config,{preserve:true});updateProviderHint();
+    $('#agent-catalog-status').textContent=`目录已更新：${new Date(state.config.agent_catalog.at).toLocaleString()}`;
+   }catch(error){$('#agent-catalog-status').textContent=error.message;}finally{button.disabled=false;}
+  });
   $('#create-form').elements.auto_start.addEventListener('change',e=>$('#create-submit').textContent=e.target.checked?'创建并启动任务':'保存待启动任务');
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
+   try{selectedModels(form,data);}catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;return;}
    for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
    data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);
    try{data.modules=JSON.parse(data.modules||'[]');}catch(error){$('#form-error').hidden=false;$('#form-error').textContent='模块清单需要有效 JSON 数组';return;}

@@ -37,6 +37,13 @@
   gap: 15px;
 }
 
+.agent-role-fields {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+}
+
 .form-hint {
   font-size: 10px;
   color: var(--accent);

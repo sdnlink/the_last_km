@@ -114,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == '/api/tasks':
                 self._json(self.server.store.create(data), 201)
+            elif path == '/api/agents/refresh':
+                self._json(self.server.store.refresh_agents())
             elif path in ('/api/acceptance/scan', '/api/acceptance/preflight'):
                 self._json(self.server.store.acceptance_options(data, prepare=path.endswith('/preflight')))
             else:
@@ -162,6 +164,7 @@ def main(argv=None) -> int:
             print('该数据目录已有控制台运行，请使用原实例或另一个 --data-dir', file=sys.stderr)
             return 1
         store = TaskStore(data_dir, cwd, args.runs_dir)
+        store.refresh_agents()
         try:
             with ConsoleServer(('127.0.0.1', args.port), store) as server:
                 print(f'控制台已启动：http://127.0.0.1:{server.server_address[1]}', flush=True)

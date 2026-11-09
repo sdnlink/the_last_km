@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+DEFAULT_PASEO_BACKEND = "paseo"
 
 class ProviderError(RuntimeError):
     pass
@@ -696,7 +697,7 @@ class GeminiProvider(Provider):
 class PaseoProvider(Provider):
     """Drive any provider Paseo can launch, keeping one agent id for follow-ups."""
 
-    def __init__(self, backend: str = "claude", mode: str = "", role: str = "worker") -> None:
+    def __init__(self, backend: str = DEFAULT_PASEO_BACKEND, mode: str = "", role: str = "worker") -> None:
         super().__init__(
             "paseo",
             _which("paseo") or "paseo",
@@ -851,7 +852,7 @@ def resolve_provider(
     if key == "paseo":
         if mode and paseo_mode and mode != paseo_mode:
             raise ProviderError("Pass only one of --mode and --paseo-mode.")
-        backend = paseo_backend or "claude"
+        backend = paseo_backend or DEFAULT_PASEO_BACKEND
         provider = PaseoProvider(backend=backend, mode=mode or paseo_mode, role=role)
         if role == "reviewer":
             provider.validate_review()

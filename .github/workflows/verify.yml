@@ -11,9 +11,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '${{ matrix.python }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: python -m pip install 'setuptools>=68' wheel
-      - run: python -m compileall -q auto_moniter tests
-      - run: python -m unittest discover -q
+      - run: python -m compileall -q auto_moniter console tests
+      - name: Run offline tests without installed AI CLIs
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+        shell: bash
+        run: |
+          test_tools_dir="$RUNNER_TEMP/auto-moniter-test-bin"
+          mkdir -p "$test_tools_dir"
+          ln -sf "$(command -v python)" "$test_tools_dir/python"
+          ln -sf "$(command -v python)" "$test_tools_dir/python3"
+          ln -sf "$(command -v node)" "$test_tools_dir/node"
+          PATH="$test_tools_dir:/usr/bin:/bin" python -m unittest discover -q
+      - run: node --test tests/test_agent_model_choices.mjs tests/test_console_requests.mjs tests/test_review_only_boundary.mjs
       - run: git diff --check
       - run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .
       - name: Validate installed wheel outside source directory

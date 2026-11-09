@@ -233,6 +233,16 @@ Paseo Codex 没有 `plan` 或只读模式，明确指定这类模式会在启动
 
 已核验的 Grok Build 1.0.70 ACP 接口只暴露模型和推理选项，没有权限模式切换。`--provider paseo --paseo-backend grok` 应省略模式；指定 `bypass`、`plan` 等会提前报错并提示改用 `--provider grok --mode ...`。直接调用 Grok 可以控制权限模式，plan/default 等模式不会附加 `--always-approve`。
 
+`--paseo-backend` 默认值为 `paseo`，Web 新建任务使用同一默认值；显式指定 `claude`、`codex` 等仍按原样传递。这是发送给 Paseo 的 provider ID，需要该后端在你的 Paseo 环境中可用。Paseo reviewer 的只读支持仍限于显式 `claude` 后端，其他后端使用原生 reviewer。直接使用 `--provider grok --reviewer codex` 不受该默认值影响。
+
+Web 新建任务在常规表单中明确提供 Worker/Reviewer 执行器、各自模型，以及使用 Paseo 时的独立后端下拉框；模型不再隐藏在高级配置里。切换执行器或后端会更新对应模型列表，不把上一执行器的模型带到另一执行器。临时角色窗口也使用模型下拉框，并保留已保存但当前未枚举到的模型；该窗口仍只支持既有原生角色切换边界。
+
+控制台启动会枚举已安装 CLI，并用 `paseo provider ls/models --json`、`grok models`、`cursor-agent models` 及本机 Codex/Grok 模型缓存、Claude 模型配置生成目录。没有可枚举接口、账户列表为空、CLI 查询超时或 daemon 不可用时，页面显示目录说明，保留“默认模型”和“自定义模型 ID”，不虚构可用模型。目录只返回模型 ID、名称和来源，不返回配置中的密钥或端点。目录存在不代表账户权限或真实模型调用已验证。
+
+开发与 CI 回归需要 Python 3.11+ 及 Node 22，离线测试无需安装模型 CLI 或配置模型密钥。CI 使用隔离工具 PATH 验证这一点，避免开发机已安装 Codex/Grok 掩盖测试夹具缺失；缺少真实执行器的生产启动预检仍保留。复现与修复说明见 [离线 CI 验证](docs/ci-offline-validation.md)。
+
+“重新枚举执行器与模型”按钮可刷新目录并保留已填写的任务内容和已选模型。每个查询有 4 秒上限及输出大小限制，并发查询避免某个 CLI 卡住整个控制台。Paseo 的 Reviewer 后端单独传入 `--reviewer-paseo-backend`；不同后端不会自动共享 Worker 模型。只读审核仍受原有模式和隔离限制，选择模型不放宽这些限制。
+
 其他 Paseo 自定义后端的模式 ID 原样传递，省略时由后端选择默认值。具体能力取决于该后端及 daemon 版本，可参考 [Paseo CLI 模式说明](https://paseo.sh/docs/cli.md#agent-modes)。`--provider command` 的模式应写在 `--exec` 模板中，不使用 `--mode`。
 
 已知后端的非法模式会在创建运行目录和启动 agent 前退出。运行期间的 CLI 错误会保留 JSON 中的错误码和消息，并在失败日志中打印，例如 `AGENT_CREATE_FAILED: Invalid mode ...`。每轮日志只保存结论、错误和失败检查摘要。
@@ -312,6 +322,8 @@ strict 模式在 worker 启动前实际探测读取，以及写入、删除、�
 ## 审核效率与结论复用
 
 review-first 的调度以完成候选、外部阻塞和配置的进度审核间隔为准，源码有改动不会单独触发模型审核。默认 `--review-every 5`；`0` 关闭周期审核但保留完成和阻塞审核，`1` 显式选择逐轮审核。质量策略的变更规模和超时检查点仍可提前触发。正常一次交付最低为 worker 实现 1 次、reviewer 需求完善 1 次及交付审核 1 次，watcher 独立运行固定检查；不把需求完善误计为重复交付审核。
+
+review-first 的 `review_interval_s` 在 worker 返回后按累计工作时间触发审核，不再将 600 秒审核间隔变成强制终止 worker 的时限。`--turn-timeout` 管单轮硬上限，`--idle-timeout` 管输出空闲，总运行预算独立生效。提示词明确要求一次处理一个 reviewer 条目或局部修复，告知单轮及剩余总预算，为验证与交接预留时间；正常进度审核后保留 worker 会话。累计时间可跨恢复保留，legacy 任务保持原调度语义。
 
 调度次数、局部 AUD 返工、候选复用和验收门禁的自动化场景及复跑命令见 [调度与定向返工验证](docs/dispatch-efficiency-validation.md)。这些测试使用受控子进程验证真实监督循环，不消耗模型调用；真实模型输出质量仍需实际任务验证。
 

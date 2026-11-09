@@ -259,6 +259,8 @@ cat REQUIREMENT.md | auto-moniter run --cwd /path/to/project --provider claude -
 
 其他常用参数：
 
+完整的启动入口、全部 run 参数、默认值、互斥限制、恢复规则及运行示例见 [启动与运行参数完整说明](docs/cli-reference.md)。`start.sh` 只接受 Web 服务参数；worker/reviewer 参数应在页面选择或交给 `auto-moniter run`。CLI 与 Web 默认预算和隔离设置不同，详见该说明中的对照表。
+
 | 参数 | 用法 |
 | --- | --- |
 | `--model MODEL` | 指定工人模型；省略时使用对应 CLI 的默认模型 |
@@ -508,7 +510,7 @@ auto-moniter run \
   --reviewer codex
 ```
 
-恢复时需要重新传入原来的工人、审查员配置，包括使用过的模型、模式、Paseo 后端和自定义命令模板；超时和轮次限制等参数也需按需要重新指定。Paseo 续接已有 agent 时沿用该 agent 已有的模式；需要改变模式时应先在 Paseo 中调整，或使用新的运行目录创建新 agent。
+恢复时需要重新传入原来的工人、审查员配置，包括使用过的模型、模式、Paseo 后端、自定义命令模板和隔离策略。超时、审核频率、输出限制及保留窗口省略时继承检查点；轮次、失败/停滞限制等应按需要明确指定。累计预算不会清零，已有非零预算不会因传 0 而取消。完整继承规则见 [启动与运行参数完整说明](docs/cli-reference.md)。Paseo 续接已有 agent 时沿用该 agent 已有的模式；需要改变模式时应先在 Paseo 中调整，或使用新的运行目录创建新 agent。
 
 `--resume` 支持运行中断（`running`）、信号停止（`stopped`）、预算耗尽（`budget_exceeded`）、恢复核对失败（`recovery_failed`）、认证错误（`action_required`）和旧版因阻塞结束（`blocked`）的运行。它会保留原始文件验收基线、验收要求、会话、失败计数和历史记录，并校验 `--cwd` 与保存的工作区一致。旧版状态没有文件基线时，以恢复时的文件为基线。其他已结束、状态损坏或状态缺失的运行会被拒绝，原有报告保持完整。已有运行目录必须显式加 `--resume`，或改用新目录。
 

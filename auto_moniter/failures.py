@@ -4,7 +4,8 @@ import re
 
 
 def classify(text: str) -> tuple[str, str]:
-    if re.search(r"\b(401|403)\b|unauthorized|invalid.api.key|authentication.failed|not.logged.in", text, re.I):
+    if re.search(r"\b(401|403)\b|unauthorized|invalid.api.key|authentication.failed|not.logged.in|not.signed.in|"
+                 r'run\s+`?grok login|set the XAI_API_KEY|authentication required|credentials? (?:missing|not found)', text, re.I):
         return "authentication", "stop"
     if re.search(r"session.*(not found|expired|invalid)|thread.*not found|context.*(length|limit|exceed)", text, re.I):
         return "session", "fresh_session"

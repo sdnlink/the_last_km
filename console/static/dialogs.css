@@ -163,3 +163,13 @@
 .git-record-dialog details summary { cursor:pointer; font-size:12px; margin:18px 0; }
 .git-record-outcome { background:#fff6e5; border:1px solid #edddb9; border-radius:7px; padding:12px; }
 @media(max-width:640px){.git-record-meta{grid-template-columns:1fr;gap:7px;}.git-record-meta dd{margin-bottom:8px;}}
+
+.acceptance-guide { border:1px solid var(--line,#dde4eb); border-radius:10px; padding:16px; display:grid; gap:12px; min-width:0; }
+.acceptance-guide h3 { margin:0; font-size:15px; }
+.acceptance-guide p,.acceptance-guide small { font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.acceptance-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.acceptance-option { border-top:1px solid var(--line,#dde4eb); padding:12px 0; }
+.acceptance-option .checkbox-label { align-items:flex-start; }
+.acceptance-option pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; }
+.acceptance-guide details { min-width:0; }
+.acceptance-guide summary { cursor:pointer; font-size:12px; }

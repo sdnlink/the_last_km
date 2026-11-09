@@ -43,7 +43,7 @@ from auto_moniter.verdict import VERDICT_SCHEMA, Verdict, input_request, parse_v
 from auto_moniter.runlog import clipped, diagnostic_summary
 from auto_moniter.modules import ModuleLedger
 from auto_moniter.storage import write_json
-from auto_moniter.paths import default_run_dir, private_directory, workspace_lock, state_root
+from auto_moniter.paths import default_run_dir, private_directory, state_root
 from auto_moniter.processes import process_identity, recover_process, reap_background
 from auto_moniter.events import record as record_event
 from auto_moniter.failures import classify
@@ -55,6 +55,12 @@ from auto_moniter.audit import AuditLedger, AuditCapacityError
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
+from auto_moniter.locking import workspace_lease
+from auto_moniter.quality import Quality
+from auto_moniter.metering import UsageMeter
+from auto_moniter.verification import outcome as check_outcome
+from auto_moniter.approved_history import ApprovedHistory
+from auto_moniter import requirements_review
 
 
 LogFn = Callable[[str], None]
@@ -107,8 +113,12 @@ class RunConfig:
     memory_bytes: int = 0
     file_bytes: int = 0
     max_run_bytes: int = 0
+    max_history_bytes: int = 0
+    max_agent_state_bytes: int = 0
     review_every: int | None = None
     git_history: str = 'auto'
+    quality_policy: dict = field(default_factory=dict)
+    workflow: str = 'legacy'
 
 
 @dataclass
@@ -228,6 +238,9 @@ class Supervisor:
         self._direction_ids = {'worker': [], 'reviewer': []}
         self.git_history: GitHistory | None = None
         self._git_before = ''
+        self.quality = Quality({}, {})
+        self.meter = UsageMeter()
+        self.requirements_review = {}
 
     def request_stop(self) -> None:
         self._stop = True
@@ -241,13 +254,14 @@ class Supervisor:
     def stop_interrupted(self, reason: str) -> RunReport:
         """Stop owned work after a dead monitor, without launching any new turn."""
         try:
-            with file_lock(workspace_lock(self.config.cwd)), file_lock(self.config.cwd / ".auto-moniter/workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
+            with workspace_lease(self.config.cwd), file_lock(self.config.cwd / ".auto-moniter/workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
                 loaded = self._load_resume()
                 if self._resume_refused or loaded is None:
                     return RunReport("invalid", 0, "Run is not resumable; no cleanup attempted.", "invalid")
                 self._records = loaded[0]
                 if (self.run_dir / 'git-history.json').exists():
-                    self.git_history = GitHistory.open(self.config.cwd, self.run_dir, self.config.git_history)
+                    history_type = ApprovedHistory if self.config.workflow=='review-first' else GitHistory
+                    self.git_history = history_type.open(self.config.cwd, self.run_dir, self.config.git_history)
                 self._recover_interrupted_run()
                 return self._finish("stopped", reason, self._records, None)
         except (OSError, ValueError, TypeError, AttributeError, RecoveryError, LockError, GitHistoryError) as exc:
@@ -276,7 +290,7 @@ class Supervisor:
         private_directory(state_root())
         previous_signals = self._install_signals()
         try:
-            with file_lock(workspace_lock(self.config.cwd)), file_lock(self.config.cwd / ".auto-moniter" / "workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
+            with workspace_lease(self.config.cwd), file_lock(self.config.cwd / ".auto-moniter" / "workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
                 try:
                     return self._run_locked()
                 except Exception as exc:
@@ -342,7 +356,12 @@ class Supervisor:
             self.config.requirement = saved
         if not hasattr(self, "_baseline_files"):
             self._baseline_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-        self.git_history = GitHistory.open(self.config.cwd, self.run_dir, self.config.git_history)
+        self.quality = Quality(self.config.quality_policy, self._baseline_files, getattr(self, '_saved_quality_state', None))
+        self.quality.bind_checks(self.config.cwd, [*self.config.checks, *self.modules.checks_for(set(self.modules.items))])
+        self._meter_missing = bool(self.quality.config.get('max_tokens') and self.meter.state['unknown_token_turns']
+                                   or self.quality.config.get('max_cost_usd') and self.meter.state['unknown_cost_turns'])
+        history_type = ApprovedHistory if self.config.workflow=='review-first' else GitHistory
+        self.git_history = history_type.open(self.config.cwd, self.run_dir, self.config.git_history)
         if self.git_history:
             if (self.git_history.last_worker and self.git_history.last_worker['round'] >= self._next_round):
                 raise RecoveryError('Git checkpoint is ahead of run state; reconcile the saved round before resuming')
@@ -376,12 +395,20 @@ class Supervisor:
             self._recover_interrupted_run()
         (self.run_dir / "report.json").unlink(missing_ok=True)
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
+        if self.config.workflow=='review-first' and not self._stop and self.requirements_review.get('status')!='ready':
+            if not self._elaborate_requirement(records):
+                return self._finish('stopped' if self._stop_requested else 'action_required',
+                                    self.requirements_review.get('summary','Requirement review did not complete; worker was not started.'), records, None)
 
         while not self._stop:
             self._process_control()
             if self._stop:
                 break
             self._check_budget()
+            if self.config.quality_policy:
+                protected_errors = self.quality.baseline_errors(self.config.cwd)
+                if protected_errors:
+                    return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
             round_index = self._next_round
             if self.config.max_rounds and round_index > self.config.max_rounds:
                 return self._finish(
@@ -397,6 +424,10 @@ class Supervisor:
                 self._git_before = self.git_history.begin_round(round_index)
 
             worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
+            before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if self.config.quality_policy else {}
+            # Compare to the last verified workspace, including changes made
+            # between turns; comparing only to turn-start would miss those edits.
+            impact_before = getattr(self, '_impact_snapshot', None)
             self.log(f"round {round_index}: worker running")
             reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session
             turn = self._invoke(
@@ -416,10 +447,18 @@ class Supervisor:
             verdict = self._verdict_from_turn(turn, role="worker")
             self._rounds_since_review += 1
             tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+            after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if self.config.quality_policy else {}
+            protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
+            changed_count = sum(before_files.get(k) != after_files.get(k) for k in before_files.keys() | after_files.keys())
+            checkpoint_due = bool(self.config.quality_policy and turn.timed_out
+                                  and self.quality.config['review_interval_s'] and changed_count)
             reopened = self.audit.invalidate(tree)
             if reopened:
                 self._event("audit_issues_reopened", issues=reopened, tree=tree)
-            invalidated = self.modules.invalidate(tree)
+            changed_files = [str(Path(k).relative_to(self.config.cwd)) for k in impact_before.keys() | after_files.keys()
+                             if impact_before.get(k) != after_files.get(k)] if impact_before is not None and self.config.quality_policy else None
+            invalidated = self.modules.invalidate(tree, changed_files)
+            self._impact_snapshot = after_files if self.config.quality_policy else None
             if invalidated:
                 self._event("modules_invalidated", modules=invalidated, tree=tree)
             failure = _failure_reason(turn, verdict)
@@ -437,8 +476,13 @@ class Supervisor:
                 interruption=turn.interruption,
             )
             records.append(record)
-            if self.git_history:
+            if protected_errors:
+                return self._finish('action_required', 'Protected acceptance baseline changed; restore original assertions before resuming. Files: '
+                                    + ', '.join(protected_errors), records, verdict)
+            if self.git_history and self.config.workflow!='review-first':
                 self._checkpoint(record, turn.text, self._git_before)
+            elif self.git_history:
+                self.git_history.prepare_review(round_index,self._git_before)
             if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
                 self._merge_modules(verdict)
             self._write_state(records, "running", stall, previous_gap_key, tree)
@@ -450,7 +494,7 @@ class Supervisor:
             if self._stop:
                 break
 
-            if failure:
+            if failure and not checkpoint_due:
                 category, recovery = classify(failure)
                 self._event("agent_failure", role="worker", category=category, recovery=recovery)
                 if recovery == "stop":
@@ -469,6 +513,8 @@ class Supervisor:
                 last_worker = verdict
                 # A failed implementation attempt does not resolve audit gaps.
                 # Carry the last review into the replacement worker session.
+                if self.quality.config.get('verified_progress'):
+                    stall, previous_gap_key, previous_tree = self._track_stall(stall, previous_gap_key, previous_tree, verdict, tree)
                 self._write_state(records, "running", stall, previous_gap_key, tree)
                 self.log(f"round {round_index}: worker failure {worker_failures}: {failure}")
                 if _limit_reached(self.config.failure_limit, worker_failures):
@@ -530,7 +576,12 @@ class Supervisor:
                     self._retry_pause(stall + 1, "unfinished worker turn")
                 continue
 
-            periodic_review = bool(self.config.review_every and self._rounds_since_review >= self.config.review_every)
+            periodic_review = self.config.workflow=='review-first' or bool(self.config.review_every and self._rounds_since_review >= self.config.review_every)
+            if self.config.quality_policy:
+                threshold = self.quality.config['review_changed_files']
+                periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
+                if checkpoint_due:
+                    self.worker_session_id = ''
             if not _accepted(verdict) and not verdict.blockers and not periodic_review:
                 # An unfinished worker should keep implementing. A completion
                 # candidate (or an external blocker) is the review checkpoint.
@@ -616,7 +667,7 @@ class Supervisor:
                     records.append(capacity_record)
                     capacity_record.watcher_result = {'status': 'rejected', 'closed': [], 'reasons': [str(exc)],
                                                        'issues': {item['id']: item['status'] for item in self.audit.items}}
-                    if self.git_history:
+                    if self.git_history and self.config.workflow!='review-first':
                         self._checkpoint(capacity_record, review_turn.text, self.git_history.last_worker['commit'])
                     raise BudgetExceeded(str(exc)) from exc
                 except ValueError as exc:
@@ -644,7 +695,7 @@ class Supervisor:
                 watcher_result=watcher_result,
             )
             records.append(review_record)
-            if self.git_history:
+            if self.git_history and self.config.workflow!='review-first':
                 self._checkpoint(review_record, review_turn.text, self.git_history.last_worker['commit'])
             self._write_state(records, "running", stall, previous_gap_key, tree)
             self.log(
@@ -685,6 +736,13 @@ class Supervisor:
                 self._retry_pause(reviewer_failures + (3 if recovery == "backoff" else 0), category + " reviewer failure")
                 continue
             reviewer_failures = 0
+            if self._progress_reset:
+                self.quality.state['blocker_count'] = 0
+            if self.config.quality_policy and self.quality.review_blockers(review.blockers):
+                write_json(self.run_dir / 'dependency-block.json', {'blockers': review.blockers,
+                           'review_count': self.quality.state['blocker_count'], 'round': round_index,
+                           'action': 'Resolve the named external dependency, then resume; no automatic model retries.'}, durable=True)
+                return self._finish('action_required', 'Repeated independently confirmed external dependency; work saved for dependency resolution.', records, review)
 
             if _accepted(review) and not _accepted(verdict):
                 review.status = "continue"
@@ -708,7 +766,7 @@ class Supervisor:
                                     + ". The reviewer must explicitly close each issue with evidence.")
             if _accepted(review) and not problems:
                 if verdict.scope == "requirement" and review.scope == "requirement":
-                    if self._delivery_checks(round_index, review, expected_tree=review_tree):
+                    if self._delivery_checks(round_index, review, expected_tree=review_tree) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
                         self.modules.accept(verdict, review, round_index, review_tree)
                         return self._finish(
                             "done",
@@ -718,7 +776,7 @@ class Supervisor:
                         )
                 else:
                     joint_ids = set(verdict.module_ids) & set(review.module_ids)
-                    if self._delivery_checks(round_index, review, final=False, expected_tree=review_tree, module_ids=joint_ids):
+                    if self._delivery_checks(round_index, review, final=False, expected_tree=review_tree, module_ids=joint_ids) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
                         self.modules.accept(verdict, review, round_index, review_tree)
                         review.scope = "module"
                         review.module_ids = sorted(joint_ids)
@@ -754,7 +812,65 @@ class Supervisor:
                 )
             self._retry_pause(stall + 1, "unfinished review")
 
-        return self._finish("stopped", f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
+        return self._finish('action_required' if self._stop_reason.startswith(('Verified progress','Acceptance environment')) else 'stopped',
+                            f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
+
+    def _elaborate_requirement(self,records):
+        self.requirements_review={'status':'reviewing','summary':'Reviewer is elaborating the original requirement before implementation.'}
+        self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
+        before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
+        original_schema=self.schema_path
+        schema=self.run_dir/'requirements.schema.json'
+        schema.write_text(json.dumps(requirements_review.SCHEMA))
+        self.schema_path=schema
+        self.log('requirements: reviewer elaborating original request; worker has not started')
+        try:
+            turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export()),'',
+                              role='reviewer',index=0,model=self.config.reviewer_model or self.config.model,
+                              extra_args=self.config.reviewer_extra_args,read_only=True)
+            if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
+                raise ValueError('Requirement reviewer changed the read-only workspace')
+            if turn.session_id:self._active_reviewer_id=turn.session_id
+            if turn.exit_code or turn.timed_out or turn.interruption:
+                raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
+            brief=requirements_review.parse(turn.text)
+            brief['session_id']=turn.session_id
+            brief['original_sha256']=hashlib.sha256(self.config.requirement.strip().encode()).hexdigest()
+            self.requirements_review=brief
+            self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
+            write_json(self.run_dir/'reviewed-requirement.json',safe(brief),durable=True)
+            self._event('requirements_reviewed',status=brief['status'])
+            return brief['status']=='ready'
+        except ValueError as exc:
+            self.requirements_review={'status':'failed','summary':redact(str(exc))}
+            return False
+        finally:
+            self.schema_path=original_schema
+            if self.config.reviewer.name=='paseo' and self._active_reviewer_id:
+                stopped=_paseo_stop(self.config.reviewer.binary,self._active_reviewer_id,self.config.cwd)
+                archived=_paseo_archive(self.config.reviewer.binary,self._active_reviewer_id,self.config.cwd)
+                if not stopped or not archived:raise RecoveryError('Requirement reviewer cleanup failed')
+            self._active_reviewer_id=''
+            self.reviewer_session_id=''
+            self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
+
+    def _commit_approved(self,worker,reviewer,worker_text,review_text,tree):
+        if self.config.workflow!='review-first' or not self.git_history:return True
+        with self.directions.lock():
+            return self._commit_approved_locked(worker,reviewer,worker_text,review_text,tree)
+
+    def _commit_approved_locked(self,worker,reviewer,worker_text,review_text,tree):
+        if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=tree:
+            raise RuntimeError('Workspace changed after review; refusing local commit')
+        if self._pending_directions():
+            reviewer.verdict.status='continue'
+            reviewer.verdict.gaps.append('New instructions arrived before commit; implement and review them first.')
+            return False
+        self._checkpoint(worker,worker_text,self._git_before)
+        self._checkpoint(reviewer,review_text,worker.git_checkpoint['commit'])
+        self._event('approved_local_commit',commit=reviewer.git_checkpoint['commit'],round=worker.index)
+        self._write_state(self._records,'running',0,'',tree)
+        return True
 
     def _retry_pause(self, count: int, reason: str) -> None:
         if self._stop or (self.config.max_rounds and self._next_round > self.config.max_rounds):
@@ -777,6 +893,7 @@ class Supervisor:
 
     def _should_stop(self) -> bool:
         self._process_control(active=True)
+        self._check_storage_quota()
         if self.config.max_run_bytes and time.monotonic() - self._last_space_check >= 1:
             self._last_space_check = time.monotonic()
             size = 0
@@ -788,7 +905,22 @@ class Supervisor:
                     except FileNotFoundError:
                         pass
             self._space_exceeded = size >= self.config.max_run_bytes
-        return self._stop or self._space_exceeded or bool(self.config.max_runtime_s and self._elapsed() >= self.config.max_runtime_s)
+        return self._stop or self._space_exceeded or bool(getattr(self, '_quota_exceeded', '')) or bool(self.config.max_runtime_s and self._elapsed() >= self.config.max_runtime_s)
+
+    def _check_storage_quota(self) -> None:
+        if not (self.config.max_history_bytes or self.config.max_agent_state_bytes):
+            return
+        if time.monotonic() - getattr(self, '_last_quota_check', 0) < 10:
+            return
+        from auto_moniter.quota import account
+        self._last_quota_check = time.monotonic()
+        self._storage = account(self.config.cwd, history=bool(self.config.max_history_bytes),
+                                agents=bool(self.config.max_agent_state_bytes))
+        self._quota_exceeded = next((name for name in ('history_bytes', 'agent_state_bytes')
+                                    if getattr(self.config, 'max_' + name)
+                                    and self._storage[name] >= getattr(self.config, 'max_' + name)), '')
+        if self._quota_exceeded:
+            self._space_exceeded = True
 
     def _event(self, kind: str, **details) -> None:
         record_event(self.run_dir, kind, **details)
@@ -821,6 +953,13 @@ class Supervisor:
             self._event("pause_ended", stopped=self._stop)
 
     def _check_budget(self, *, new_call: bool = False) -> None:
+        if getattr(self, '_meter_missing', False):
+            raise BudgetExceeded('Configured token/cost budget cannot be verified: provider did not report usage')
+        if self.meter.exhausted(self.quality.config):
+            raise BudgetExceeded('Provider-reported token/cost budget exhausted')
+        self._check_storage_quota()
+        if getattr(self, '_quota_exceeded', ''):
+            raise BudgetExceeded('Storage quota exhausted: ' + self._quota_exceeded)
         if self._space_exceeded:
             raise BudgetExceeded("Run directory storage budget exhausted")
         if self.config.max_runtime_s and self._elapsed() >= self.config.max_runtime_s:
@@ -832,7 +971,11 @@ class Supervisor:
         return {"elapsed_s": round(self._elapsed(), 3), "agent_calls": self._agent_calls,
                 "max_runtime_s": self.config.max_runtime_s, "max_agent_calls": self.config.max_agent_calls,
                 "max_output_bytes": self.config.max_output_bytes, "recorded_at": datetime.now(timezone.utc).isoformat(),
-                "memory_bytes": self.config.memory_bytes, "file_bytes": self.config.file_bytes, "max_run_bytes": self.config.max_run_bytes}
+                "memory_bytes": self.config.memory_bytes, "file_bytes": self.config.file_bytes, "max_run_bytes": self.config.max_run_bytes,
+                "max_history_bytes": self.config.max_history_bytes, "max_agent_state_bytes": self.config.max_agent_state_bytes,
+                "storage": getattr(self, '_storage', {}),
+                "provider_reported": self.meter.state,
+                "metering_scope": 'Terminal provider reports only; cumulative reports conservatively summed; unreported internal/subagent usage is unknown.'}
 
     def _review_schedule(self) -> dict:
         return {"enabled": not self.config.no_review, "every_worker_rounds": self.config.review_every,
@@ -850,7 +993,7 @@ class Supervisor:
         if closed:
             self._event("audit_issues_resolved", issues=closed, tree=tree)
             if open_before.intersection(closed) - {item["id"] for item in self.audit.pending()}:
-                self._progress_reset = True
+                self._progress_reset |= any([self.quality.milestone('audit:' + ident) for ident in closed])
         return {'status': 'applied', 'reported': reported, 'closed': closed, 'reasons': [],
                 'issues': {item['id']: item['status'] for item in self.audit.items}}
 
@@ -869,6 +1012,8 @@ class Supervisor:
     def _merge_modules(self, verdict: Verdict) -> None:
         try:
             for item in verdict.modules:
+                if isinstance(item, dict) and item.get('files') and (item.get('id') not in self.modules.items or item['files'] != self.modules.items[item['id']].get('files')):
+                    raise ValueError('Module impact files must be supplied by the user, not by an agent')
                 if isinstance(item, dict) and item.get("checks") and (item.get("id") not in self.modules.items or item["checks"] != self.modules.items[item["id"]].get("checks")):
                     raise ValueError("Executable module checks must be supplied by the user in --modules, not by an agent")
             self.modules.merge(verdict.modules)
@@ -935,8 +1080,12 @@ class Supervisor:
     ) -> tuple[int, str, str]:
         key = "\n".join(sorted(verdict.gaps))
         changed = bool(previous_tree) and tree != previous_tree
-        progress = changed or self._progress_reset
+        progress = self._progress_reset or (changed and not self.quality.config.get('verified_progress'))
         self._no_progress = self._no_progress + 1 if previous_tree and not progress else 0
+        limit = self.quality.config.get('no_progress_limit', 0)
+        if limit and self._no_progress >= limit:
+            self._stop = True
+            self._stop_reason = 'Verified progress limit reached; source edits alone do not establish progress.'
         self._progress_reset = False
         count = stall + 1 if key and key == previous_key and not progress else 0
         recovery_stall = max(count, self._no_progress)
@@ -957,7 +1106,7 @@ class Supervisor:
                     "Preserve completed work. Do not repeat the previous plan without new evidence."
                 )
                 self.log(f"stagnation recovery: fresh agent sessions after {recovery_stall} turns without progress")
-        if changed:
+        if changed and (progress or not self.quality.config.get('verified_progress')):
             self._recovery_note = ""
         return count, key, tree
 
@@ -969,6 +1118,20 @@ class Supervisor:
             verdict.gaps.append('New human instructions arrived after the worker started. Implement and review them before accepting delivery.')
             return False
         before = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        baseline_errors = self.quality.baseline_errors(self.config.cwd) if self.config.quality_policy else []
+        if baseline_errors:
+            verdict.status = 'continue'
+            verdict.gaps.append('Protected acceptance baseline changed: ' + ', '.join(baseline_errors))
+            return False
+        if final and self.quality.config.get('requirements'):
+            worker = next((r.verdict for r in reversed(self._records) if r.role == 'worker'), verdict)
+            rows, coverage_errors = self.quality.coverage(self.config.cwd, self.modules, worker, verdict)
+            write_json(self.run_dir / 'requirement-coverage.json', {'tree': before, 'requirements': rows,
+                       'errors': coverage_errors, 'complete': not coverage_errors}, durable=True)
+            if coverage_errors:
+                verdict.status = 'continue'
+                verdict.gaps.extend(coverage_errors)
+                return False
         if expected_tree and before != expected_tree:
             self.modules.invalidate(before)
             self.audit.invalidate(before)
@@ -982,6 +1145,7 @@ class Supervisor:
             ids.update(key for key, item in self.modules.items.items() if item["status"] == "accepted")
         commands.extend(self.modules.checks_for(ids))
         failures = []
+        check_results = []
         for number, command in enumerate(dict.fromkeys(commands), 1):
             if self._stop:
                 verdict.status = "continue"
@@ -1016,11 +1180,24 @@ class Supervisor:
                 verdict.evidence.append(clipped((result.stderr or result.stdout)[-2000:], 2000))
             self.log(f"acceptance check {number}: {'failed' if result.exit_code or result.timed_out or result.interruption else 'passed'}")
             self._event("check_finished", command=command, exit=result.exit_code, tree=before)
+            status = check_outcome(result)
+            check_results.append({'command':redact(command),'status':status,'exit_code':result.exit_code,'log':path.name})
+            write_json(self.run_dir/'acceptance-results.json', {'round':index,'tree':before,'scope':'requirement' if final else 'module',
+                       'checks':check_results,'complete':False,'note':'Only executed checks are verified; uncovered behavior remains unverified.'})
+            if status == 'environment_unavailable':
+                self._stop = True
+                self._stop_reason = 'Acceptance environment unavailable; prepare dependencies before resuming. See ' + path.name
+                failures.append(self._stop_reason)
+                break
+            self._progress_reset |= self.quality.check_result(command, not (result.exit_code or result.timed_out or result.interruption))
         after = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         if after != before:
             self.modules.invalidate(after)
             self.audit.invalidate(after)
             failures.append("Acceptance commands changed workspace source content. Previous review and evidence are stale; review the new content before accepting.")
+        write_json(self.run_dir/'acceptance-results.json', {'round':index,'tree':before,'scope':'requirement' if final else 'module',
+                   'checks':check_results,'complete':bool(check_results) and not failures and not self._stop,'source_changed':after!=before,
+                   'note':'This is a check snapshot, not final delivery approval. Unexecuted behavior remains unverified.'})
         if failures:
             verdict.status = "continue"
             verdict.gaps.extend(failures)
@@ -1128,6 +1305,8 @@ class Supervisor:
             write_json(self.run_dir / "alert.json", safe({"status": status, "summary": summary,
                        "at": datetime.now(timezone.utc).isoformat(), "run_dir": str(self.run_dir)}), durable=True)
         write_json(path, safe({**report.to_dict(), "modules": self.modules.export(), "usage": self._usage(),
+                                         "quality_policy": self.config.quality_policy, "quality_state": self.quality.state,
+                                         "workflow":self.config.workflow,"requirements_review":self.requirements_review,
                                          "no_progress_turns": self._no_progress, "recovery_count": self._recovery_count, "accepted_tree": self._delivery_tree,
                                          "review_schedule": self._review_schedule(),
                                          "audit_issues": self.audit.export(),
@@ -1170,8 +1349,10 @@ class Supervisor:
         self._active_reviewer_id = ""
         self._drop_worker_session = False
         self._recovery_note = ""
-        self._no_progress = 0
-        self._progress_reset = True
+        new_progress = any([self.quality.milestone('module:' + key) for key in verdict.module_ids])
+        if new_progress or not self.quality.config.get('verified_progress'):
+            self._no_progress = 0
+        self._progress_reset |= new_progress
         _continue_remaining_modules(verdict)
 
     def _write_state(
@@ -1200,6 +1381,11 @@ class Supervisor:
         state = {
             "cwd": str(self.config.cwd),
             "state_version": 1,
+            "workflow": self.config.workflow,
+            "requirements_review": self.requirements_review,
+            "quality_policy": self.config.quality_policy,
+            "quality_state": self.quality.state,
+            "acceptance_baseline_paths": list(self.quality.protected(self.config.cwd)),
             "directions_version": 1,
             "git_history": self.git_history.export() if self.git_history else {'enabled': False},
             "baseline_file": baseline_path.name,
@@ -1268,6 +1454,26 @@ class Supervisor:
         state = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             raise ValueError("state.json must contain an object")
+        saved_policy = state.get('quality_policy', {})
+        saved_workflow=state.get('workflow','legacy')
+        if self.config.workflow not in ('auto',saved_workflow):
+            raise ValueError('Workflow cannot change on resume')
+        self.config.workflow=saved_workflow
+        self.requirements_review=state.get('requirements_review',{})
+        if not isinstance(self.requirements_review,dict):
+            raise ValueError('Invalid saved requirement elaboration')
+        if self.requirements_review.get('status')=='ready':
+            requirements_review.parse(json.dumps({k:v for k,v in self.requirements_review.items() if k in requirements_review.SCHEMA['required']}))
+            original=(self.run_dir/'requirement.md').read_text().strip()
+            if self.requirements_review.get('original_sha256')!=hashlib.sha256(original.encode()).hexdigest():
+                raise ValueError('Requirement elaboration belongs to another original request')
+        if not isinstance(saved_policy, dict):
+            raise ValueError('Invalid saved quality policy')
+        Quality(saved_policy, {}, state.get('quality_state'))
+        if self.config.quality_policy and self.config.quality_policy != saved_policy:
+            raise ValueError('Quality policy cannot change on resume; create a follow-up task')
+        self.config.quality_policy = saved_policy
+        self._saved_quality_state = state.get('quality_state')
         if state.get("state_version", 1) != 1:
             raise ValueError("Unsupported state version; use a compatible auto-moniter release")
         if state.get("cwd") and Path(state["cwd"]).resolve() != self.config.cwd:
@@ -1334,6 +1540,7 @@ class Supervisor:
         self.config.checks = saved_checks
         self._recovery_note = str(state.get("recovery_note") or "")
         usage = state.get("usage") or {}
+        self.meter = UsageMeter(usage.get('provider_reported'))
         self._elapsed_before = float(usage.get("elapsed_s") or 0)
         try:
             heartbeat = json.loads(self._heartbeat.read_text(encoding="utf-8"))
@@ -1343,7 +1550,7 @@ class Supervisor:
         except (OSError, ValueError, TypeError, KeyError):
             pass
         self._agent_calls = int(usage.get("agent_calls") or 0)
-        for name in ("memory_bytes", "file_bytes", "max_run_bytes"):
+        for name in ("memory_bytes", "file_bytes", "max_run_bytes", "max_history_bytes", "max_agent_state_bytes"):
             if not getattr(self.config, name):
                 setattr(self.config, name, int(usage.get(name) or 0))
             if getattr(self.config, name) < 0:
@@ -1359,7 +1566,7 @@ class Supervisor:
             saved_modules = ModuleLedger.restore(state["modules"])
             for item in self.config.modules:
                 saved = saved_modules.items.get(item["id"])
-                if saved is None or any(saved.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "checks", "depends_on") if key in item):
+                if saved is None or any(saved.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "checks", "depends_on", "files") if key in item):
                     raise ValueError("module definitions cannot change on resume")
             self.modules = saved_modules
         self._next_round = int(state.get("next_round") or 1)
@@ -1611,10 +1818,16 @@ class Supervisor:
         state["usage"] = self._usage()
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
+        if self.requirements_review.get("status")=="ready":
+            prompt += "\n\nWatcher-approved requirement elaboration (supplements, never replaces, the original request):\n"+json.dumps(self.requirements_review,ensure_ascii=False)
+        if self.config.quality_policy:
+            prompt += '\n\nMonitor-owned quality policy (immutable):\n' + json.dumps(self.quality.config, ensure_ascii=False)
+            prompt += '\nMap each named requirement to actual file evidence and its modules. File edits alone are not verified progress. '
+            prompt += 'When blocked, continue independent modules before repeating the same dependency. Never modify existing protected test assertions.\n'
         messages = self.directions.messages()
         if role == 'worker' and self.git_history:
-            prompt += ('\n\nThe monitor records your conclusion and actual source changes in the target repository '
-                       f'on {self.git_history.ref} after this turn. Keep edits in {self.config.cwd}. '
+            prompt += (('\n\nDo not commit, push, stage or change Git refs. Only the watcher may create local commits AFTER independent approval and checks.\n' if self.config.workflow=='review-first' else '\n\nThe monitor records this round in Git.\n')+
+                       f'Accepted changes are recorded on {self.git_history.ref}. Keep edits in {self.config.cwd}. '
                        'Do not alter .auto-moniter/history, the audit branch, or previous audit records. '
                        'Report changed files, actual validation results, remaining gaps and failures precisely.\n')
         self._direction_ids[role] = [item['id'] for item in messages]
@@ -1633,7 +1846,7 @@ class Supervisor:
         live_output = LiveOutput(self.run_dir, role, index, provider.name)
         def on_started(child):
             self._remember_child(child)
-            self.directions.receipt(self._direction_ids[role], role, index)
+            self.directions.receipt(self._direction_ids[role], role, max(1,index))
             if messages:
                 live_output.emit({'kind': 'direction', 'text': f'已向本轮 AI 发送 {len(messages)} 条用户补充要求'})
         try:
@@ -1647,12 +1860,24 @@ class Supervisor:
                     prompt_path, self.config.cwd, self.schema_path,
                     model=model, extra_args=extra_args, read_only=read_only,
                 )
+            if read_only and self.quality.config.get('review_tools') == 'files_only':
+                prepared.argv += ['--tools', 'Read,Glob,Grep', '--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', '{}']
+                # Keep only the model's own authentication; exclude common
+                # deployment/database credentials inherited by the service.
+                secret_prefixes = ('AWS_', 'AZURE_', 'GOOGLE_APPLICATION_', 'DATABASE_', 'PGPASSWORD',
+                                   'MYSQL_', 'REDIS_', 'KUBECONFIG', 'SSH_AUTH_SOCK', 'DOCKER_')
+                scrub = [key for key in os.environ if key.startswith(secret_prefixes)]
+                prepared.argv = ['env', *[part for key in scrub for part in ('-u', key)], *prepared.argv]
             if read_only and self._isolation:
                 prepared = self._isolation.wrap(prepared, provider.name)
             if not read_only and self._worker_isolation:
                 prepared = self._worker_isolation.wrap(prepared, provider.name)
+            timeout = self.config.turn_timeout_s
+            if role == 'worker' and self.quality.config.get('review_interval_s'):
+                interval = self.quality.config['review_interval_s']
+                timeout = min(timeout, interval) if timeout else interval
             result = run_command(
-                prepared, self.config.cwd, timeout_s=self.config.turn_timeout_s,
+                prepared, self.config.cwd, timeout_s=timeout,
                 idle_timeout_s=self.config.idle_timeout_s,
                 on_child=on_started, heartbeat=self._heartbeat,
                 heartbeat_note=f"round {index}: {role} running",
@@ -1695,6 +1920,14 @@ class Supervisor:
             if transcript:
                 text = transcript
                 structured = False
+        self.meter.record(result.stdout)
+        if self.config.quality_policy and (
+                self.quality.config['max_tokens'] and not self.meter.last_tokens_reported
+                or self.quality.config['max_cost_usd'] and not self.meter.last_cost_reported):
+            self._meter_missing = True
+        current_state = json.loads(state_path.read_text())
+        current_state['usage'] = self._usage()
+        write_json(state_path, current_state, durable=True)
         self._check_budget()
         output_path = self.run_dir / f"{index:03d}-{role}.log"
         output_path.write_text(

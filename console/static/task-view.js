@@ -14,6 +14,7 @@ function watcherHTML(c) {
 }
 function gitHistoryHTML(task) {
   const history = task.git_history || {};
+  if(history.approval_only&&!history.head)return '<div class="git-history-empty">尚无审核通过的本地提交。当前改动仅有待审树快照，reviewer 与 watcher 验收通过后才创建审计分支提交；失败反馈保存在任务运行记录。</div>';
   if (!history.enabled)
     return '<div class="git-history-empty">尚无项目 Git 记录；Git 项目使用新版监督器启动或恢复后，将逐轮保存改动和结论。</div>';
   const worker = history.last_worker || {};
@@ -30,6 +31,11 @@ function roleDetailsHTML(t) {
     const facts = name === "watcher"
       ? [["心跳", r.heartbeat_age_s == null ? "—" : `${duration(r.heartbeat_age_s)} 前`], ["监督进程", r.pid || "—"], ["守护进程", r.guardian_pid || "—"], ["模型调用", `${r.usage?.agent_calls || 0} / ${r.usage?.max_agent_calls || "不限"}`], ["恢复次数", r.recovery_count || 0]]
       : [["执行器", r.provider || "—"], ["工作轮次", r.round == null ? "—" : `第 ${r.round} 轮`], ["执行进程", r.pid || "—"], ["会话", r.session_id || "尚无会话"]];
+    if(name === 'watcher'){
+      const meter=r.usage?.provider_reported;
+      if(meter)facts.push(['后端已报告 token',meter.tokens],['后端报告费用（保守累计）',`$${meter.cost_usd}`],['未报告用量的调用轮次',meter.unreported_turns]);
+      if(t.quality_policy?.verified_progress)facts.push(['无验证进展轮次',t.quality_state?.no_progress_turns??t.health?.no_progress_turns??'见监督状态']);
+    }
     if(name === 'reviewer'){
       facts[1][0] = r.status === 'running' ? '当前审核轮次' : '最近审核轮次';
       facts.push(['周期审核', r.every_worker_rounds == null ? '未记录' : r.every_worker_rounds === 0 ? '仅完成候选及阻塞' : `每 ${r.every_worker_rounds} 轮`]);
@@ -41,7 +47,7 @@ function roleDetailsHTML(t) {
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
   if (showRoles && $("#role-details")) stableHTML($("#role-details"), roleDetailsHTML(t));
   const phase = t.health.phase;
-  const stages = [["worker", "worker 实现", "working"], ["reviewer", "reviewer 审查", "reviewing"], ["watcher", "watcher 验收", "validating"], ["watcher", "归档交付", "closing_agents"]];
+  const stages = [...(t.workflow==='review-first'?[["reviewer","reviewer 完善需求","refining_requirements"]]:[]),["worker", "worker 实现", "working"], ["reviewer", "reviewer 审查", "reviewing"], ["watcher", "watcher 验收与本地提交", "validating"], ["watcher", "归档交付", "closing_agents"]];
   $("#workflow-stages").innerHTML = stages.map(([role,label,stage],i) => {
     const skipped = stage === "reviewing" && t.work?.roles?.reviewer?.status === "disabled";
     const complete = t.status === "done" && !skipped;

@@ -33,6 +33,8 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
             for child in action.choices.values():
                 child.error = invalid
     args = parser.parse_args(argv)
+    if args.workflow and args.workflow!=state.get('workflow','legacy'):
+        raise ValueError('原始工作流程与检查点不一致')
     if args.run_dir is None or not args.run_dir.is_absolute() or args.run_dir.resolve() != run.resolve():
         raise ValueError('原始启动配置与任务运行目录不一致')
     if not args.cwd.is_absolute() or args.cwd.resolve() != Path(state.get('cwd', '')).resolve():
@@ -70,13 +72,15 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
     result = ['run', '--resume', '--cwd', str(args.cwd.resolve()), '--run-dir', str(run.resolve()),
               '--provider', args.provider, '--worker-isolation', args.worker_isolation,
               '--review-isolation', args.review_isolation, '--git-history', args.git_history]
+    result.append('--workflow='+state.get('workflow','legacy'))
     strings = {'model': '--model', 'mode': '--mode', 'paseo_backend': '--paseo-backend',
                'paseo_mode': '--paseo-mode', 'reviewer': '--reviewer', 'reviewer_model': '--reviewer-model',
                'reviewer_mode': '--reviewer-mode', 'reviewer_paseo_backend': '--reviewer-paseo-backend',
                'reviewer_paseo_mode': '--reviewer-paseo-mode'}
     settings = ('max_rounds', 'max_runtime', 'max_agent_calls', 'stall_limit', 'failure_limit',
                 'restart_after_stall', 'turn_timeout', 'idle_timeout', 'retry_delay', 'check_timeout',
-                'review_every', 'keep_rounds', 'max_output_bytes', 'memory_bytes', 'file_bytes', 'max_run_bytes')
+                'review_every', 'keep_rounds', 'max_output_bytes', 'memory_bytes', 'file_bytes', 'max_run_bytes',
+                'max_history_bytes', 'max_agent_state_bytes')
     for key, flag in strings.items():
         if getattr(args, key):
             result.append(flag + '=' + getattr(args, key))

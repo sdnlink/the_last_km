@@ -25,6 +25,7 @@ const phases = {
   preparing: "准备环境",
   working: "实现需求中",
   reviewing: "独立审查中",
+  refining_requirements: "reviewer 完善需求中",
   validating: "验收检查中",
   retry_wait: "等待重试",
   closing_agents: "结束会话中",
@@ -41,6 +42,7 @@ const actionLabels = {
   continue: "恢复执行",
   stop: "停止任务",
   resume: "恢复执行",
+  delete: "删除任务",
 };
 const active = (t) => ["running", "starting", "paused"].includes(t.status);
 const attention = (t) =>
@@ -96,7 +98,7 @@ function taskButtons(task, compact = false) {
   return task.actions
     .filter(
       (action) =>
-        !compact || ["start", "pause", "continue", "resume"].includes(action),
+        !compact || ["start", "pause", "continue", "resume", "delete"].includes(action),
     )
     .map((action) => {
       const cancellingPause =
@@ -110,7 +112,7 @@ function taskButtons(task, compact = false) {
             ? "从检查点恢复，保留原模型、审核、隔离与预算配置"
             : "";
       const label = cancellingPause ? "取消暂停" : actionLabels[action];
-      return `<button class="button ${compact ? "small-button" : ""} ${action === "stop" ? "danger" : ["start", "resume", "continue"].includes(action) ? "primary" : "secondary"}" data-action="${action}" data-id="${task.id}" title="${title}" ${pending.has(task.id) ? "disabled" : ""}>${escape(label)}</button>`;
+      return `<button class="button ${compact ? "small-button" : ""} ${["stop","delete"].includes(action) ? "danger" : ["start", "resume", "continue"].includes(action) ? "primary" : "secondary"}" data-action="${action}" data-id="${task.id}" title="${title}" ${pending.has(task.id) ? "disabled" : ""}>${escape(label)}</button>`;
     })
     .join("");
 }

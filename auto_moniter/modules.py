@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import fnmatch
 
 
 def definitions(value: object) -> list[dict]:
@@ -13,7 +14,7 @@ def definitions(value: object) -> list[dict]:
     result = []
     seen = set()
     for item in value:
-        if not isinstance(item, dict) or not {"id", "title", "acceptance"} <= set(item) or set(item) - {"id", "title", "acceptance", "depends_on", "checks"}:
+        if not isinstance(item, dict) or not {"id", "title", "acceptance"} <= set(item) or set(item) - {"id", "title", "acceptance", "depends_on", "checks", "files"}:
             raise ValueError("each module needs exactly id, title, acceptance")
         ident = item["id"]
         if not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", ident) or ident in seen:
@@ -23,10 +24,13 @@ def definitions(value: object) -> list[dict]:
         criteria = item["acceptance"]
         if not isinstance(criteria, list) or not criteria or len(criteria) > 30 or any(not isinstance(text, str) or not text.strip() or len(text) > 2000 for text in criteria):
             raise ValueError("module acceptance must contain 1-30 nonempty strings, each at most 2000 characters")
-        for field in ("depends_on", "checks"):
+        for field in ("depends_on", "checks", "files"):
             entries = item.get(field, [])
             if not isinstance(entries, list) or len(entries) > 30 or any(not isinstance(text, str) or not text.strip() or len(text) > 2000 for text in entries):
                 raise ValueError(f"invalid module {field}")
+        for pattern in item.get('files', []):
+            from auto_moniter.quality import relative_path
+            relative_path(pattern)
         if ident in item.get("depends_on", []):
             raise ValueError("module cannot depend on itself")
         seen.add(ident)
@@ -43,11 +47,11 @@ class ModuleLedger:
         proposed = definitions(proposal)
         for item in proposed:
             old = self.items.get(item["id"])
-            if old and any(old.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "depends_on", "checks") if key in item):
+            if old and any(old.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "depends_on", "checks", "files") if key in item):
                 raise ValueError(f"module {item['id']} definition cannot change; preserve its original acceptance criteria")
         if len(self.items.keys() | {item['id'] for item in proposed}) > 200:
             raise ValueError("module ledger cannot exceed 200 entries")
-        combined = {key: {field: item.get(field, []) for field in ("id", "title", "acceptance", "depends_on", "checks")} for key, item in self.items.items()}
+        combined = {key: {field: item.get(field, []) for field in ("id", "title", "acceptance", "depends_on", "checks", "files")} for key, item in self.items.items()}
         combined.update({item["id"]: {**combined.get(item["id"], {}), **item} for item in proposed})
         if len(json.dumps(list(combined.values()), ensure_ascii=False).encode("utf-8")) > 128 * 1024:
             raise ValueError("module definitions cannot exceed 128 KiB in total")
@@ -101,10 +105,26 @@ class ModuleLedger:
                 evidence = [text.encode("utf-8")[:1024].decode("utf-8", errors="ignore") for text in (reviewer or worker).evidence[:4]]
                 self.items[key].update(status="accepted", evidence=evidence, round=index, tree=tree, invalidated_reason="")
 
-    def invalidate(self, tree: str) -> list[str]:
+    def invalidate(self, tree: str, changed_files: list[str] | None = None) -> list[str]:
+        affected = set(self.items)
+        if changed_files is not None and all(m.get('files') for m in self.items.values()):
+            affected = {key for key, m in self.items.items() if any(
+                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in m['files'])}
+            # Undeclared files may be shared configuration; fail conservatively.
+            if any(not any(fnmatch.fnmatchcase(path, pattern) for m in self.items.values() for pattern in m['files'])
+                   for path in changed_files):
+                affected = set(self.items)
+            while True:
+                more = {key for key, m in self.items.items() if set(m.get('depends_on', [])) & affected}
+                if more <= affected:
+                    break
+                affected |= more
         changed = []
         for key, item in self.items.items():
             if item["status"] == "accepted" and item.get("tree") != tree:
+                if key not in affected:
+                    item['tree'] = tree
+                    continue
                 item["status"] = "pending"
                 item["invalidated_reason"] = "Workspace changed since acceptance; regression checks and review required"
                 changed.append(key)
@@ -134,7 +154,7 @@ class ModuleLedger:
             raise ValueError("invalid saved module ledger")
         if len(value) > 200:
             raise ValueError("too many saved modules")
-        plan = [{key: item.get(key, []) for key in ("id", "title", "acceptance", "depends_on", "checks")} for item in value if isinstance(item, dict)]
+        plan = [{key: item.get(key, []) for key in ("id", "title", "acceptance", "depends_on", "checks", "files")} for item in value if isinstance(item, dict)]
         ledger = cls(plan)
         seen = set()
         for item in value:

@@ -111,6 +111,8 @@ def run_health(run_dir: Path, stale_after: float = 60, *, snapshot: dict | None 
         phase = health
     elif health == "recovering":
         phase = "recovering"
+    elif (state.get('requirements_review') or {}).get('status')=='reviewing' and health=='active':
+        phase='refining_requirements'
     usage = dict(state.get("usage") or {})
     if held:
         try:

@@ -19,6 +19,10 @@ from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
 from auto_moniter.providers import discover_providers
 from auto_moniter.providers import ProviderError
+from auto_moniter.locking import workspaces_overlap
+from console.settings import settings, DEFAULTS
+from console.deletion import run_key, inactive_run
+from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
@@ -71,7 +75,8 @@ class TaskStore:
         self.cwd = cwd.resolve()
         self.tasks_dir = self.data_dir / 'tasks'
         self.runs_dir = self.data_dir / 'runs'
-        for path in (self.data_dir, self.tasks_dir, self.runs_dir):
+        self.deleted_dir = self.data_dir / 'deleted'
+        for path in (self.data_dir, self.tasks_dir, self.runs_dir, self.deleted_dir):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.runs_dirs = [state_root(), self.cwd / '.auto-moniter', *(runs_dirs or [])]
         self.metrics = Metrics(self.data_dir)
@@ -124,7 +129,8 @@ class TaskStore:
             self._catalog_at = time.monotonic()
         managed_paths = {item['run_dir'] for item in tasks.values()}
         tasks.update({key: item for key, item in self._external.items() if item['run_dir'] not in managed_paths})
-        return tasks
+        return {ident: item for ident, item in tasks.items()
+                if not (self.deleted_dir / (run_key(item['run_dir']) + '.json')).exists()}
 
     def _get(self, ident: str) -> dict:
         meta = self._catalog().get(ident)
@@ -217,6 +223,10 @@ class TaskStore:
                 actions = ['resume']
             except TaskError as exc:
                 resume_unavailable = str(exc)
+        if (not live and status not in {'running', 'starting', 'paused', 'unknown', 'recovery_failed', 'interrupted'}
+                and not health.get('lock_held') and not health.get('guardian_lock_held')
+                and not (run / 'process.json').exists()):
+            actions.append('delete')
         control_message = ''
         if meta.get('error') and not live:
             control_message = '上次启动失败：' + str(meta['error'])
@@ -231,12 +241,20 @@ class TaskStore:
                 control_message = '恢复已请求，正在继续原任务。'
         elif status == 'starting':
             control_message = '正在启动监督器并加载任务检查点…'
+        from auto_moniter.failures import classify
+        failure_records=state.get('rounds') if isinstance(state.get('rounds'),list) else state.get('records',[])
+        latest_failure = next((r.get('failure') or ' '.join(r.get('gaps', [])) for r in reversed(failure_records)
+                               if r.get('role') == 'worker'), '')
+        if not live and latest_failure and classify(latest_failure)[0] == 'authentication':
+            name = meta.get('provider') or (provider.get('worker') or {}).get('name', '执行器')
+            control_message = (f'{name} 认证不可用，worker 尚未开始实现。请在运行控制台的同一用户下完成登录，或为服务配置对应 API 凭据，再恢复任务。'
+                               + (' Grok 可执行 grok login --device-code，或在控制台服务环境提供 XAI_API_KEY。' if name=='grok' else ''))
         if status == 'queued' and not health.get('review_schedule'):
             health = {**health, 'review_schedule': {'enabled': True, 'every_worker_rounds': meta.get('review_every', 5),
                                                    'rounds_since_review': 0}}
-        current_provider = (provider.get('reviewer' if health.get('phase') == 'reviewing' else 'worker') or {}).get('name')
+        current_provider = (provider.get('reviewer' if health.get('phase') in {'reviewing','refining_requirements'} else 'worker') or {}).get('name')
         progress = (self.activity.snapshot(run, state, health, status, current_provider or meta.get('provider', ''))
-                    if include_details else {'events': [], 'role': 'reviewer' if health.get('phase') == 'reviewing' else 'worker',
+                    if include_details else {'events': [], 'role': 'reviewer' if health.get('phase') in {'reviewing','refining_requirements'} else 'worker',
                                              'round': health.get('rounds', 0), 'focus': ''})
         try:
             directions = Directions(run).snapshot() if include_details else []
@@ -270,6 +288,14 @@ class TaskStore:
                                           'status': item.get('status', '')}
                                          for item in rounds[-20:] if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
+                     'acceptance_plan': meta.get('acceptance_plan', {}) if include_details else {},
+                     'acceptance_results': read_json(run/'acceptance-results.json') if include_details else {},
+                     'verification_mode': meta.get('verification_mode', 'legacy'),
+                     'workflow':state.get('workflow',meta.get('workflow','legacy')),
+                     'requirements_review':state.get('requirements_review',{}) if include_details else {},
+                     'quality_policy': state.get('quality_policy', meta.get('quality_policy', {})) if include_details else {},
+                     'quality_state': state.get('quality_state', {}) if include_details else {},
+                     'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},
                      'activity': progress,
                      'work': work,
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
@@ -374,6 +400,20 @@ class TaskStore:
         except GitRecordError as exc:
             raise TaskError(str(exc), 409) from exc
 
+    def acceptance_options(self, data: dict, *, prepare=False) -> dict:
+        try:
+            cwd = data.get('cwd', str(self.cwd))
+            if not isinstance(cwd, str) or not cwd or '\0' in cwd or len(cwd)>4000:
+                raise ValueError('项目路径格式无效')
+            if prepare:
+                plan = data.get('acceptance_plan')
+                if isinstance(plan,dict) and not plan.get('criteria'):
+                    plan = {**plan,'criteria':'仅检查运行前提，不创建任务或执行测试'}
+                return acceptance_preflight(select_acceptance(cwd, plan))
+            return scan_acceptance(cwd, data.get('task_type','code'), data.get('python',''))
+        except (ValueError,OSError) as exc:
+            raise TaskError(str(exc)) from exc
+
     def create(self, data: dict) -> dict:
         def text(key, default='', maximum=32000):
             value = data.get(key, default)
@@ -387,11 +427,31 @@ class TaskStore:
         if not cwd.is_dir() or not os.access(cwd, os.W_OK):
             raise TaskError('项目目录不存在或不可写')
         provider, reviewer = text('provider', 'codex'), text('reviewer', 'claude')
+        workflow=text('workflow','review-first')
+        if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
             raise TaskError('请选择支持的执行器和审查器')
+        guided = None
+        if data.get('acceptance_plan') is not None:
+            try:
+                guided = select_acceptance(cwd, data['acceptance_plan'])
+            except (ValueError,OSError) as exc:
+                raise TaskError(str(exc)) from exc
         checks = data.get('checks', [])
         if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\x00' in c for c in checks):
             raise TaskError('验收命令格式不正确，每行填写一条命令')
+        verification_mode = data.get('verification_mode', 'review_only')
+        if verification_mode not in ('executable', 'review_only', 'planning'):
+            raise TaskError('验收模式无效')
+        if verification_mode == 'planning':
+            checks = []
+            if guided:
+                guided = {**guided,'selected_ids':[],'selected':[]}
+            requirement = ('本任务仅制定可执行的验收方案，不实施原目标、不安装依赖、不运行部署。'
+                           '阅读项目已有验证入口，列出需求到检查项、所需环境、固定样本、成功/失败断言和仍缺的测试资产；'
+                           '将方案写入项目文档并交独立 reviewer 审核。完成本任务不代表原目标通过验收。\n\n原目标：\n' + requirement)
+        if verification_mode == 'executable' and not checks and not (guided and guided['selected']):
+            raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
         for key, default, maximum in [('max_runtime_minutes', 120, 43200), ('max_agent_calls', 100, 100000),
                                       ('max_rounds', 0, 100000), ('review_every', 5, 100000)]:
@@ -402,14 +462,34 @@ class TaskStore:
         auto_start = data.get('auto_start', False)
         if type(auto_start) is not bool:
             raise TaskError('auto_start 必须是布尔值')
+        try:
+            execution = settings(data, cwd)
+        except (ValueError, TypeError) as exc:
+            raise TaskError(str(exc)) from exc
         with self._lock:
             ident = uuid.uuid4().hex
+            run = self.runs_dir / ident
+            if guided:
+                import shlex
+                selected_commands = [shlex.join([token.replace('{run_dir}', str(run)) for token in shlex.split(c['command'])]) for c in guided['selected']]
+                for item, command in zip(guided['selected'], selected_commands):
+                    item['command'] = command
+                checks = list(dict.fromkeys([*selected_commands, *checks]))
+                if verification_mode == 'planning':
+                    checks = []
+                if len(checks)>20:
+                    raise TaskError('最多选择或填写 20 条验收检查')
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
-                    'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer,
+                    'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
                     'model': text('model', maximum=200), 'reviewer_model': text('reviewer_model', maximum=200),
                     'paseo_backend': text('paseo_backend', 'claude', 200),
-                    'checks': [c.strip() for c in checks], **numbers,
+                    'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
+            if guided:
+                meta['acceptance_plan'] = guided
+                meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']
+                if 'ndr-documentation' in guided['selected_ids'] and run.is_relative_to(cwd):
+                    raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
             if auto_start:
                 self._check_start(meta)
             self._save(meta)
@@ -424,11 +504,36 @@ class TaskStore:
                 raise TaskError(f'未找到 {meta[role]} 可执行文件，请先安装并完成登录', 409)
         if not Path(meta['cwd']).is_dir():
             raise TaskError('项目目录已不存在', 409)
+        if meta.get('acceptance_plan'):
+            plan = meta['acceptance_plan']
+            if not (Path(meta['run_dir'])/'state.json').exists():
+                try:
+                    select_acceptance(meta['cwd'], plan)
+                except (OSError,ValueError) as exc:
+                    raise TaskError(str(exc),409) from exc
+            result = acceptance_preflight(plan) if meta.get('verification_mode') != 'planning' else {'ready':True,'checks':[],'executed':False}
+            meta['acceptance_preflight'] = result
+            if not result['ready']:
+                raise TaskError('验收环境不可用（未执行业务检查）：'+ '; '.join(error for item in result['checks'] for error in item['errors']),409)
+        if not (Path(meta['run_dir']) / 'state.json').exists():
+            from auto_moniter.isolation import ReviewIsolation, WorkerIsolation
+            from auto_moniter.providers import resolve_provider
+            try:
+                reviewer = resolve_provider(meta['reviewer'], role='reviewer',
+                                             paseo_backend=meta.get('paseo_backend', 'claude'))
+                reviewer.validate_review()
+                if meta.get('review_isolation') == 'strict':
+                    ReviewIsolation(Path(meta['cwd']), Path(meta['run_dir'])).verify(meta['reviewer'])
+                if meta.get('worker_isolation') == 'strict':
+                    if Path(meta['run_dir']).is_relative_to(Path(meta['cwd'])):
+                        raise ProviderError('strict worker 的运行目录必须位于目标项目外；请使用外部 --data-dir')
+            except ProviderError as exc:
+                raise TaskError('启动预检失败：' + str(exc), 409) from exc
         for other in self._catalog().values():
             if other['id'] == meta['id']:
                 continue
             view = self._view(other, {})
-            if view['cwd'] == meta['cwd'] and view['status'] in {'running', 'starting', 'paused'}:
+            if view['status'] in {'running', 'starting', 'paused'} and workspaces_overlap(Path(view['cwd']), Path(meta['cwd'])):
                 raise TaskError('该项目已有任务执行中，请先停止或等待完成', 409)
 
     def _resume_args(self, meta: dict, state: dict | None = None) -> list[str]:
@@ -467,6 +572,20 @@ class TaskStore:
                 argv.append(flag + '=' + meta[key])
         for check in meta['checks']:
             argv.append('--check=' + check)
+        argv.append('--workflow='+meta.get('workflow','legacy'))
+        if meta.get('acceptance'):
+            argv.append('--accept=' + meta['acceptance'])
+        # Legacy metadata keeps the old provider boundary; new tasks store an
+        # explicit strict default in create(). Never silently change a resume.
+        for key in DEFAULTS:
+            if key in meta:
+                argv.append('--' + key.replace('_', '-') + '=' + str(meta[key]))
+        for name in meta.get('protect_paths', []):
+            argv.append('--protect=' + name)
+        if meta.get('modules'):
+            argv += ['--modules', str(Path(meta['run_dir']) / 'modules.json')]
+        if meta.get('quality_policy'):
+            argv += ['--quality-policy', str(Path(meta['run_dir']) / 'quality-policy.json')]
         return argv
 
     def _launch(self, meta: dict, resume: bool = False) -> None:
@@ -484,6 +603,19 @@ class TaskStore:
             if resume:
                 (run / 'control.json').unlink(missing_ok=True)
             else:
+                if meta.get('acceptance_plan'):
+                    write_json(run/'acceptance-plan.json', meta['acceptance_plan'], durable=True)
+                    if 'ndr-documentation' in meta['acceptance_plan']['selected_ids']:
+                        if run.is_relative_to(Path(meta['cwd'])):
+                            raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
+                        import gzip
+                        from auto_moniter.workspace import file_snapshot
+                        baseline = file_snapshot(Path(meta['cwd']))
+                        (run/'documentation-baseline.json.gz').write_bytes(gzip.compress(json.dumps(baseline).encode()))
+                if meta.get('modules'):
+                    write_json(run / 'modules.json', meta['modules'], durable=True)
+                if meta.get('quality_policy'):
+                    write_json(run / 'quality-policy.json', meta['quality_policy'], durable=True)
                 write_json(run / 'launch.json', {'argv': arguments}, durable=True)
             with (run / 'console.log').open('ab') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
@@ -511,13 +643,31 @@ class TaskStore:
                     self._save(meta)
                 self._children.pop(ident, None)
 
-    def action(self, ident: str, action: str) -> dict:
+    def action(self, ident: str, action: str, data: dict | None = None) -> dict:
         with self._lock:
             meta = self._get(ident)
             view = self._view(meta, {})
             if action not in view['actions']:
                 raise TaskError('当前状态不支持此操作，请刷新后重试', 409)
             run = Path(meta['run_dir'])
+            if action == 'delete':
+                if not data or data.get('confirm') != ident:
+                    raise TaskError('请确认删除此任务', 400)
+                if self._launcher_alive(meta):
+                    raise TaskError('任务仍在启动或执行，请先停止', 409)
+                child = self._children.get(ident)
+                if child is not None and child.poll() is None:
+                    raise TaskError('任务进程尚未退出，请稍后重试', 409)
+                try:
+                    with inactive_run(run):
+                        write_json(self.deleted_dir / (run_key(run) + '.json'),
+                                   {'id': ident, 'run_dir': str(run.resolve()), 'deleted_at': timestamp()}, durable=True)
+                        (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
+                except ValueError as exc:
+                    raise TaskError(str(exc), 409) from exc
+                self._external.pop(ident, None)
+                self._catalog_at = 0
+                return {'id': ident, 'deleted': True, 'retained_run_dir': str(run)}
             if action in {'start', 'resume'}:
                 if action == 'resume' and not meta.get('managed'):
                     # Keep the discovered task ID and its original run directory.
@@ -528,6 +678,29 @@ class TaskStore:
                             'provider': view['provider'], 'reviewer': view['reviewer'],
                             'created_at': view['created_at'], 'resume_argv': arguments}
                 self._check_start(meta)
+                if action == 'resume':
+                    arguments = self._resume_args(meta)
+                    usage = read_json(run / 'state.json').get('usage', {})
+                    additions = data or {}
+                    for key, flag, used, scale in [
+                        ('additional_runtime_minutes', '--max-runtime', float(usage.get('elapsed_s', 0)), 60),
+                        ('additional_agent_calls', '--max-agent-calls', int(usage.get('agent_calls', 0)), 1)]:
+                        value = additions.get(key, 0)
+                        if type(value) is not int or not 0 <= value <= 100000:
+                            raise TaskError('追加预算必须为 0 至 100000 的整数')
+                        if value:
+                            from auto_moniter.cli import build_parser, _parse_duration
+                            parsed = build_parser().parse_args(arguments)
+                            current = _parse_duration(parsed.max_runtime) if scale == 60 else parsed.max_agent_calls
+                            total = max(current, int(used) + 1) + value * scale
+                            arguments.append(flag + '=' + str(total))
+                    from auto_moniter.cli import build_parser, _parse_duration
+                    parsed = build_parser().parse_args(arguments)
+                    if (_parse_duration(parsed.max_runtime) and float(usage.get('elapsed_s', 0)) >= _parse_duration(parsed.max_runtime)
+                            or parsed.max_agent_calls and int(usage.get('agent_calls', 0)) >= parsed.max_agent_calls):
+                        raise TaskError('累计预算已耗尽，请在恢复窗口明确追加预算', 409)
+                    meta = {**meta, 'resume_argv': arguments}
+                    # Only save the new launch configuration once Popen succeeds.
                 self._launch(meta, resume=action == 'resume')
             elif action == 'cancel':
                 meta['status'] = 'cancelled'
@@ -545,7 +718,7 @@ class TaskStore:
             for path in run.glob('*'):
                 if path.is_symlink() or not path.is_file():
                     continue
-                if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl'} and not re.fullmatch(r'\d+-(worker|reviewer)(-text)?\.(log|md)', path.name):
+                if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl'} and not re.fullmatch(r'\d+-(?:(worker|reviewer)(-text)?\.(log|md)|check-\d+\.log)', path.name):
                     continue
                 try:
                     files.append((path.stat().st_mtime, path.name))

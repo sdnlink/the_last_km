@@ -4,7 +4,7 @@
           <div>
             <span class="eyebrow">LET’S BUILD SOMETHING</span>
             <h2>新建开发任务</h2>
-            <p>写下需求，其余交给执行器与监督器。</p>
+            <p>先由 reviewer 完善需求，watcher 交给 worker 实现；审核与检查通过后才写入本地审计分支。</p>
           </div>
           <button
             type="button"
@@ -54,8 +54,23 @@
             ></label>
           </div>
           <div id="provider-hint" class="form-hint"></div>
+          <section class="acceptance-guide" aria-label="验收方案">
+            <h3>完成标准与检查方案</h3>
+            <label>任务类型<select name="task_type"><option value="code">代码功能</option><option value="documentation">文档完善</option><option value="service">接口服务</option><option value="other">其他</option></select></label>
+            <label>怎样算完成？<textarea name="acceptance_criteria" rows="3" maxlength="8000" required placeholder="例如：文档链接有效，需求与接口说明一致，未实现能力不写成已完成。"></textarea></label>
+            <label>验收方式<select name="verification_mode"><option value="executable">选择项目检查，并由独立 reviewer 审核</option><option value="review_only">仅独立语义审核（不证明功能测试通过）</option><option value="planning">先制定验收方案（单独任务，不实施原目标）</option></select></label>
+            <div class="acceptance-actions"><button type="button" id="scan-acceptance" class="button secondary">扫描项目已有检查</button><button type="button" id="preflight-acceptance" class="button secondary">检查运行前提</button></div>
+            <p id="acceptance-notice" role="status">扫描只读项目配置，不执行测试、不安装依赖。选择检查后，watcher 会在验收时实际执行。</p>
+            <div id="acceptance-options"></div>
+            <p>独立语义审核始终保留。未选择的功能、数据库、HTTP、端到端和性能检查不能推定通过。</p>
+            <details><summary>高级：解释器与自定义命令</summary>
+              <label>Python 解释器<input name="acceptance_python" placeholder="自动选择项目 .venv 或控制台 Python；也可填绝对路径"></label>
+              <label>额外验收命令<textarea name="checks" rows="3" placeholder="熟悉项目时填写，每行一条；通常只需勾选上面的检查项"></textarea></label>
+              <small>自定义命令会在项目目录执行，其依赖和副作用无法由入口扫描完整确认。</small>
+            </details>
+          </section>
           <details class="advanced">
-            <summary>执行配置与验收标准<span>可选</span></summary>
+            <summary>高级执行配置<span>可选</span></summary>
             <div class="advanced-body">
               <div class="form-grid">
                 <label
@@ -75,16 +90,8 @@
                   name="paseo_backend"
                   value="claude"
                   maxlength="200" /></label
-              ><label
-                >验收命令<textarea
-                  name="checks"
-                  rows="3"
-                  placeholder="每行一条，例如：&#10;python -m unittest discover -s tests&#10;git diff --check"
-                ></textarea
-                ><small
-                  >由监督器在项目目录执行，用于确认交付结果。</small
-                ></label
               >
+                <label>质量策略（JSON）<textarea name="quality_policy" rows="5">{"protect_tests":true,"verified_progress":true,"no_progress_limit":12,"review_interval_s":600,"review_changed_files":20,"blocked_review_limit":3,"requirements":[],"validation_paths":[],"review_tools":"provider","max_tokens":0,"max_cost_usd":0}</textarea><small>需求条目：id、text、module_ids、evidence_paths。已存在的测试/验收配置自动保护；新测试可新增。没有验证进展会停止；files_only 审核工具仅支持原生 Claude。调用轮次不等于模型请求数，token/费用预算仅依据后端实际报告。</small></label>
               <div class="form-grid thirds">
                 <label
                   >运行预算（分钟）<input
@@ -117,6 +124,21 @@
                 <small>1：每轮正常结果后审核；2：每两轮；默认 5。0：仅在完成候选或外部阻塞时审核。失败轮次累计计数，但等待 worker 正常返回后才进入审核。</small>
               </label>
               <small>时长、调用和执行轮次上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
+              <div class="form-grid">
+                <label>审核隔离<select name="review_isolation"><option value="strict">strict：系统强制只读（原生 reviewer）</option><option value="provider">provider：执行器只读模式</option></select></label>
+                <label>worker 隔离<select name="worker_isolation"><option value="provider">provider</option><option value="strict">strict：项目外只读，保护验收资产</option></select></label>
+              </div>
+              <label>保护路径<textarea name="protect_paths" rows="2" placeholder="每行一个项目内相对路径，例如 tests"></textarea><small>需要 strict worker；运行目录须在目标项目之外。</small></label>
+              <label>固定模块清单（JSON）<textarea name="modules" rows="4" placeholder='[{"id":"API","title":"接口","acceptance":["正负路径通过"],"depends_on":[],"checks":["python -m unittest"]}]'></textarea><small>固定原始需求及检查，防止模型自行缩小范围。留空时由 worker 提出计划；验收命令为空不代表功能经过测试。</small></label>
+              <div class="form-grid thirds">
+                <label>单轮超时（秒）<input name="turn_timeout" type="number" min="0" value="1800" required></label>
+                <label>无输出超时（秒）<input name="idle_timeout" type="number" min="0" value="900" required></label>
+                <label>单条验收超时（秒）<input name="check_timeout" type="number" min="1" value="600" required></label>
+              </div>
+              <label>保留最近轮数<input name="keep_rounds" type="number" min="0" value="50" required></label>
+              <label>运行目录字节上限<input name="max_run_bytes" type="number" min="0" value="67108864" required></label>
+              <label>共享 Git 对象与审计历史字节上限<input name="max_history_bytes" type="number" min="0" value="536870912" required></label>
+              <label>本机模型会话目录字节上限<input name="max_agent_state_bytes" type="number" min="0" value="4294967296" required><small>包含已有会话及其他任务；容量每 10 秒采样，超限停止，不自动删除历史。0 关闭对应限制，不是文件系统硬配额。</small></label>
             </div>
           </details>
           <label class="checkbox-label"

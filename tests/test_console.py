@@ -38,7 +38,7 @@ class ConsoleTests(unittest.TestCase):
 
     def create(self, **extra):
         return self.store.create({'title': '测试开发任务', 'requirement': '实现接口并补充测试',
-                                  'cwd': str(self.project), 'provider': 'codex', 'reviewer': 'codex', **extra})
+                                  'cwd': str(self.project), 'provider': 'codex', 'reviewer': 'codex', 'workflow':'legacy', **extra})
 
     def wait_for(self, predicate):
         deadline = time.monotonic() + 12

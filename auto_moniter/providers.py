@@ -555,7 +555,7 @@ class GrokProvider(Provider):
             "--permission-mode",
             mode,
             "--output-format",
-            "json",
+            "streaming-json",
             "--json-schema",
             schema_file.read_text(encoding="utf-8"),
             "--prompt-file",

@@ -114,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == '/api/tasks':
                 self._json(self.server.store.create(data), 201)
+            elif path in ('/api/acceptance/scan', '/api/acceptance/preflight'):
+                self._json(self.server.store.acceptance_options(data, prepare=path.endswith('/preflight')))
             else:
                 parts = path.strip('/').split('/')
                 if len(parts) != 4 or parts[:2] != ['api', 'tasks']:
@@ -121,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == 'directions':
                     self._json(self.server.store.add_direction(parts[2], data), 201)
                 else:
-                    self._json(self.server.store.action(parts[2], parts[3]))
+                    self._json(self.server.store.action(parts[2], parts[3], data))
         except (BrokenPipeError, ConnectionResetError):
             return
         except (TaskError, OSError, ValueError) as exc:

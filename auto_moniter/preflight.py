@@ -11,6 +11,30 @@ from auto_moniter.providers import ProviderError, discover_providers
 
 
 def validate(config) -> None:
+    if config.workflow not in ('legacy','review-first','auto') or config.workflow=='auto' and not config.resume:
+        raise ValueError('Invalid workflow')
+    if config.workflow=='review-first' and config.no_review:
+        raise ValueError('review-first workflow requires an independent reviewer')
+    if not isinstance(config.quality_policy, dict):
+        raise ValueError('Quality policy must be an object')
+    if config.quality_policy:
+        from auto_moniter.quality import policy
+        config.quality_policy = policy(config.quality_policy)
+        module_ids = {m['id'] for m in config.modules}
+        if not config.resume and any(set(r['module_ids']) - module_ids for r in config.quality_policy['requirements']):
+            raise ValueError('Quality requirements must map to user-defined modules')
+        if not config.resume:
+            for name in config.quality_policy['validation_paths']:
+                target = (config.cwd / name).resolve()
+                if not target.exists() or not target.is_relative_to(config.cwd):
+                    raise ValueError('Validation paths must exist inside the project: ' + name)
+        if config.quality_policy['review_tools'] == 'files_only' and (
+                config.no_review or config.reviewer is None or config.reviewer.name != 'claude'):
+            raise ValueError('files_only reviewer tools currently require native Claude')
+        if config.quality_policy['review_tools'] == 'files_only' and config.review_isolation != 'strict':
+            raise ValueError('files_only requires strict review isolation')
+        if config.quality_policy['review_tools'] == 'files_only' and config.reviewer_extra_args:
+            raise ValueError('files_only does not permit reviewer CLI overrides')
     if sys.platform != "linux":
         raise ValueError("This release supports Linux only (process groups, /proc, and file locking are required)")
     if not config.cwd.expanduser().resolve().is_dir():
@@ -37,7 +61,7 @@ def validate(config) -> None:
         raise ValueError("Unknown worker isolation mode")
     if config.git_history not in {'auto', 'required', 'off'}:
         raise ValueError('Unknown Git history mode')
-    for name in ("memory_bytes", "file_bytes", "max_run_bytes"):
+    for name in ("memory_bytes", "file_bytes", "max_run_bytes", "max_history_bytes", "max_agent_state_bytes"):
         if not isinstance(getattr(config, name), int) or getattr(config, name) < 0:
             raise ValueError(f"Invalid {name}")
     if config.provider.name == "paseo" and (config.memory_bytes or config.file_bytes or config.worker_isolation == "strict"):

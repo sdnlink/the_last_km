@@ -1,5 +1,16 @@
 # Unreleased
 
+- Add guided acceptance setup with natural-language completion criteria, read-only project check discovery, explicit selection, environment preflight and a separate verification-planning task mode. Preserve advanced commands and legacy API configuration.
+- Persist versioned check snapshots and distinguish missing prerequisites, failed checks, timeouts and interruptions; expose acceptance output logs in task detail.
+
+- Add confirmed task deletion in the list, detail and progress views. Persist per-console removal markers to prevent rediscovery, retain project/run/Git evidence, and refuse active or unrecovered process ownership at deletion time.
+
+- Add hierarchical workspace leases across parent/child directories and separate state roots while keeping linked worktrees independent.
+- Expose strict review, protected worker paths, fixed module plans, execution timeouts, verification mode and storage budgets in the console; permit explicit cumulative budget increases on resume.
+- Account for shared Git audit objects and known native provider session stores, stopping at configured sampled quotas without deleting evidence.
+- Exercise independent review rejection, worker correction and explicit audit closure in the installed offline selftest; pin models in real backend certification.
+- Add a read-only NDR documentation gate that distinguishes historical Markdown evidence from current static verification without rewriting historical records.
+
 - Avoid full host process scans when an exited invocation's process group is already absent; retain background-process verification and cleanup for existing or uncertain groups, and reject invalid group IDs.
 
 - Stop scheduling when Paseo agent shutdown fails; keep session IDs and report resumable recovery failure instead of claiming stopped/round-limited completion. Preserve native process recovery records when exit or process-group cleanup is unconfirmed.
@@ -55,3 +66,13 @@ This release targets Linux with Python 3.11 or newer.
 Migration: new conclusions require `scope`, `modules`, and `module_ids`. Existing supported checkpoints remain readable; future state versions are refused. Resume with the original providers, modes, and command templates. Custom shell reviewers and Paseo review backends without a supported read-only mode are refused. Use a native reviewer instead.
 
 Provider CLIs remain external dependencies. Offline tests do not establish compatibility with every vendor CLI version or confirm credentials, API availability, or model quality. See README for isolation, process recovery, and acceptance limitations.
+
+- Add immutable quality policies with requirement-to-module/file coverage, original acceptance test protection, verified progress milestones and resumable no-progress stops.
+- Audit partial work at bounded worker time checkpoints or changed-file thresholds; suspend repeated independently confirmed external blockers.
+- Retain unaffected module acceptance using user-owned file scopes and dependency propagation, preserving conservative invalidation for unknown inputs and final integration checks.
+- Offer strict Claude files-only review with restricted tools, disabled customizations/MCP and reduced deployment credential exposure.
+- Persist explicit backend token/cost reports and unknown usage across resume; enforce optional reported-usage budgets without estimating unreported internal requests.
+
+- Default new reviewed CLI/Web tasks to read-only requirement elaboration before implementation and per-turn independent review. Persist the original request and elaboration across resume.
+- Create local audit commits only after joint approval and watcher checks in review-first mode; retain rejected iterations in run records and review exact immutable tree snapshots without advancing refs.
+- Recognize Grok's actual unsigned-in/login/API-key errors as terminal authentication failures, display actionable Web feedback, and stream public progress while excluding reasoning.

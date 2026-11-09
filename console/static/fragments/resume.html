@@ -1,0 +1,11 @@
+<dialog id="resume-dialog" class="confirm-dialog">
+ <form id="resume-form">
+  <div class="dialog-heading"><h2>从检查点恢复</h2></div>
+  <p id="resume-usage"></p>
+  <p>保留累计用量。预算已耗尽时需要明确追加；填写 0 表示不追加。</p>
+  <label>追加运行时间（分钟）<input name="additional_runtime_minutes" type="number" min="0" max="100000" value="0" required></label>
+  <label>追加 worker/reviewer 调用轮次<input name="additional_agent_calls" type="number" min="0" max="100000" value="0" required></label>
+  <p id="resume-error" role="alert" hidden></p>
+  <div class="dialog-footer"><button type="button" class="button secondary" data-close="resume-dialog">返回</button><button class="button primary" id="resume-submit">确认恢复</button></div>
+ </form>
+</dialog>

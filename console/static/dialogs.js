@@ -4,6 +4,46 @@ const loaded=new Map();
 const state={config:null,directionTask:null,directionPending:new Set()};
 let directionTimer,stopTarget;
 let gitSequence=0,gitController;
+let resumeTarget;
+let acceptanceScan=null,acceptanceSequence=0;
+function acceptanceContext(){const f=$('#create-form');return {cwd:f.elements.cwd.value.trim(),task_type:f.elements.task_type.value,python:f.elements.acceptance_python.value.trim()};}
+function acceptanceChanged(){acceptanceSequence++;acceptanceScan=null;$('#acceptance-options').textContent='';$('#acceptance-notice').textContent='项目目录、类型或解释器已改变，请重新扫描。';}
+async function scanAcceptance(){
+ const context=acceptanceContext(),seq=++acceptanceSequence;$('#scan-acceptance').disabled=true;
+ $('#acceptance-notice').textContent='正在只读扫描项目入口…';
+ try{
+  const data=await api('/api/acceptance/scan',context);
+  if(seq!==acceptanceSequence||JSON.stringify(context)!==JSON.stringify(acceptanceContext()))return null;
+  acceptanceScan={...data,context};
+  $('#acceptance-options').innerHTML=data.checks.map(c=>`<article class="acceptance-option"><label class="checkbox-label"><input type="checkbox" data-check-id="${escape(c.id)}" ${c.recommended?'checked':''}><span>${escape(c.title)}<small>${escape(c.purpose)}</small></span></label><small>耗时：${escape(c.estimate)}。${escape(c.effects)}</small><details><summary>命令与运行前提</summary><pre>${escape(c.command)}</pre><p>程序：${escape(c.executable)}${c.dependencies.length?'；依赖：'+escape(c.dependencies.join('、')):''}</p></details></article>`).join('')||'<p>没有发现可识别的检查入口。可选择“先制定验收方案”，或由熟悉项目的人补充高级命令；不能据此宣称功能已经验证。</p>';
+  $('#acceptance-notice').textContent=`找到 ${data.checks.length} 项检查入口。${data.notice}`;
+  return acceptanceScan;
+ }catch(error){if(seq===acceptanceSequence)$('#acceptance-notice').textContent=error.message;return null;}
+ finally{$('#scan-acceptance').disabled=false;}
+}
+function acceptancePlan(){
+ const f=$('#create-form');
+ if(!acceptanceScan||JSON.stringify(acceptanceScan.context)!==JSON.stringify(acceptanceContext()))throw new Error('请先扫描当前项目并确认检查项');
+ return {task_type:f.elements.task_type.value,python:acceptanceScan.python,signature:acceptanceScan.signature,
+  criteria:f.elements.acceptance_criteria.value.trim(),selected_ids:f.elements.verification_mode.value==='planning'?[]:[...$('#acceptance-options').querySelectorAll('[data-check-id]:checked')].map(c=>c.dataset.checkId)};
+}
+let deleteTarget;
+export async function confirmDelete(id){
+ try{
+  await ensure('delete');const task=await api(`/api/tasks/${id}`);
+  if(!task.actions.includes('delete'))throw new Error('任务仍在执行或状态尚未确认，请先停止');
+  deleteTarget=id;$('#delete-task-title').textContent=task.title;$('#delete-error').hidden=true;
+  if(!$('#delete-dialog').open)$('#delete-dialog').showModal();
+ }catch(error){toast(error.message,true);}
+}
+export async function openResume(id){
+ try{
+  await ensure('resume');const task=await api(`/api/tasks/${id}`);resumeTarget=id;
+  const u=task.usage||task.health?.usage||{};
+  $('#resume-usage').textContent=`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
+  $('#resume-form').reset();$('#resume-error').hidden=true;$('#resume-dialog').showModal();
+ }catch(error){toast(error.message,true);}
+}
 async function ensure(name){
  if(!loaded.has(name))loaded.set(name,(async()=>{
    if(!$('#dialog-styles')){const link=document.createElement('link');link.id='dialog-styles';link.rel='stylesheet';link.href='/dialogs.css';document.head.append(link);}
@@ -32,6 +72,7 @@ function configureForm() {
   $("#workspace-name").textContent =
     state.config.cwd.split("/").filter(Boolean).at(-1) || "/";
   updateProviderHint();
+  acceptanceChanged();
 }
 function updateProviderHint() {
   if (!state.config) return;
@@ -120,14 +161,60 @@ export async function openGitRecord(id,commit){
  finally{if(seq===gitSequence&&$('#git-record-loading'))$('#git-record-loading').hidden=true;}
 }
 function bind(name){
+ if(name==='delete'){
+  $('#confirm-delete').addEventListener('click',async()=>{
+   const id=deleteTarget;if(!id)return;
+   $('#confirm-delete').disabled=true;$('#delete-error').hidden=true;
+   try{
+    await api(`/api/tasks/${id}/delete`,{confirm:id});
+    localStorage.removeItem(`auto-moniter-direction-${id}`);
+    $('#delete-dialog').close();
+    if(document.body.dataset.taskId===id||new URLSearchParams(location.search).get('task')===id){location.assign('/tasks');return;}
+    toast('任务已删除，项目与运行记录已保留');await refresh();
+   }catch(error){$('#delete-error').hidden=false;$('#delete-error').textContent=error.message;}
+   finally{$('#confirm-delete').disabled=false;}
+  });return;
+ }
+ if(name==='resume'){
+  $('#resume-form').addEventListener('submit',async e=>{
+   e.preventDefault();const id=resumeTarget;const data=Object.fromEntries(new FormData(e.target));
+   for(const key of Object.keys(data))data[key]=Number(data[key]);
+   $('#resume-submit').disabled=true;$('#resume-error').hidden=true;
+   try{await api(`/api/tasks/${id}/resume`,data);$('#resume-dialog').close();toast('已请求恢复');await refresh();}
+   catch(error){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;}
+   finally{$('#resume-submit').disabled=false;}
+  });return;
+ }
  if(name==='git'){$('#git-record-dialog').addEventListener('close',()=>{gitSequence++;gitController?.abort();});return;}
  if(name==='confirm'){$('#confirm-stop').addEventListener('click',()=>{const id=stopTarget;$('#confirm-dialog').close();if(id)runAction(id,'stop');});return;}
  if(name==='create'){
+  for(const key of ['cwd','task_type','acceptance_python'])$('#create-form').elements[key].addEventListener('input',acceptanceChanged);
+  $('#scan-acceptance').addEventListener('click',scanAcceptance);
+  $('#preflight-acceptance').addEventListener('click',async()=>{
+   const sequence=acceptanceSequence;
+   $('#preflight-acceptance').disabled=true;
+   try{
+    const plan=acceptancePlan();if(!plan.selected_ids.length)throw new Error('请先选择需要检查运行前提的项目检查项');
+    const result=await api('/api/acceptance/preflight',{cwd:acceptanceContext().cwd,acceptance_plan:plan});
+    if(sequence!==acceptanceSequence)return;
+    $('#acceptance-notice').textContent=(result.ready?'运行前提已就绪，尚未执行业务检查。':'运行环境尚未就绪，尚未执行业务检查。')+result.checks.map(c=>`${c.title}：${c.errors.join('；')||'前提就绪'}`).join('。');
+   }catch(error){if(sequence===acceptanceSequence)$('#acceptance-notice').textContent=error.message;}
+   finally{$('#preflight-acceptance').disabled=false;}
+  });
   $('#provider-select').addEventListener('change',updateProviderHint);$('#reviewer-select').addEventListener('change',updateProviderHint);
   $('#create-form').elements.auto_start.addEventListener('change',e=>$('#create-submit').textContent=e.target.checked?'创建并启动任务':'保存待启动任务');
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
-   for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every'])data[key]=Number(data[key]);
+   for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
+   data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);
+   try{data.modules=JSON.parse(data.modules||'[]');}catch(error){$('#form-error').hidden=false;$('#form-error').textContent='模块清单需要有效 JSON 数组';return;}
+   try{data.quality_policy=JSON.parse(data.quality_policy||'{}');}catch(error){$('#form-error').hidden=false;$('#form-error').textContent='质量策略需要有效 JSON 对象';return;}
+   $('#create-submit').disabled=true;
+   try{
+    if(!acceptanceScan&&data.verification_mode!=='executable')await scanAcceptance();
+    data.acceptance_plan=acceptancePlan();
+    if(data.verification_mode==='executable'&&!data.acceptance_plan.selected_ids.length&&!data.checks.length)throw new Error('请选择至少一个检查项；没有入口时可以先制定验收方案');
+   }catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;$('#create-submit').disabled=false;return;}
    $('#create-submit').disabled=true;$('#form-error').hidden=true;
    try{const t=await api('/api/tasks',data);location.assign(`/tasks/${t.id}`);}
    catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;}

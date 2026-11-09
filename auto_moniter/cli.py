@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--memory-bytes", type=_nonnegative_int, default=0, help="Per-process virtual memory limit, inherited by native worker/check children")
     run.add_argument("--file-bytes", type=_nonnegative_int, default=0, help="Per-file write size limit for native subprocesses")
     run.add_argument("--max-run-bytes", type=_nonnegative_int, default=0, help="Monitor run directory storage budget, checked periodically")
+    run.add_argument('--max-history-bytes', type=_nonnegative_int, default=0, help='Shared Git object store plus task history budget; sampled every 10s; 0 disables')
+    run.add_argument('--max-agent-state-bytes', type=_nonnegative_int, default=0, help='Shared native provider session store budget; sampled every 10s; 0 disables')
     run.add_argument("--max-rounds", type=_nonnegative_int, default=0, help="Stop after N worker rounds. 0 means until accepted.")
     run.add_argument("--turn-timeout", default=None, help="Per-turn limit, for example 30m, 2h (default: 0; inherited on resume).")
     run.add_argument("--idle-timeout", default=None, help="Restart a turn with no CLI output for this long (default: 15m; inherited on resume). 0 disables.")
@@ -99,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-dir", type=Path, help="Directory for prompts, logs, and the report")
     run.add_argument("--keep-rounds", type=_nonnegative_int, default=None, help="Retain artifacts and detailed records for the latest N rounds; 0 retains all (default: 100; inherited on resume)")
     run.add_argument("--modules", type=Path, help="Optional JSON array of module definitions: id, title, acceptance")
+    run.add_argument('--workflow', choices=['review-first','legacy'], help='New reviewed tasks default to requirements review first, then approval-only local commits; old checkpoints retain legacy order')
+    run.add_argument('--quality-policy', type=Path, help='Immutable JSON requirements, baseline protection and verified-progress policy')
     run.add_argument("--max-runtime", default="0", help="Total active monitor runtime budget, including resumed runs; 0 disables")
     run.add_argument("--max-agent-calls", type=_nonnegative_int, default=0, help="Total worker/reviewer turns across resumed runs; 0 disables")
     run.add_argument("--max-output-bytes", type=_positive_int, default=None, help="Combined output limit per subprocess (default: 8 MiB; inherited on resume)")
@@ -277,6 +281,8 @@ def _run(args: argparse.Namespace) -> int:
         review_every=args.review_every,
         git_history=args.git_history,
         modules=definitions(json.loads(args.modules.expanduser().read_text(encoding="utf-8"))) if args.modules else [],
+        quality_policy=json.loads(args.quality_policy.expanduser().read_text()) if args.quality_policy else {},
+        workflow=args.workflow or ('auto' if args.resume else 'legacy' if args.no_review else 'review-first'),
         max_runtime_s=_parse_duration(args.max_runtime),
         max_agent_calls=args.max_agent_calls,
         max_output_bytes=args.max_output_bytes,
@@ -284,6 +290,7 @@ def _run(args: argparse.Namespace) -> int:
         keep_rounds=args.keep_rounds,
         worker_isolation=args.worker_isolation, protect_paths=args.protect,
         memory_bytes=args.memory_bytes, file_bytes=args.file_bytes, max_run_bytes=args.max_run_bytes,
+        max_history_bytes=args.max_history_bytes, max_agent_state_bytes=args.max_agent_state_bytes,
     )
     report = (Guardian(config, max_restarts=args.guard_restarts, delay_s=_parse_duration(args.guard_delay), shutdown_s=_parse_duration(args.guard_stop_timeout)).run()
               if args.guard else Supervisor(config).run())

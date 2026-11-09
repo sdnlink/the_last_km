@@ -28,6 +28,20 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
     kind = value.get('type', '')
     if not isinstance(kind, str):
         return []
+    if kind in {'assistant','user'} and isinstance(value.get('message'),dict):
+        events=[]
+        for block in value['message'].get('content',[]):
+            if not isinstance(block,dict):
+                continue
+            if kind=='assistant' and block.get('type')=='text' and isinstance(block.get('text'),str):
+                events.append({'at':at or now(),'kind':'message','text':redact(block['text'])[:4000]})
+            elif block.get('type')=='tool_use':
+                events.extend(_public_events({'type':'function_call','name':block.get('name'),
+                                             'arguments':block.get('input',{}),'call_id':block.get('id')},at))
+            elif block.get('type')=='tool_result':
+                events.extend(_public_events({'type':'tool_result','content':block.get('content'),
+                                             'call_id':block.get('tool_use_id')},at))
+        return events
     if kind == 'response_item':
         item = value.get('payload') or {}
     elif kind == 'event_msg':

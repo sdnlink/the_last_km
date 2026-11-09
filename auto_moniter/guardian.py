@@ -14,11 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_moniter.storage import write_json
-from auto_moniter.paths import default_run_dir, private_directory, workspace_lock, state_root
+from auto_moniter.paths import default_run_dir, private_directory, state_root
 from auto_moniter.redaction import redact
 from auto_moniter.health import valid_report
 from auto_moniter.supervisor import RunConfig, RunReport, Supervisor
 from auto_moniter.workspace import LockError, file_lock
+from auto_moniter.locking import workspace_lease
 
 
 def _monitor(config: RunConfig, sender) -> None:
@@ -80,7 +81,7 @@ class Guardian:
         try:
             with file_lock(self.run_dir / "guardian.lock"):
                 # Refuse to wrap an already-running independent monitor.
-                with file_lock(workspace_lock(self.config.cwd)), file_lock(self.config.cwd / ".auto-moniter/workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
+                with workspace_lease(self.config.cwd), file_lock(self.config.cwd / ".auto-moniter/workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
                     if not self.config.resume and any((self.run_dir / name).exists() for name in ("state.json", "report.json", "requirement.md", "baseline.json.gz")):
                         return RunReport("invalid", 0, "Run directory already contains a run. Use --resume or a new --run-dir.", "invalid")
                     if self.config.resume and (self.run_dir / "guardian.json").exists():

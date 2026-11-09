@@ -105,7 +105,7 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'继续�
         self.fail('task did not reach expected state')
 
     def stopped_task(self):
-        task = self.original.create({'title': 'Imported recovery fixture', 'requirement': 'local fixture',
+        task = self.original.create({'title': 'Imported recovery fixture', 'requirement': 'local fixture', 'workflow':'legacy',
                                      'cwd': str(self.project), 'provider': 'codex', 'reviewer': 'codex',
                                      'model': 'worker-fixture', 'reviewer_model': 'review-fixture', 'auto_start': True})
         self.wait_for(lambda: self.original.detail(task['id'])['status'] == 'running')

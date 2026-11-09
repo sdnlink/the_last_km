@@ -41,6 +41,8 @@ def review_wait(state: dict, health: dict, status: str, rounds: list, current_ro
         reason = '任务已暂停，恢复后继续调度审核。'
     elif status not in {'running', 'starting'}:
         reason = '任务当前未在执行；下方为最近一次审核结论。' if last else '任务当前未在执行，尚无审核结论。'
+    elif phase == 'refining_requirements':
+        reason='reviewer 正在补充需求、验收标准与边界；worker 尚未开始实现。'
     elif phase == 'reviewing':
         reason = f'正在独立审核第 {current_round} 轮工作及项目改动。'
     elif phase == 'validating':
@@ -77,7 +79,7 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
     phase = health.get('phase')
     round_match = re.search(r'\bround (\d+):', health.get('activity', ''))
     current_round = int(round_match[1]) if round_match else activity.get('round')
-    current = 'worker' if phase == 'working' else 'reviewer' if phase == 'reviewing' else None
+    current = 'worker' if phase == 'working' else 'reviewer' if phase in {'reviewing','refining_requirements'} else None
     events = activity.get('events', [])
     workflow = [event for event in events if not conclusion_event(event)]
     roles = {}

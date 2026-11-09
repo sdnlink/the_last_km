@@ -30,6 +30,18 @@ class ReviewIsolation:
         for path in dict.fromkeys([self.cwd, self.run_dir]):
             if path.exists():
                 argv.extend(["--ro-bind", str(path), str(path)])
+        # The opt-in files-only reviewer has no deployment credential mounts.
+        # This is a capability reduction, not an HTTP endpoint firewall.
+        import json
+        try:
+            files_only = json.loads((self.run_dir / 'state.json').read_text()).get('quality_policy', {}).get('review_tools') == 'files_only'
+        except FileNotFoundError:
+            files_only = False
+        if files_only and not isinstance(self, WorkerIsolation):
+            for relative in ('.aws', '.ssh', '.kube', '.docker', '.config/gcloud'):
+                secret_dir = Path.home() / relative
+                if secret_dir.is_dir() and not self.cwd.is_relative_to(secret_dir.resolve()):
+                    argv += ['--tmpfs', str(secret_dir)]
         argv.extend(["--chdir", str(self.cwd), "--", *command.argv])
         return PreparedCommand(argv, stdin_text=command.stdin_text)
 
@@ -72,6 +84,11 @@ class WorkerIsolation(ReviewIsolation):
                     raise ProviderError(f"Invalid protected validation path: {name}")
                 protected.append(candidate)
             import shlex
+            for name in state.get('acceptance_baseline_paths', []):
+                candidate = Path(name)
+                if not candidate.exists() or not candidate.is_relative_to(self.cwd):
+                    raise ProviderError('Acceptance baseline missing: ' + name)
+                protected.append(candidate)
             for command_text in state.get("checks", []):
                 for token in shlex.split(command_text):
                     candidate = (self.cwd / token).resolve()

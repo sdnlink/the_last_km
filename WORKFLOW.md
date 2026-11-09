@@ -1,0 +1,36 @@
+# 需求先审、实现复审、通过后本地提交
+
+新建 Web 任务与带 reviewer 的新 CLI 任务默认使用 review-first 流程：
+
+1. 保留用户原始需求、固定模块、验收命令和质量策略。
+2. reviewer 以只读权限阅读项目，补充完善后的需求、验收条件、约束、假设和真实外部阻塞。该阶段不表示功能完成，不允许修改项目或生成提交。
+3. watcher 校验补充结果，将其保存到 reviewed-requirement.json 和检查点。缺少有效结果、有未决外部问题、执行失败或 reviewer 写入项目时，不启动 worker，返回需要处理。
+4. watcher 将原始需求与完善后的需求同时交给 worker，原要求和授权边界仍有效，补充内容不能覆盖或削弱原标准。
+5. worker 实现并返回结论；每轮正常结果由 reviewer 复核。完成候选之外的实现进展也会送审；超时、失败等按恢复策略处理。
+6. reviewer 的缺口进入 AUD 台账，watcher 将问题和下一步要求反馈给 worker；只有 reviewer 用有效证据才能关闭问题。
+7. worker/reviewer 共同确认可交付且 watcher 的版本、证据、模块、审计和命令检查通过后，watcher 创建本地审计分支提交。未通过轮次不生成提交，反馈保存在运行记录；不会推送远程，也不会自动合并或切换用户业务分支。
+8. 单模块通过后结束对应会话并继续原需求的剩余模块；全部要求通过才完成任务。
+
+## Git 的边界
+
+新流程审查前可以写入 Git blob/tree 对象，用于准确核对当轮输入与待审改动；它们是不可变待审快照，不是提交，不会推进分支。第一次通过后才生成输入基线及对应 worker/reviewer 的提交。审核必须引用完整待审树哈希。
+
+本地已批准提交保存于 auto-moniter/<运行标识> 审计分支。原业务 HEAD 和真实暂存区不会由 watcher 切换或提交。worker 被明确禁止自行提交、暂存、推送或改 Git refs；检查发现业务 HEAD 被外部修改会停止。provider 隔离的约束属于提示和事后检测，需要 OS 阻止 Git 写入时，应使用 strict worker 并将 .git（linked worktree 须注意真实公共 Git 目录）设为保护路径；不能把事后发现理解成从未发生过写入。
+
+运行目录和 Git 对象仍受原容量预算与清理规则约束，没有整库 review-backup。失败轮次的源文件不会被回滚，worker 在同一工作区继续修复。
+
+## 恢复与兼容
+
+workflow、原始需求哈希及完善结果都在检查点中。恢复时沿用原流程，已就绪的需求完善不会重复运行；完善失败的任务可在解决环境或外部条件后恢复。旧检查点缺少 workflow 字段时按 legacy 处理，不静默升级其每轮 Git 留痕策略。
+
+CLI 新建可显式使用 --workflow review-first；历史兼容可显式选择 --workflow legacy。--no-review 的 CLI 继续使用 legacy，不能声称满足双方审核流程。直接调用 Python RunConfig 的默认值保持 legacy 以兼容既有集成，使用新流程时显式传 workflow='review-first'。
+
+原需求和原验收标准不会被 reviewer 改写。自然语言完善不等于自动证明需求覆盖完整，仍应配置固定模块和质量策略。
+
+## Grok worker 没有进入实现时
+
+grok 可执行文件存在不等于已经认证。遇到 Not signed in、要求 XAI_API_KEY 或 grok login 的错误，watcher 现在将其分类为认证失败并返回 action_required，不继续耗费轮次重试。Web 会展示认证不可用的处理提示。
+
+在启动控制台的同一用户下执行 grok login --device-code，或通过控制台服务环境提供 XAI_API_KEY；不要将密钥写入需求、表单命令或公开日志。环境变量方式通常需要重新启动控制台使其继承新环境，再恢复原任务。
+
+Grok 使用 streaming-json 输出公开消息和工具进度；私有推理不会作为工作进展展示。未完成真实认证时，不能用离线适配测试声称模型已正常工作。

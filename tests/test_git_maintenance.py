@@ -199,3 +199,70 @@ class GitMaintenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'待恢复的提交记录'):
                     with inactive_run(run):
                         self.fail('Pending recovery cannot be deleted')
+
+    def unapproved_task(self):
+        from auto_moniter.approved_history import ApprovedHistory
+        run=self.runs/'unapproved';run.mkdir()
+        history=ApprovedHistory(self.root,run)
+        before=history.begin_round(1)
+        (self.root/'app.py').write_text('unapproved work remains in workspace\n')
+        history.prepare_review(1,before)
+        self.assertFalse(history.head)
+        state={'cwd':str(self.root),'state_version':1,'status':'max_rounds','git_history':history.export()}
+        (run/'state.json').write_text(json.dumps(state));(run/'report.json').write_text(json.dumps({'status':'max_rounds','git_history':history.export()}))
+        (run/'supervisor.lock').touch()
+        return run,history
+
+    def test_failed_task_without_approval_does_not_leave_orphan_work_ref(self):
+        run,history=self.unapproved_task()
+        result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,include_failed=True,apply=True)
+        self.assertEqual(result['errors'],[])
+        self.assertFalse(history.git('rev-parse','--verify',history.work_ref,check=False))
+        self.assertEqual((self.root/'app.py').read_text(),'unapproved work remains in workspace\n')
+        self.assertFalse(archive_path(handle(self.root),history.key).exists())
+        self.assertEqual(json.loads((run/'git-history.json').read_text())['archived']['kind'],'no_approved_history')
+        self.assertFalse(self.maintenance(operation='cleanup',keep_runs=0,older_than=0,
+                                          include_failed=True,apply=True)['runs'][0]['selected'])
+        with self.assertRaisesRegex(ValueError,'no approved audit history'):
+            restore(self.root,run)
+
+    def test_unapproved_failed_candidate_is_preserved_by_default(self):
+        run,history=self.unapproved_task()
+        result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+        self.assertFalse(result['runs'][0]['selected'])
+        self.assertEqual(history.git('rev-parse',history.work_ref).decode().strip(),history.work_head)
+        self.assertNotIn('archived',json.loads((run/'git-history.json').read_text()))
+
+    def test_unapproved_cleanup_retries_after_receipt_was_saved(self):
+        run,history=self.unapproved_task()
+        original=GitHistory.git
+        def fail(obj,*args,**kwargs):
+            if args[:2]==('update-ref','--stdin'):
+                raise ValueError('interrupted work ref removal')
+            return original(obj,*args,**kwargs)
+        with patch.object(GitHistory,'git',fail):
+            interrupted=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,include_failed=True,apply=True)
+        self.assertTrue(interrupted['errors'])
+        self.assertTrue(history.git('rev-parse','--verify',history.work_ref))
+        retried=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,include_failed=True,apply=True)
+        self.assertEqual(retried['errors'],[])
+        self.assertTrue(retried['runs'][0]['selected'])
+        self.assertFalse(history.git('rev-parse','--verify',history.work_ref,check=False))
+
+    def test_unapproved_cleanup_refuses_external_work_ref_changes(self):
+        run,history=self.unapproved_task()
+        external=history.git('rev-parse','HEAD').decode().strip()
+        history.git('update-ref',history.work_ref,external,history.work_head)
+        result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,include_failed=True,apply=True)
+        self.assertTrue(result['errors'])
+        self.assertEqual(history.git('rev-parse',history.work_ref).decode().strip(),external)
+        self.assertNotIn('archived',json.loads((run/'git-history.json').read_text()))
+
+    def test_run_storage_drops_unapproved_pin_before_removing_failed_checkpoint(self):
+        run,history=self.unapproved_task()
+        result=run_storage(self.root,runs_dir=self.runs,keep_runs=0,older_than=0,
+                           include_failed=True,apply=True)
+        self.assertEqual(result['errors'],[])
+        self.assertFalse(run.exists())
+        self.assertFalse(history.git('rev-parse','--verify',history.work_ref,check=False))
+        self.assertEqual((self.root/'app.py').read_text(),'unapproved work remains in workspace\n')

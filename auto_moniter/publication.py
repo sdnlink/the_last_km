@@ -7,6 +7,7 @@ from pathlib import Path
 
 from auto_moniter.git_history import GitHistoryError
 from auto_moniter.storage import write_json
+from auto_moniter.workspace import _ignored
 
 
 def digest(data):
@@ -36,9 +37,18 @@ def business_tree(history, code_index):
     candidate = entries(history, history.candidate['commit'])
     published_tree = history.last_business_commit.get('candidate_tree')
     published = entries(history, published_tree) if published_tree else {}
-    scope = os.fsencode(history.cwd.relative_to(history.root).as_posix())
-    runtime = b'.auto-moniter/' if scope == b'.' else scope + b'/.auto-moniter/'
-    selected = {p for p in original.keys() | candidate.keys() | published.keys() if not p.startswith(runtime)}
+    committed = entries(history, history.business_head['commit']) if history.business_head['commit'] else {}
+    selected = set()
+    for name in original.keys() | candidate.keys() | published.keys() | committed.keys():
+        path = history.root / os.fsdecode(name)
+        try:
+            path.relative_to(history.cwd)
+        except ValueError:
+            continue
+        # HEAD also contains paths deleted before this task's initial snapshot.
+        # Apply the same source scope as review; preserve siblings and outputs.
+        if not _ignored(path, history.run_dir, cwd=history.cwd):
+            selected.add(name)
     zero = b'0' * len(empty)
     changes = b''.join(candidate.get(p, b'0 ' + zero + b'\t' + p + b'\0') for p in sorted(selected))
     if changes:

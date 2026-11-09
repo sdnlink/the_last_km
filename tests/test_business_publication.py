@@ -362,3 +362,25 @@ class BusinessPublicationTests(unittest.TestCase):
             ApprovedHistory(self.root,self.run)
         self.assertEqual(git(self.root,'rev-parse',history.work_ref),self.before)
         self.assertTrue((self.run/'work-checkpoint.json').is_file())
+
+    def test_preexisting_unstaged_deletion_is_included_in_reviewed_publication(self):
+        (self.root/'other.py').unlink()
+        history=self.history()
+        self.submit(history)
+        self.assertNotIn('other.py',git(self.root,'ls-tree','-r','--name-only','HEAD').splitlines())
+        self.assertEqual(git(self.root,'status','--porcelain'),'')
+
+    def test_subproject_preexisting_deletion_preserves_sibling_and_excluded_files(self):
+        sub=self.root/'sub';sub.mkdir()
+        (sub/'app.py').write_text('before\n');(sub/'old.py').write_text('to remove\n')
+        (sub/'build').mkdir();(sub/'build/retained.txt').write_text('tracked excluded file\n')
+        subprocess.run(['git','-C',str(self.root),'add','sub'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=Fixture','-c','user.email=f@local',
+                        'commit','-qm','subproject inputs'],check=True)
+        (sub/'old.py').unlink()
+        history=self.history(sub)
+        self.submit(history)
+        paths=git(self.root,'ls-tree','-r','--name-only','HEAD').splitlines()
+        self.assertNotIn('sub/old.py',paths)
+        self.assertIn('other.py',paths)
+        self.assertIn('sub/build/retained.txt',paths)

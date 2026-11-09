@@ -104,6 +104,26 @@ def migrate(git, run, docs, key):
         git.git('update-ref', '-d', old, source)
 
 
+def work_ref_deletion(git, history, key):
+    ref = history.get('work_ref')
+    if not ref:
+        return ''
+    if ref != 'refs/auto-moniter-work/' + key:
+        raise ValueError('Invalid task work ref')
+    current = ref_value(git, ref)
+    if current and current != history.get('work_head'):
+        raise ValueError('Task work ref changed before archival')
+    return f'delete {ref} {current}\n' if current else ''
+
+
+def save_archive_receipt(run, docs, receipt):
+    for name, value in docs.items():
+        saved = value if name == 'git-history.json' else value.get('git_history')
+        if isinstance(saved, dict):
+            saved['archived'] = receipt
+    save_documents(run, docs)
+
+
 def archive(git, run, docs, key):
     history = docs['git-history.json']
     if (history.get('project') != str(git.cwd)
@@ -115,7 +135,16 @@ def archive(git, run, docs, key):
         docs = documents(run)
         history = docs['git-history.json']
     ref, head = history['ref'], history['head']
+    work_deletion = work_ref_deletion(git, history, key)
     if not head:
+        if ref_value(git, ref):
+            raise ValueError('Unexpected audit ref for task without approved history')
+        # Failed tasks can have a candidate pin without any approved audit.
+        # Persist cleanup intent first so an interrupted deletion is retryable.
+        save_archive_receipt(run, docs, {'ref': ref, 'head': '', 'kind': 'no_approved_history',
+                                       'at': datetime.now(timezone.utc).isoformat()})
+        if work_deletion:
+            git.git('update-ref', '--stdin', data=work_deletion.encode())
         return
     if ref_value(git, ref) != head or checked_out(git, ref):
         raise ValueError('Audit ref changed or is checked out')
@@ -139,21 +168,8 @@ def archive(git, run, docs, key):
                'at': datetime.now(timezone.utc).isoformat()}
     write_json(target.with_suffix('.json'), {'project': str(git.cwd), 'run_dir': str(run),
                'status': docs['state.json']['status'], 'history': history, 'archive': receipt}, durable=True)
-    for name, value in docs.items():
-        saved = value if name == 'git-history.json' else value.get('git_history')
-        if isinstance(saved, dict):
-            saved['archived'] = receipt
-    save_documents(run, docs)
-    transaction = f'delete {ref} {head}\n'
-    work_ref = history.get('work_ref')
-    if work_ref:
-        if work_ref != 'refs/auto-moniter-work/' + key:
-            raise ValueError('Invalid task work ref')
-        current_work = ref_value(git, work_ref)
-        if current_work:
-            if current_work != history.get('work_head'):
-                raise ValueError('Task work ref changed before archival')
-            transaction += f'delete {work_ref} {current_work}\n'
+    save_archive_receipt(run, docs, receipt)
+    transaction = f'delete {ref} {head}\n' + work_deletion
     git.git('update-ref', '--stdin', data=transaction.encode())
     # Only remove monitor-owned flat record files. No project or arbitrary
     # nested directory is eligible for deletion here.
@@ -226,7 +242,9 @@ def maintenance(cwd, *, runs_dirs=None, operation='list', apply=False, older_tha
             if row['reason'] != 'eligible':
                 continue
             if row['archived']:
-                if ref_value(git, docs['git-history.json']['ref']):
+                history = docs['git-history.json']
+                if (ref_value(git, history['ref'])
+                        or ref_value(git, 'refs/auto-moniter-work/' + key)):
                     row.update(selected=True, reason='finish_interrupted_archive')
                 continue
             if position < keep_runs:
@@ -365,6 +383,8 @@ def restore(cwd, run):
             if history.get('project') != str(git.cwd) or history.get('ref') not in ('refs/auto-moniter/'+key, 'refs/heads/auto-moniter/'+key):
                 raise ValueError('Archive does not belong to this project and task')
             ref, head = history['ref'], history['head']
+            if not head:
+                raise ValueError('Task has no approved audit history to restore')
             if not target.is_file() or target.is_symlink():
                 raise ValueError('History archive is absent or expired')
             if not any(line.split()[:2] == [head, ref] for line in git.git('bundle', 'list-heads', str(target)).decode().splitlines()):

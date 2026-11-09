@@ -1610,7 +1610,7 @@ class Supervisor:
                                          "review_schedule": self._review_schedule(),
                                          "audit_issues": self.audit.export(),
                                          "history": self._history_info()}), durable=True)
-        self._write_state(records, status, 0, "", records[-1].tree if records else "")
+        self._write_state(records, status, 0, "", records[-1].tree if records else "", result_summary=report.summary)
         self._beat(f"finished: {status}")
         self.log(f"finished: {status} after {report.rounds} worker rounds")
         self.log(f"report: {path}")
@@ -1661,6 +1661,7 @@ class Supervisor:
         stall: int,
         gap_key: str,
         tree: str,
+        result_summary: str | None = None,
     ) -> None:
         self._prune_history(records)
         baseline_path = self.run_dir / "baseline.json.gz"
@@ -1720,6 +1721,8 @@ class Supervisor:
             "rounds": safe(RunReport(status, 0, "", "", records).to_dict()["records"]),
             "history": self._history_info(),
         }
+        if result_summary is not None:
+            state.update(summary=redact(result_summary), stop_reason=status)
         target = self.run_dir / "state.json"
         write_json(target, state, durable=True)
 

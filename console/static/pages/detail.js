@@ -1,6 +1,6 @@
 import {$,$$,escape,badge,taskButtons,stableHTML} from '/ui.js';
 import {api,watch,toast} from '/core.js';
-import {gitHistoryHTML,renderWorkflow,renderConclusions} from '/task-view.js';
+import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions} from '/task-view.js';
 const id=document.body.dataset.taskId;
 let task,role='all',log='',logSequence=0;
 function render(t){
@@ -12,7 +12,7 @@ function render(t){
  const alerts=[t.control_message,t.resume_unavailable,t.direction_error,t.health.report_warning,t.launch_error].filter(Boolean);
  if(t.health.health==='heartbeat_stale')alerts.push('监督器心跳已超时，请核对 watcher 工作记录。');
  if(t.status==='interrupted')alerts.push('任务执行已中断，可查看工作记录后从检查点恢复。');
- $('#detail-alerts').innerHTML=alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
+ $('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
  const coverage=t.requirement_coverage;
  const coverageHTML=coverage?.requirements?.length?`<h3>上次需求证据覆盖检查</h3><p>此处为历史检查，不代表当前交付确认。核对版本：${escape(coverage.tree||'未记录')}；${coverage.complete?'已满足结构化覆盖门禁':'尚有缺口'}</p><ul class="module-list">${coverage.requirements.map(r=>`<li><span>${escape(r.id)}</span><span>${escape(r.text)} · ${escape((r.evidence||[]).join('、'))}</span><span>${r.covered?'已覆盖':'待核对'}</span></li>`).join('')}</ul>`:'';
  const brief=t.requirements_review;

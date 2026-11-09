@@ -41,7 +41,7 @@
               name="cwd"
               required
               placeholder="/path/to/your/project"
-            /><small>选择 Git 项目目录；通过审核和验收的代码提交到启动时的业务分支；结论保存在独立审计引用。</small></label
+            /><small>填写可写的 Git 项目完整路径；通过审核和验收的代码提交到启动时的业务分支；结论保存在独立审计引用。</small></label
           >
           <div class="form-grid">
             <label
@@ -119,19 +119,20 @@
               <small>时长、调用和执行轮次上限设为 0 表示不限。暂停在当前轮次结束后生效。</small>
               <div class="form-grid">
                 <label>审核隔离<select name="review_isolation"><option value="strict">strict：系统强制只读（原生 reviewer）</option><option value="provider">provider：执行器只读模式</option></select></label>
-                <label>worker 隔离<select name="worker_isolation"><option value="provider">provider</option><option value="strict">strict：项目外只读，保护验收资产</option></select></label>
+                <label>worker 隔离<select name="worker_isolation"><option value="provider">provider：执行器权限模式</option><option value="strict">strict：项目外只读，保护验收资产</option></select></label>
               </div>
               <label>保护路径<textarea name="protect_paths" rows="2" placeholder="每行一个项目内相对路径，例如 tests"></textarea><small>需要 strict worker；运行目录须在目标项目之外。</small></label>
               <label>固定模块清单（JSON）<textarea name="modules" rows="4" placeholder='[{"id":"API","title":"接口","acceptance":["正负路径通过"],"depends_on":[],"checks":["python -m unittest"]}]'></textarea><small>固定原始需求及检查，防止模型自行缩小范围。留空时由 worker 提出计划；验收命令为空不代表功能经过测试。</small></label>
               <div class="form-grid thirds">
-                <label>单轮超时（秒）<input name="turn_timeout" type="number" min="0" value="1800" required></label>
-                <label>无输出超时（秒）<input name="idle_timeout" type="number" min="0" value="900" required></label>
-                <label>单条验收超时（秒）<input name="check_timeout" type="number" min="1" value="600" required></label>
+                <label>单轮超时（秒）<input name="turn_timeout" type="number" min="0" max="9007199254740991" value="1800" required></label>
+                <label>无输出超时（秒）<input name="idle_timeout" type="number" min="0" max="9007199254740991" value="900" required></label>
+                <label>单条验收超时（秒）<input name="check_timeout" type="number" min="1" max="9007199254740991" value="600" required></label>
               </div>
-              <label>保留最近轮数<input name="keep_rounds" type="number" min="0" value="50" required></label>
-              <label>运行目录字节上限<input name="max_run_bytes" type="number" min="0" value="67108864" required></label>
-              <label>共享 Git 对象与审计历史字节上限<input name="max_history_bytes" type="number" min="0" value="536870912" required></label>
-              <label>本机模型会话目录字节上限<input name="max_agent_state_bytes" type="number" min="0" value="4294967296" required><small>包含已有会话及其他任务；容量每 10 秒采样，超限停止，不自动删除历史。0 关闭对应限制，不是文件系统硬配额。</small></label>
+              <small>单轮和无输出超时设为 0 表示关闭该超时；单条验收超时必须大于 0。以上时间均以秒计。</small>
+              <label>保留最近轮数<input name="keep_rounds" type="number" min="0" max="9007199254740991" value="50" required><small>0 表示保留全部轮次记录，不按轮数裁剪；仍受容量上限约束。</small></label>
+              <label>运行目录字节上限<input name="max_run_bytes" type="number" min="0" max="9007199254740991" value="67108864" required></label>
+              <label>共享 Git 对象与审计历史字节上限<input name="max_history_bytes" type="number" min="0" max="9007199254740991" value="536870912" required></label>
+              <label>本机模型会话目录字节上限<input name="max_agent_state_bytes" type="number" min="0" max="9007199254740991" value="4294967296" required><small>包含已有会话及其他任务；容量每 10 秒采样，超限停止，不自动删除历史。0 关闭对应限制，不是文件系统硬配额。</small></label>
             </div>
           </details>
           <label class="checkbox-label"

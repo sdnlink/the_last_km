@@ -32,6 +32,7 @@ from console.recovery import resume_arguments
 from console.workflow import work_details
 from console.git_records import read_git_record, GitRecordError
 from console.conclusions import present_conclusion
+from console.diagnostics import diagnose, console_result
 
 
 PROVIDERS = ('codex', 'claude', 'grok', 'gemini', 'cursor', 'antigravity', 'paseo')
@@ -301,6 +302,9 @@ class TaskStore:
         work = work_details(work_state, health, progress, status, heartbeat, guardian,
                             meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                             meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'))
+        failure = diagnose(status, state, meta, health, guardian, run, details=include_details)
+        if failure:
+            work['roles']['watcher']['current_work'] = failure['title'] + '：' + failure['reason']
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
@@ -315,6 +319,7 @@ class TaskStore:
                      'started_at': meta.get('started_at'), 'resources': resources,
                      'modules': modules, 'accepted_modules': accepted, 'total_modules': len(modules),
                      'summary': state.get('summary') or (state.get('last_worker') or {}).get('summary', ''),
+                     'failure': failure,
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),
                      'git_history': state.get('git_history', {'enabled': False}),
                      'git_checkpoints': [{**item['git_checkpoint'], 'summary': present_conclusion(item).get('summary', ''),
@@ -347,6 +352,7 @@ class TaskStore:
         result['health'] = {key: view.get('health', {}).get(key) for key in
                             ('health', 'phase', 'rounds', 'heartbeat_age_s', 'usage')}
         result['summary'] = str(view.get('summary') or (view.get('last_worker') or {}).get('summary') or '')[:500]
+        result['failure'] = {key:view['failure'].get(key) for key in ('code','title','reason','phase','role','round')} if view.get('failure') else None
         result['roles'] = {role: {'status': item.get('status'), 'current_work': str(item.get('current_work') or '')[:300]}
                            for role, item in (view.get('work', {}).get('roles') or {}).items()}
         return result
@@ -381,7 +387,7 @@ class TaskStore:
     def progress(self, ident: str) -> dict:
         view = self.detail(ident)
         keys = ('id', 'title', 'cwd', 'status', 'health', 'activity', 'work', 'actions', 'control',
-                'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable')
+                'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable', 'failure')
         result = {key: view.get(key) for key in keys}
         work = view.get('work') or {}
         result['work'] = {**work, 'conclusions': [next((c for c in reversed(work.get('conclusions', []))
@@ -456,10 +462,19 @@ class TaskStore:
         title, requirement = text('title', maximum=160), text('requirement')
         if not title or not requirement:
             raise TaskError('请填写任务名称和开发需求')
-        cwd = Path(text('cwd', str(self.cwd))).expanduser().resolve()
+        cwd_text = text('cwd', str(self.cwd), maximum=4000)
+        if not cwd_text:
+            raise TaskError('请填写项目目录；留空不会自动选择项目，请使用项目的完整路径')
+        try:
+            cwd = Path(cwd_text).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise TaskError('项目目录无法解析，请检查路径、符号链接和访问权限') from exc
         if not cwd.is_dir() or not os.access(cwd, os.W_OK):
             raise TaskError('项目目录不存在或不可写')
         provider, reviewer = text('provider', 'codex'), text('reviewer', 'claude')
+        models = {key: text(key, maximum=200) for key in ('model', 'reviewer_model')}
+        backends = {'paseo_backend': text('paseo_backend', DEFAULT_PASEO_BACKEND, 200),
+                    'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
@@ -518,9 +533,12 @@ class TaskStore:
         if type(auto_start) is not bool:
             raise TaskError('auto_start 必须是布尔值')
         try:
-            execution = settings(data, cwd)
-        except (ValueError, TypeError) as exc:
+            # Validate the same normalized role/backend values that are saved and launched.
+            execution = settings({**data, 'provider': provider, 'reviewer': reviewer, **backends}, cwd)
+        except (ValueError, TypeError, OSError, RuntimeError) as exc:
             raise TaskError(str(exc)) from exc
+        if execution['worker_isolation'] == 'strict' and self.runs_dir.is_relative_to(cwd):
+            raise TaskError('strict worker 的运行目录必须位于目标项目外；请使用外部 --data-dir', 409)
         with self._lock:
             ident = uuid.uuid4().hex
             run = self.runs_dir / ident
@@ -536,9 +554,7 @@ class TaskStore:
                     raise TaskError('最多选择或填写 20 条验收检查')
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
-                    'model': text('model', maximum=200), 'reviewer_model': text('reviewer_model', maximum=200),
-                    'paseo_backend': text('paseo_backend', DEFAULT_PASEO_BACKEND, 200),
-                    'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200),
+                    **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
             if guided:
@@ -679,6 +695,7 @@ class TaskStore:
             # communicate() runs off the request thread and reaps the detached CLI on exit.
             meta.update(status='starting', started_at=timestamp(), launcher=process_identity(child.pid))
             meta.pop('error', None)
+            meta.pop('exit_summary', None)
             self._children[meta['id']] = child
             self._save(meta)
             threading.Thread(target=self._wait, args=(meta['id'], child, meta['requirement']), daemon=True).start()
@@ -696,6 +713,9 @@ class TaskStore:
                 meta = read_json(self.tasks_dir / (ident + '.json'))
                 if meta:
                     meta['exit_code'] = child.returncode
+                    result = console_result(Path(meta['run_dir']))
+                    if result:
+                        meta['exit_summary'] = result['summary']
                     self._save(meta)
                 self._children.pop(ident, None)
 

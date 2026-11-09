@@ -1,4 +1,8 @@
 import {$,$$,escape,duration,active,roleStatuses,timeLabel,stableHTML} from './ui.js';
+function failureHTML(task){
+ const f=task.failure;if(!f)return '';
+ return `<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · 第 '+escape(f.round)+' 轮':''} · ${escape(f.role||'watcher')}${f.exit_code!=null?' · 监督进程退出码 '+escape(f.exit_code):''}</p>${f.expected_commit?`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${f.raw_summary?`<details data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||'运行记录')}</summary><pre>${escape(f.raw_summary)}</pre></details>`:''}${f.recent_failures?.length?`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
+}
 function checkpointHTML(id, c) {
   const cp=c.git_checkpoint||c;
   if(!cp.commit)return '';
@@ -73,4 +77,4 @@ function renderConclusions(t) {
   stableHTML($("#detail-conclusions"),html);
 }
 
-export {gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions};
+export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions};

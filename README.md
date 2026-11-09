@@ -261,6 +261,8 @@ cat REQUIREMENT.md | auto-moniter run --cwd /path/to/project --provider claude -
 
 完整的启动入口、全部 run 参数、默认值、互斥限制、恢复规则及运行示例见 [启动与运行参数完整说明](docs/cli-reference.md)。`start.sh` 只接受 Web 服务参数；worker/reviewer 参数应在页面选择或交给 `auto-moniter run`。CLI 与 Web 默认预算和隔离设置不同，详见该说明中的对照表。
 
+任务异常结束后，Web 列表显示原因标题，详情和实时进展显示 watcher 最终原因、停止阶段、原始错误及处理建议；worker 的历史完成声明单独保留。外部业务提交改变审核基线时会停止并提示核对，不能用改写检查点绕过版本保护。诊断来源、历史任务复盘及维护建议见 [任务停止原因说明](docs/task-failure-diagnostics.md)。
+
 | 参数 | 用法 |
 | --- | --- |
 | `--model MODEL` | 指定工人模型；省略时使用对应 CLI 的默认模型 |

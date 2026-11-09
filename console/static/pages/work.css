@@ -384,3 +384,8 @@
 .watcher-outcome details { margin-top:8px; }
 .watcher-outcome summary { cursor:pointer; }
 .watcher-outcome ul { padding-left:18px; margin:8px 0 0; overflow-wrap:anywhere; }
+.task-failure { margin: 14px 0; padding: 18px; }
+.task-failure h3 { margin: 0 0 10px; }
+.task-failure ul { padding-left: 22px; }
+.task-failure li { margin: 6px 0; }
+.task-failure pre, .task-failure code { white-space: pre-wrap; overflow-wrap: anywhere; }

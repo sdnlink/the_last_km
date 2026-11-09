@@ -24,12 +24,17 @@ def settings(data, cwd):
     if not isinstance(paths, list) or len(paths) > 100 or any(not isinstance(p, str) or not p or '\0' in p for p in paths):
         raise ValueError('保护路径必须是字符串数组')
     for name in paths:
-        p = (cwd / name).resolve()
+        try:
+            p = (cwd / name).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError('保护路径无法解析，请检查符号链接和访问权限') from exc
         if Path(name).is_absolute() or not p.exists() or p == cwd or not p.is_relative_to(cwd):
             raise ValueError('保护路径必须存在于项目内')
     if paths and result['worker_isolation'] != 'strict':
         raise ValueError('保护路径需要 strict worker 隔离')
     plan = data.get('modules', [])
+    if not isinstance(plan, list):
+        raise ValueError('固定模块清单必须是 JSON 数组；不配置模块时请使用 []')
     result['modules'] = [{k: v for k, v in m.items() if k in {'id', 'title', 'acceptance', 'checks', 'depends_on', 'files'}}
                          for m in ModuleLedger(plan).export()]
     result['protect_paths'] = paths

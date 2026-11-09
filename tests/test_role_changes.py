@@ -68,6 +68,14 @@ class RoleChangeTests(unittest.TestCase):
         write_json(self.run/'state.json',state)
         return state
 
+    def save_stopped_policy(self, monitor):
+        # Test saved strict policy and authorization, not OS namespace support.
+        # No role may execute while constructing this stopped checkpoint.
+        with patch('auto_moniter.supervisor.ReviewIsolation') as boundary:
+            boundary.return_value.wrap.side_effect = AssertionError('A stopped policy fixture must not execute an agent')
+            monitor.request_stop()
+            self.assertEqual(monitor.run().status, 'stopped')
+
     def test_switch_requires_exact_authorization_and_discards_old_sessions(self):
         state=self.checkpoint();new=self.monitor('grok',resume=True)
         with self.assertRaisesRegex(ValueError,'providers'):
@@ -126,7 +134,7 @@ class RoleChangeTests(unittest.TestCase):
                 reviewer=resolve_provider('codex'),run_dir=run,git_history='off',
                 checks=args.check,review_isolation=args.review_isolation,worker_isolation=args.worker_isolation,
                 protect_paths=args.protect,workflow='legacy'),log=lambda _:None)
-            monitor.request_stop();self.assertEqual(monitor.run().status,'stopped')
+            self.save_stopped_policy(monitor)
             before=(run/'state.json').read_bytes()
             with patch('console.tasks.discover_providers',return_value={'codex':'codex','grok':'grok'}):
                 changed=store.action(task['id'],'roles',{'provider':'grok','model':'grok-4.5',
@@ -183,8 +191,7 @@ class RoleChangeTests(unittest.TestCase):
                 checks=args.check, review_isolation=args.review_isolation,
                 worker_isolation=args.worker_isolation, protect_paths=args.protect,
                 workflow='legacy'), log=lambda _: None)
-            monitor.request_stop()
-            self.assertEqual(monitor.run().status, 'stopped')
+            self.save_stopped_policy(monitor)
             state = json.loads((run / 'state.json').read_text())
             expected_from = {
                 'review_isolation': state['provider_config']['review_isolation'],

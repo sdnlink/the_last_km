@@ -138,7 +138,8 @@ class AcceptanceGuideTests(unittest.TestCase):
   agent.chmod(0o700)
   with patch.dict(os.environ,{'PATH':str(binaries)+os.pathsep+os.environ['PATH']}):
    task=self.store.create({'title':'guided real CLI','requirement':'implement fixture','provider':'codex','reviewer':'codex',
-          'verification_mode':'executable','acceptance_plan':self.plan(['python-unittest']),'auto_start':True})
+          'verification_mode':'executable','acceptance_plan':self.plan(['python-unittest']),
+          'review_isolation':'provider','auto_start':True})
    deadline=time.monotonic()+15;detail=task
    while time.monotonic()<deadline:
     detail=self.store.detail(task['id'])

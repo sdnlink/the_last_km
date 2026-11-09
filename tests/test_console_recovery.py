@@ -107,7 +107,8 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'继续�
     def stopped_task(self):
         task = self.original.create({'title': 'Imported recovery fixture', 'requirement': 'local fixture', 'workflow':'legacy',
                                      'cwd': str(self.project), 'provider': 'codex', 'reviewer': 'codex',
-                                     'model': 'worker-fixture', 'reviewer_model': 'review-fixture', 'auto_start': True})
+                                     'model': 'worker-fixture', 'reviewer_model': 'review-fixture',
+                                     'review_isolation': 'provider', 'auto_start': True})
         self.wait_for(lambda: self.original.detail(task['id'])['status'] == 'running')
         self.original.action(task['id'], 'stop')
         self.wait_for(lambda: task['id'] not in self.original._children)

@@ -149,7 +149,8 @@ class QualityPolicyTests(unittest.TestCase):
   worker,reviewer=FixtureProvider(),FixtureProvider(True);reviewer.name='claude'
   seen=[]
   def wrap(boundary,command,provider):seen.append(command.argv);return command
-  with patch('auto_moniter.isolation.ReviewIsolation.verify'),patch('auto_moniter.isolation.ReviewIsolation.wrap',wrap),patch.dict(os.environ,{'AWS_SECRET_ACCESS_KEY':'fake-fixture'}):
+  # This checks tool flags and credential scrubbing, not the host mount probe.
+  with patch('auto_moniter.isolation.ReviewIsolation.__init__',return_value=None),patch('auto_moniter.isolation.ReviewIsolation.verify'),patch('auto_moniter.isolation.ReviewIsolation.wrap',wrap),patch.dict(os.environ,{'AWS_SECRET_ACCESS_KEY':'fake-fixture'}):
    result=Supervisor(RunConfig('fixture',self.root,worker,reviewer=reviewer,
     modules=[{'id':'fixture','title':'Fixture','acceptance':['content is ok']}],quality_policy={'review_tools':'files_only'},
     review_isolation='strict',run_dir=self.root/'run',git_history='off',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()

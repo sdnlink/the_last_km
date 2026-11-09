@@ -241,6 +241,8 @@ Web 新建任务在常规表单中明确提供 Worker/Reviewer 执行器、各�
 
 开发与 CI 回归需要 Python 3.11+ 及 Node 22，离线测试无需安装模型 CLI 或配置模型密钥。CI 使用隔离工具 PATH 验证这一点，避免开发机已安装 Codex/Grok 掩盖测试夹具缺失；缺少真实执行器的生产启动预检仍保留。复现与修复说明见 [离线 CI 验证](docs/ci-offline-validation.md)。
 
+流程测试显式使用 provider 隔离，避免把验收、启停和恢复验证隐式绑定到 Bubblewrap。strict 的缺失依赖拒绝启动与实际只读挂载另有测试；Web 生产默认仍为 strict，没有 bwrap 时返回预检错误，不自动降级。真实挂载测试可因缺少工具或内核权限跳过，普通流程和 strict 失败门禁不因此跳过。
+
 “重新枚举执行器与模型”按钮可刷新目录并保留已填写的任务内容和已选模型。每个查询有 4 秒上限及输出大小限制，并发查询避免某个 CLI 卡住整个控制台。Paseo 的 Reviewer 后端单独传入 `--reviewer-paseo-backend`；不同后端不会自动共享 Worker 模型。只读审核仍受原有模式和隔离限制，选择模型不放宽这些限制。
 
 其他 Paseo 自定义后端的模式 ID 原样传递，省略时由后端选择默认值。具体能力取决于该后端及 daemon 版本，可参考 [Paseo CLI 模式说明](https://paseo.sh/docs/cli.md#agent-modes)。`--provider command` 的模式应写在 `--exec` 模板中，不使用 `--mode`。

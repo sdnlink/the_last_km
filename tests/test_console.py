@@ -183,7 +183,7 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'仍在�
 ''')
         fake.chmod(0o700)
         with patch.dict(os.environ, {'PATH': str(binaries) + os.pathsep + os.environ['PATH']}):
-            task = self.create(auto_start=True)
+            task = self.create(auto_start=True, review_isolation='provider')
             ident = task['id']
             run = Path(task['run_dir'])
             self.wait_for(lambda: self.store.detail(ident)['status'] == 'running')

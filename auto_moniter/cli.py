@@ -19,6 +19,8 @@ from auto_moniter.storage import write_json
 from auto_moniter.preflight import doctor
 from auto_moniter.redaction import safe, redact
 from auto_moniter.retention import run_storage
+from auto_moniter.git_history import GitHistoryError
+from auto_moniter.workspace import LockError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--resume", action="store_true", help="Continue an existing --run-dir instead of starting over")
     run.add_argument('--git-history', choices=('auto', 'required', 'off'), default='auto',
-                     help='Checkpoint each worker/reviewer conclusion in the project Git repository (default: auto)')
+                     help='Track audit history; review-first publishes approved code to the business branch (default: auto)')
     run.add_argument("--guard", action="store_true", help="Run a parent guardian that resumes the monitor after an unexpected exit")
     run.add_argument("--guard-restarts", type=_nonnegative_int, default=3, help="Maximum automatic monitor restarts, cumulative on resume (default: 3)")
     run.add_argument("--guard-delay", default="5s", help="Initial guardian restart delay; backs off to 60s (default: 5s)")
@@ -137,6 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
         control = sub.add_parser(action, help=f"Request {action} for an existing monitor (pause takes effect at turn boundaries)")
         control.add_argument("run_dir", type=Path)
 
+    history = sub.add_parser('history', help='Inspect, migrate or archive task Git audit refs; preview by default')
+    history.add_argument('operation', choices=('list', 'migrate', 'cleanup', 'restore'), nargs='?', default='list')
+    history.add_argument('run_dir', type=Path, nargs='?', help='Task directory for restore')
+    history.add_argument('-C', '--cwd', type=Path, default=Path.cwd())
+    history.add_argument('--runs-dir', type=Path, action='append', dest='runs_dirs')
+    history.add_argument('--older-than', default='7d')
+    history.add_argument('--keep-runs', type=_nonnegative_int, default=5)
+    history.add_argument('--include-failed', action='store_true')
+    history.add_argument('--keep-archives', type=_nonnegative_int, default=10)
+    history.add_argument('--archive-older-than', default='90d')
+    history.add_argument('--apply', action='store_true')
+
     sub.add_parser("providers", help="Show which agent CLIs are on PATH")
     diagnostic = sub.add_parser("doctor", help="Offline platform and executable checks; does not call models")
     diagnostic.add_argument("-C", "--cwd", type=Path, default=Path.cwd())
@@ -162,6 +176,19 @@ def main(argv: list[str] | None = None) -> int:
             result = selftest()
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result["passed"] else 1
+        if args.command == 'history':
+            from auto_moniter.git_maintenance import maintenance, restore
+            if args.operation == 'restore':
+                if args.run_dir is None or not args.apply:
+                    raise ValueError('history restore requires a run directory and --apply')
+                result = restore(args.cwd, args.run_dir)
+            else:
+                result = maintenance(args.cwd, runs_dirs=args.runs_dirs, operation=args.operation,
+                    apply=args.apply, older_than=_parse_duration(args.older_than), keep_runs=args.keep_runs,
+                    include_failed=args.include_failed, keep_archives=args.keep_archives,
+                    archive_older_than=_parse_duration(args.archive_older_than))
+            print(json.dumps(safe(result), ensure_ascii=False, indent=2))
+            return 1 if result.get('errors') else 0
         if args.command in {"runs", "cleanup"}:
             options = {}
             if args.command == "cleanup":
@@ -190,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             return _watch(args)
         if args.command == "run":
             return _run(args)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, GitHistoryError, LockError) as exc:
         print(redact(f"auto-moniter: {exc}"), file=sys.stderr)
         return 2
     except KeyboardInterrupt:

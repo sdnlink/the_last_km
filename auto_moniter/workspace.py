@@ -147,6 +147,7 @@ def acceptance_problems(
     baseline: dict[str, str] | None = None,
     ignore_dir: Path | None = None,
     diff_text: str = "",
+    git_base: str = "",
 ) -> list[str]:
     cwd = cwd.resolve()
     problems: list[str] = []
@@ -158,7 +159,14 @@ def acceptance_problems(
         return problems
     try:
         changed = _git_changed_paths(cwd)
-    except ValueError as exc:
+        if changed is not None and git_base:
+            result = subprocess.run(['git', 'diff', '--no-ext-diff', '--no-textconv', '--relative',
+                                     '--name-only', '-z', git_base, '--', '.'], cwd=cwd,
+                                    capture_output=True, check=False, timeout=10)
+            if result.returncode:
+                raise ValueError('Cannot compare evidence with task Git baseline')
+            changed.update(os.fsdecode(name) for name in result.stdout.split(b'\0') if name)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
         return [f"Cannot verify Git workspace diff: {exc}"]
     relatives = {str(path.relative_to(cwd)) for path in paths}
     if changed is not None:

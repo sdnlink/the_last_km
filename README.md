@@ -535,31 +535,61 @@ auto-moniter run \
 
 ## 安全
 
-工人默认使用各自 CLI 的非交互、自动批准模式。Paseo 的 Claude 工人默认使用 `bypass`，Codex 工人默认使用 `full-access`，其他后端保留其默认模式。`--mode` 可覆盖工人默认模式，选择交互批准模式可能触发等待输入后的重试。`--reviewer-mode` 仅允许只读或 plan 模式，`--reviewer-extra-arg` 不允许覆盖权限、配置、工作目录、后端或会话。审查模式及 Paseo 的隔离限制见上表。只在你信任的仓库里运行。监督器在目标项目仓库的专用分支逐轮提交改动与结论，不执行推送。
+工人默认使用各自 CLI 的非交互、自动批准模式。Paseo 的 Claude 工人默认使用 `bypass`，Codex 工人默认使用 `full-access`，其他后端保留其默认模式。`--mode` 可覆盖工人默认模式，选择交互批准模式可能触发等待输入后的重试。`--reviewer-mode` 仅允许只读或 plan 模式，`--reviewer-extra-arg` 不允许覆盖权限、配置、工作目录、后端或会话。审查模式及 Paseo 的隔离限制见上表。只在你信任的仓库里运行。新任务经独立审核与固定检查后，监督器将业务代码提交到启动时检出的业务分支，将审计结论写入隐藏引用；不执行推送。
 
 ### 目标项目中的 Git 追溯与审核
 
-默认 `--git-history auto`：目标目录属于 Git 仓库时，监督器创建 `auto-moniter/<运行标识>` 分支并保存项目初始工作区基线。每个 worker 轮次返回后，源码快照和工作结论一起写入该分支；失败、中断及无源码改动的轮次同样留下结论提交。结论文件位于目标项目的 `.auto-moniter/history/<运行标识>/NNN-worker.json`，包含原始需求、本轮收到的补充要求、结果、证据、退出状态和脱敏后的原始结论。运行目录的 `state.json`、`report.json` 及 Web 控制台均可查到分支、前后提交号和 diff 命令。
+新建 `review-first` 任务绑定启动时检出的本地业务分支。worker 实现、reviewer 只读审核、watcher 固定检查全部通过后，watcher 在该业务分支创建本地代码提交。正常 `git log` 能看到批准后的代码；提交不包含 `.auto-moniter` 审计文件，也不会自动推送。任务必须从业务分支启动，detached HEAD 和旧审计分支会被拒绝。
+
+审计结论独立保存于 `refs/auto-moniter/<运行标识>`（新任务审计提交不包含业务源码快照），不会出现在 `git branch` 的普通分支列表。Web 分开展示“业务分支/业务提交”与“审计引用/审计提交”；只有审计快照的旧任务明确标为历史模式，不能误称代码已提交到 main。
+
+提交使用私有索引构造准确的业务 tree。项目为仓库子目录时保留其他目录；无关的用户暂存内容保留，若已暂存文件与本次业务提交重叠则停止并提示处理，不覆盖暂存内容。代码分支和审计引用通过带旧值校验的 Git 引用事务更新，暂存区通过原子替换同步；中断恢复依赖有界的发布日志，不重复创建业务提交。提交冲突解决后，未变化候选可复用已完成审核，仍独立执行固定检查。未批准候选由 `refs/auto-moniter-work/<运行标识>` 临时保留，避免 Git gc 丢失断点；任务归档时一并移除，不显示为普通分支。
+
+reviewer 审核不可变候选 tree 与上次有效业务审核以来的差异，并能核对准确的业务提交 diff（包含任务启动前已有、纳入候选的项目修改）。最终完成证据仍必须包含完整候选哈希及真实变更文件。已提交模块的证据相对任务初始基线核验，不会仅因业务 HEAD 推进而失效。
 
 ```bash
-# 强制要求目标项目可保存 Git 历史
+# 业务代码只在独立批准和固定检查后本地提交
+# 先自行检出应接收代码的业务分支，再启动任务
 auto-moniter run '实现需求' -C /path/to/project --provider codex --reviewer codex --git-history required
 
-# 在目标项目中使用页面或 state.json 给出的实际标识
-git log --oneline auto-moniter/<运行标识>
-git show <worker提交>:.auto-moniter/history/<运行标识>/001-worker.json
-git diff <本轮基线提交> <worker提交> -- . ':(exclude).auto-moniter'
+# 当前业务分支的代码提交
+git log --oneline
+
+# 独立审计记录；使用任务详情给出的实际标识与提交号
+git log --oneline refs/auto-moniter/<运行标识>
+git show <审计提交>:.auto-moniter/history/<运行标识>/001-worker.json
 ```
 
-reviewer 在目标项目目录审核两个实际 Git diff：本轮基线到 worker 提交，以及运行初始基线到该提交。新增文件和删除也包含在提交中。监督器执行 diff 并提供变更摘要和补丁片段，要求 reviewer 执行对应命令、对照原始需求及补充要求核对实现。审核通过的证据须包含本次 worker 的完整提交号及有效变更文件；缺少提交号不能交付。审核结论随后写入 `NNN-reviewer.json` 并独立提交，关联其审核的 worker 提交。审核触发频率仍由 `--review-every` 控制；每轮 worker 都保存 Git 记录。
+历史任务沿用保存的提交策略，升级不会自动把旧审计快照发布到业务分支。旧 `auto-moniter/<标识>` 分支仍可读取，并可显式迁移到隐藏引用；迁移保留提交号、审计内容、恢复配置及 Web 追溯。`legacy` 流程的新记录也使用隐藏引用，保留原来的每轮审计策略，不自动发布未经独立批准的业务代码。
 
-审核提交同时保存 `watcher_result`（系统是否接受审计更新、实际关闭编号及拒绝原因）和当时的 `audit_issues` 清单。reviewer 自述“已关闭”仅是关闭申请，须以 watcher 的处理结果为准；拒绝关闭也会提交结论。Web 的角色详情和交互结论显示系统处理结果、提交分支及“查看本地提交”入口，点击后直接读取目标仓库中的 Git 对象并提供核对命令。旧记录中的明确拒绝原因也会显示，原始表述保留供查阅。
+### Git 审计迁移、归档与清理
 
-监督器使用独立临时索引写入上述分支，当前检出的分支、HEAD 及用户暂存区保持原状。开始运行前已有的修改计入输入基线，轮次 diff 只显示随后发生的改动。源码选择沿用工作区验收规则，排除 Git 忽略文件及运行、构建目录；审计结论不作为业务源码变更证据。该分支是源码快照的审计历史，合并到业务分支仍由项目自己的交付流程完成。
+新任务成功结束并释放运行锁后，自动按保留策略维护同一运行根目录内的历史：默认保留最近 5 个结束任务，超过 7 天的已成功任务先生成并校验 Git bundle，再删除审计引用及项目内的旧结论副本。归档默认至少保留最近 10 份，且只有超过 90 天又超出数量的归档才过期。运行目录、业务代码提交及当前任务不会因此删除。
 
-恢复执行继续使用原分支和轮次编号；分支被外部移动、检查点领先运行状态或提交失败时停止并报告，避免覆盖历史或以未留痕结果交付。`--keep-rounds` 只清理运行日志窗口，Git 中的轮次提交和项目内结论文件继续保留，需按目标仓库的磁盘容量管理。旧版运行在升级后恢复时从当前工作区建立基线，过去轮次不会补造 Git 记录。
+停止、阻塞、预算耗尽、恢复异常、运行锁被占用、遗留进程或发布恢复尚未完成的任务始终保留。失败/stalled/max_rounds 默认保留，只有显式 `--include-failed` 才纳入清理。归档包位于目标仓库的 Git 公共目录 `auto-moniter-archives/`，不在业务工作区内；计入原有 Git 历史容量预算。删除引用不代表 Git 对象立即释放，不强制执行全库 gc；Git 正常垃圾回收后才可能回收无引用对象。
 
-非 Git 目录在 `auto` 模式下继续原流程；使用 `required` 可在执行前拒绝此类项目。`--git-history off` 显式关闭新运行的 Git 留痕，已留痕运行恢复时禁止关闭。
+```bash
+# 以下操作默认仅预览；--runs-dir 可重复，用于自定义运行根目录
+auto-moniter history list -C /path/to/project
+auto-moniter history migrate -C /path/to/project
+auto-moniter history migrate -C /path/to/project --apply
+
+# 自定义保留策略，仍须 --apply 才实施
+auto-moniter history cleanup -C /path/to/project --older-than 7d --keep-runs 5 \
+  --keep-archives 10 --archive-older-than 90d
+auto-moniter history cleanup -C /path/to/project --older-than 7d --keep-runs 5 --apply
+
+# 从尚未过期的 bundle 恢复审计引用；不修改业务分支或重新执行任务
+auto-moniter history restore /path/to/task-run -C /path/to/project --apply
+```
+
+普通 `cleanup --apply` 删除旧运行目录前也会先归档对应 Git 历史，失败则保留该运行目录。运行目录已清理时仍可用原路径恢复其审计引用，通过 `git log/show` 追溯；不会复造已删除的任务执行状态。归档过期后无法承诺恢复已被 Git 垃圾回收的旧审计对象。
+
+迁移、归档和恢复都在运行锁与工作区租约下执行，拒绝覆盖冲突引用、已检出的旧审计分支、符号链接或不匹配的任务身份。归档中的业务结论仍以 `watcher_result` 和 AUD 台账为准；reviewer 的关闭申请不等于系统已接受。
+
+本次改造验证：Python 全量回归 536 项通过；两份前端 Node 测试通过。新增用例覆盖业务提交门禁、暂存保护、子目录发布、引用事务失败、提交中断恢复、已提交证据复用、候选 GC 保护、旧分支迁移、归档验证失败保留、归档恢复及年龄/数量清理。本项目已有两个旧审计分支已迁移，原提交号保留，真实 Web 历史弹窗读取通过。
+
+非 Git 目录在 `auto` 模式下继续原流程；`required` 会提前拒绝非 Git 项目。`--git-history off` 显式关闭新运行的 Git 留痕，已留痕运行恢复时禁止关闭。
 
 审查员只能读取工作区和已有验证证据，不负责实现修复或执行会生成文件的构建、测试。需要修改代码或补充验证时，reviewer 返回缺口，由 worker 完成后再审查。监督器只检查审查前后指纹，不保存文件副本；检测到变化立即停止，保留现场供检查。原生 Codex 使用只读沙箱，其他支持后端使用 plan 权限模式，各后端的隔离能力取决于其 CLI。验收证据必须指向项目内的真实变更文件，运行日志及指向项目外的符号链接不能作为证据。
 

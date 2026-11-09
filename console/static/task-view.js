@@ -14,13 +14,16 @@ function watcherHTML(c) {
 }
 function gitHistoryHTML(task) {
   const history = task.git_history || {};
-  if(history.approval_only&&!history.head)return '<div class="git-history-empty">尚无审核通过的本地提交。当前改动仅有待审树快照，reviewer 与 watcher 验收通过后才创建审计分支提交；失败反馈保存在任务运行记录。</div>';
+  if(history.approval_only&&!history.head)return '<div class="git-history-empty">尚无审核通过的本地提交。当前改动仅有待审树快照，reviewer 与 watcher 验收通过后才提交业务代码及审计记录；失败反馈保存在任务运行记录。</div>';
   if (!history.enabled)
     return '<div class="git-history-empty">尚无项目 Git 记录；Git 项目使用新版监督器启动或恢复后，将逐轮保存改动和结论。</div>';
   const worker = history.last_worker || {};
   const checkpoints = (task.git_checkpoints || []).slice().reverse();
   const branch = (history.ref || "").replace(/^refs\/heads\//, "");
-  return `<details class="git-history" data-key="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary><p>每轮改动与工作结论保存在此分支，审核关联对应的 worker 提交。</p><div class="git-history-ref">分支 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p>${checkpointHTML(task.id,item)}<code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
+  const business=history.last_business_commit||{};
+  const target=history.business_head?.ref?.replace(/^refs\/heads\//,'');
+  const publication=history.business_commits?`<p>业务分支：<code>${escape(target||'尚未绑定')}</code>；${business.commit?`最近业务提交：<code>${escape(business.commit)}</code>`:'尚无通过验收的业务提交'}</p>`:'<p>历史任务仅保存审计快照；业务代码未自动提交到当前分支。</p>';
+  return `<details class="git-history" data-key="git-history"><summary>项目 Git 追溯 · ${worker.commit ? `第 ${worker.round} 轮 · ${escape(worker.commit.slice(0, 12))}` : "已保存初始基线"}</summary>${publication}<p>审计结论保存在独立引用中；下方提交号用于追溯审核记录。</p><div class="git-history-ref">审计引用 <code>${escape(branch)}</code></div><p>记录目录：${escape(history.directory)}</p>${worker.diff_command ? `<p>最近一轮改动</p><pre>${escape(worker.diff_command)}</pre>` : ""}<ol>${checkpoints.map((item) => `<li><strong>第 ${escape(item.round)} 轮 · ${item.role === "reviewer" ? "reviewer 审查" : "worker 执行"}</strong> · ${escape(item.status)}<p>${escape(item.summary)}</p>${checkpointHTML(task.id,item)}<code>${escape(item.commit)}</code><p>${escape(item.record)}</p>${item.role === "worker" ? `<span>变更文件：${escape((item.changed_files || []).join("、") || "本轮无源码变更")}</span><pre>${escape(item.diff_command)}</pre>` : `<span>审查的 worker 提交：<code>${escape(item.base)}</code></span>`}</li>`).join("")}</ol><p>更早的轮次可在目标项目目录执行 <code>git log ${escape(branch)}</code> 查看。</p></details>`;
 }
 function roleDetailsHTML(t) {
   return ["worker", "reviewer", "watcher"].map(name => {

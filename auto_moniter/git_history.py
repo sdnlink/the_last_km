@@ -25,7 +25,7 @@ class GitHistory:
     def __init__(self, cwd: Path, run_dir: Path):
         self.cwd, self.run_dir = cwd.resolve(), run_dir.resolve()
         self.key = hashlib.sha256(os.fsencode(self.run_dir)).hexdigest()[:20]
-        self.ref = 'refs/heads/auto-moniter/' + self.key
+        self.ref = 'refs/auto-moniter/' + self.key
         self.directory = self.cwd / '.auto-moniter/history' / self.key
         self.state_path = self.run_dir / 'git-history.json'
         self.root = Path(self.git('rev-parse', '--show-toplevel').decode().strip()).resolve()
@@ -41,8 +41,9 @@ class GitHistory:
         self.directory.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
             saved = json.loads(self.state_path.read_text(encoding='utf-8'))
-            if saved.get('project') != str(self.cwd) or saved.get('ref') != self.ref:
+            if saved.get('project') != str(self.cwd) or saved.get('ref') not in (self.ref, 'refs/heads/auto-moniter/' + self.key):
                 raise GitHistoryError('Saved Git history belongs to another project or run')
+            self.ref = saved['ref']
             self.head, self.initial = saved['head'], saved['initial']
             self.last_worker, self.last_record = saved.get('last_worker', {}), saved.get('last_record', {})
             self.verify()

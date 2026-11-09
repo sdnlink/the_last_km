@@ -4,7 +4,7 @@
           <div>
             <span class="eyebrow">LET’S BUILD SOMETHING</span>
             <h2>新建开发任务</h2>
-            <p>先由 reviewer 完善需求，watcher 交给 worker 实现；审核与检查通过后才写入本地审计分支。</p>
+            <p>先由 reviewer 完善需求，watcher 交给 worker 实现；审核与检查通过后提交到当前业务分支，审计结论独立保存。</p>
           </div>
           <button
             type="button"
@@ -41,7 +41,7 @@
               name="cwd"
               required
               placeholder="/path/to/your/project"
-            /><small>选择 Git 项目目录；每轮改动和结论自动保存到项目的审计分支。</small></label
+            /><small>选择 Git 项目目录；通过审核和验收的代码提交到启动时的业务分支；结论保存在独立审计引用。</small></label
           >
           <div class="form-grid">
             <label

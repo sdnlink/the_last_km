@@ -310,6 +310,13 @@ class Supervisor:
         finally:
             for sig, handler in previous_signals.items():
                 signal.signal(sig, handler)
+            if (getattr(self, '_finished_status', '') == 'done'
+                    and getattr(self.git_history, 'business_commits', False)):
+                from auto_moniter.git_maintenance import maintenance
+                try:
+                    maintenance(self.config.cwd, runs_dirs=[self.run_dir.parent], operation='cleanup', apply=True)
+                except (OSError, ValueError, GitHistoryError, LockError) as exc:
+                    self.log('Completed task retained; audit retention deferred: ' + str(exc))
 
     def _run_locked(self) -> RunReport:
         private_directory(self.run_dir)
@@ -415,6 +422,8 @@ class Supervisor:
                 round_index, verdict, tree = record.index, record.verdict, record.tree
                 turn = _CompletedTurn(verdict.raw, record.session_id, 0, False, record.elapsed_s,
                                       Path(record.output_path), [])
+                if self.git_history:
+                    self._git_before = self.git_history.candidate['base']
                 self.log(f"round {round_index}: reusing worker candidate; only the unfinished reviewer will run")
                 self._event('worker_candidate_reused', round=round_index, tree=tree)
             else:
@@ -780,10 +789,12 @@ class Supervisor:
                 review.evidence,
                 baseline=self._baseline_files,
                 ignore_dir=self.run_dir,
+                git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
             ) if _accepted(review) else []
             if _accepted(review):
                 problems.extend(f"Worker completion evidence: {problem}" for problem in acceptance_problems(
                     self.config.cwd, verdict.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
+                    git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
                 ))
                 problems.extend(self.modules.coverage(verdict, review))
                 pending = self.audit.pending(None if verdict.scope == review.scope == "requirement"
@@ -816,6 +827,11 @@ class Supervisor:
                 review_record.verdict = review
                 self.log(f"round {round_index}: reviewer done rejected: {'; '.join(problems)}")
                 self._event("review_rejected", reasons="; ".join(problems))
+
+            if (getattr(self, '_publication_review_reused', None) == round_index
+                    and any(self.modules.items[k]['status'] != 'accepted' for k in verdict.module_ids)):
+                return self._finish('action_required', 'Committed candidate failed resumed validation; inspect the saved checks before continuing.',
+                                    records, review)
 
             last_worker = verdict
             last_review = review
@@ -893,9 +909,33 @@ class Supervisor:
             reviewer.verdict.status='continue'
             reviewer.verdict.gaps.append('New instructions arrived before commit; implement and review them first.')
             return False
-        self._checkpoint(worker,worker_text,self._git_before)
-        self._checkpoint(reviewer,review_text,worker.git_checkpoint['commit'])
-        self._event('approved_local_commit',commit=reviewer.git_checkpoint['commit'],round=worker.index)
+        if self.git_history.business_commits:
+            from auto_moniter.publication import publish
+            write_json(self.run_dir / 'approval-ready.json', {'round': worker.index, 'tree': tree,
+                'candidate_tree': self.git_history.candidate['commit'], 'review': reviewer.verdict.to_dict(),
+                'business_head': self.git_history.business_head, 'provider_config': self._provider_config(),
+                'reviewer_model': self._reviewer_model()}, durable=True)
+            def payload(record):
+                data = RunReport('', 0, '', '', [record]).to_dict()['records'][0]
+                data.update(requirement=self.config.requirement, acceptance=self.config.acceptance,
+                            directions=self.directions.messages())
+                if record.role == 'reviewer':
+                    data['audit_issues'] = self.audit.export()
+                return data
+            try:
+                worker.git_checkpoint, reviewer.git_checkpoint = publish(
+                    self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text)
+            except (OSError, GitHistoryError) as exc:
+                raise RecoveryError('Business publication incomplete; preserve staging and resume after resolving: ' + str(exc)) from exc
+            for record in (worker, reviewer):
+                self._event('git_checkpoint', role=record.role, round=record.index,
+                            commit=record.git_checkpoint['commit'], ref=self.git_history.ref)
+            self._event('approved_local_commit', commit=self.git_history.last_business_commit['commit'],
+                        ref=self.git_history.business_head['ref'], round=worker.index)
+        else:
+            self._checkpoint(worker,worker_text,self._git_before)
+            self._checkpoint(reviewer,review_text,worker.git_checkpoint['commit'])
+            self._event('approved_local_commit',commit=reviewer.git_checkpoint['commit'],round=worker.index)
         self._write_state(self._records,'running',0,'',tree)
         return True
 
@@ -1013,7 +1053,8 @@ class Supervisor:
         findings = _audit_findings(review)
         open_before = {item["id"] for item in self.audit.pending()}
         def check_evidence(evidence):
-            return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir)
+            return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
+                                       git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
         reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules, check_evidence)
         if reported:
             self._event("audit_issues_reported", issues=reported)
@@ -1332,6 +1373,7 @@ class Supervisor:
             report.summary = summary + " Blockers: " + "; ".join(verdict.blockers)
         path = self.run_dir / "report.json"
         self._event("run_finished", status=status, summary=summary)
+        self._finished_status = status
         if status in {"failed", "recovery_failed", "action_required", "budget_exceeded", "stalled"}:
             write_json(self.run_dir / "alert.json", safe({"status": status, "summary": summary,
                        "at": datetime.now(timezone.utc).isoformat(), "run_dir": str(self.run_dir)}), durable=True)
@@ -1868,15 +1910,55 @@ class Supervisor:
         if not worker or worker.failure or worker.interruption or not _accepted(worker.verdict):
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
-        if review and not (review.failure or review.interruption or review.verdict.parse_error):
+        publication = getattr(self.git_history, 'last_business_commit', {})
+        published = publication.get('round') == worker.index and publication.get('candidate_tree') == self.git_history.candidate.get('commit') if publication else False
+        ready = self._saved_approval(worker.index, worker.tree)
+        if published and worker.verdict.module_ids and all(self.modules.items.get(k, {}).get('status') == 'accepted' for k in worker.verdict.module_ids):
+            return None
+        if review and not (review.failure or review.interruption or review.verdict.parse_error or published or ready):
             return None
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree:
             return None
         return worker
 
+    def _saved_approval(self, index, tree):
+        path = self.run_dir / 'approval-ready.json'
+        if (not getattr(self.git_history, 'business_commits', False) or not path.is_file()
+                or path.is_symlink() or path.stat().st_size > 512*1024):
+            return None
+        value = json.loads(path.read_text())
+        if (value.get('round') != index or value.get('tree') != tree
+                or value.get('candidate_tree') != self.git_history.candidate.get('commit')
+                or value.get('business_head') != self.git_history.business_head):
+            return None
+        return value
+
     def _invoke_review(self, provider, prompt, session_id, **kwargs):
         """One bounded repair belongs to the reviewer, never to the worker."""
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        ready = self._saved_approval(kwargs['index'], tree)
+        if (ready and ready.get('provider_config') == self._provider_config()
+                and ready.get('reviewer_model') == self._reviewer_model()):
+            conclusion = parse_verdict(json.dumps(ready['review']))
+            if not _accepted(conclusion):
+                raise RecoveryError('Saved approval is invalid')
+            self._publication_review_reused = kwargs['index']
+            self._event('approval_review_reused', round=kwargs['index'])
+            return _CompletedTurn(json.dumps(ready['review']), '', 0, False, 0,
+                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
+        publication = getattr(self.git_history, 'last_business_commit', {})
+        if (publication.get('round') == kwargs['index']
+                and publication.get('candidate_tree') == self.git_history.candidate.get('commit')):
+            self.git_history.verify()
+            record = self.git_history.last_record
+            payload = json.loads(self.git_history.git('show', record['commit'] + ':' +
+                                 (self.config.cwd.relative_to(self.git_history.root) / record['record']).as_posix()))
+            if payload.get('role') != 'reviewer' or payload['result'].get('tree') != tree:
+                raise RecoveryError('Committed review does not match the resumed candidate')
+            self._event('publication_review_reused', round=kwargs['index'], commit=record['commit'])
+            self._publication_review_reused = kwargs['index']
+            return _CompletedTurn(json.dumps({**payload['result'], 'modules': []}), '', 0, False, 0,
+                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         for attempt in range(2):
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')
@@ -1955,8 +2037,10 @@ class Supervisor:
             prompt += 'When blocked, continue independent modules before repeating the same dependency. Never modify existing protected test assertions.\n'
         messages = self.directions.messages()
         if role == 'worker' and self.git_history:
+            destination = (self.git_history.business_head['ref'] if getattr(self.git_history, 'business_commits', False)
+                           else self.git_history.ref)
             prompt += (('\n\nDo not commit, push, stage or change Git refs. Only the watcher may create local commits AFTER independent approval and checks.\n' if self.config.workflow=='review-first' else '\n\nThe monitor records this round in Git.\n')+
-                       f'Accepted changes are recorded on {self.git_history.ref}. Keep edits in {self.config.cwd}. '
+                       f'Approved code destination: {destination}. Audit reference: {self.git_history.ref}. Keep edits in {self.config.cwd}. '
                        'Do not alter .auto-moniter/history, the audit branch, or previous audit records. '
                        'Report changed files, actual validation results, remaining gaps and failures precisely.\n')
         self._direction_ids[role] = [item['id'] for item in messages]

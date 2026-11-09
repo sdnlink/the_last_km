@@ -93,6 +93,10 @@ def _metadata(directory: int, cwd: Path, run: Path, include_failed: bool) -> dic
     if not isinstance(status, str):
         raise ValueError("invalid_status")
     result = {"status": str(status), "finished_at": None, "reason": "unfinished_or_recoverable"}
+    history = state.get('git_history') or {}
+    if not isinstance(history, dict):
+        raise ValueError('invalid_git_history')
+    result['git_archive'] = 'archive_before_delete' if history.get('enabled') else None
     if status not in _FINAL:
         return result
     report = _json_at(directory, "report.json")
@@ -225,6 +229,17 @@ def _remove(root_fd: int, root: Path, row: dict, cwd: Path, include_failed: bool
             if ([original.st_dev, original.st_ino] != row["directory_id"]
                     or (original.st_dev, original.st_ino) != (actual.st_dev, actual.st_ino)):
                 raise ValueError("run_directory_changed")
+            if current.get('git_archive'):
+                from auto_moniter.git_maintenance import archive, handle, documents
+                from auto_moniter.locking import workspace_lease
+                from auto_moniter.git_history import GitHistoryError
+                import hashlib
+                try:
+                    with workspace_lease(cwd):
+                        archive(handle(cwd), root/name, documents(root/name),
+                                hashlib.sha256(os.fsencode((root/name).resolve())).hexdigest()[:20])
+                except GitHistoryError as exc:
+                    raise ValueError('Cannot archive task Git history: ' + str(exc)) from exc
             shutil.rmtree(name, dir_fd=root_fd)
     finally:
         os.close(directory)

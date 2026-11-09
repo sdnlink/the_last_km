@@ -19,7 +19,7 @@ def read_git_record(project: Path, history: dict, checkpoint: dict) -> dict:
     commit, ref, record = checkpoint.get('commit', ''), history.get('ref', ''), checkpoint.get('record', '')
     if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit):
         raise GitRecordError('提交号格式不正确')
-    if not re.fullmatch(r'refs/heads/auto-moniter/[0-9a-f]{20}', ref):
+    if not re.fullmatch(r'refs/(?:heads/)?auto-moniter/[0-9a-f]{20}', ref):
         raise GitRecordError('任务未保存有效的 Git 审计分支')
     key = ref.rsplit('/', 1)[-1]
     if not re.fullmatch(r'\.auto-moniter/history/' + key + r'/\d+-(worker|reviewer)\.json', record):
@@ -37,15 +37,22 @@ def read_git_record(project: Path, history: dict, checkpoint: dict) -> dict:
         return result.stdout
 
     root = Path(os.fsdecode(git('rev-parse', '--show-toplevel')).strip()).resolve()
+    if not git('rev-parse', '--verify', ref, check=False):
+        hidden = 'refs/auto-moniter/' + key
+        if git('rev-parse', '--verify', hidden, check=False):
+            ref = hidden
+        else:
+            raise GitRecordError('审计引用已归档或不可用，请使用 history restore 恢复后查看')
     try:
         prefix = project.relative_to(root)
     except ValueError as exc:
         raise GitRecordError('Git 仓库与目标项目不匹配') from exc
     git('merge-base', '--is-ancestor', commit, ref)
-    if history.get('initial'):
-        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', history['initial']):
+    initial = history.get('audit_initial') or history.get('initial')
+    if initial:
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', initial):
             raise GitRecordError('初始基线提交号格式不正确')
-        git('merge-base', '--is-ancestor', history['initial'], commit)
+        git('merge-base', '--is-ancestor', initial, commit)
     object_name = commit + ':' + (prefix / record).as_posix()
     if int(git('cat-file', '-s', object_name)) > 4 * 1024 * 1024:
         raise GitRecordError('结论文件超过显示容量')

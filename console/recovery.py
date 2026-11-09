@@ -54,7 +54,30 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
         actual = {'ref': git_value('symbolic-ref', '-q', 'HEAD'),
                   'commit': git_value('rev-parse', '--verify', 'HEAD')}
         if actual != history['business_head']:
-            raise ValueError('业务 HEAD 已在任务外变更；原审核版本不能直接恢复，请基于当前提交新建后续任务')
+            import json
+            durable = run / 'git-history.json'
+            committed = {}
+            if durable.is_file() and not durable.is_symlink() and durable.stat().st_size <= 4*1024*1024:
+                committed = json.loads(durable.read_text())
+            publication = committed.get('last_business_commit', {})
+            durable_approval = (committed.get('business_commits') is True
+                and committed.get('project') == str(args.cwd.resolve())
+                and committed.get('ref') == history.get('ref')
+                and committed.get('business_head') == actual
+                and publication.get('ref') == actual['ref'] and publication.get('commit') == actual['commit']
+                and publication.get('parent') == history['business_head']['commit']
+                and publication.get('candidate_tree') == history.get('candidate', {}).get('commit')
+                and git_value('rev-parse', '--verify', history['ref']) == committed.get('head'))
+            pending = run / 'publication.json'
+            transaction = {}
+            if pending.is_file() and not pending.is_symlink() and pending.stat().st_size <= 4*1024*1024:
+                transaction = json.loads(pending.read_text())
+            if not durable_approval and not (transaction.get('project') == str(args.cwd.resolve())
+                    and transaction.get('before_business') == history['business_head']
+                    and transaction.get('after', {}).get('business_head') == actual
+                    and transaction.get('audit_ref') == history.get('ref')
+                    and git_value('rev-parse', '--verify', history['ref']) == transaction['after'].get('head')):
+                raise ValueError('业务 HEAD 已在任务外变更；原审核版本不能直接恢复，请基于当前提交新建后续任务')
     if args.provider == 'command' or args.reviewer == 'command':
         raise ValueError('自定义命令任务请使用原 CLI 配置恢复')
     worker = resolve_provider(args.provider, paseo_backend=args.paseo_backend,

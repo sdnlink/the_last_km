@@ -1,0 +1,17 @@
+test_audit_resolutions_helper_still_enforces_one_to_four (tests.test_resolution_feedback.ResolutionSchemaTests.test_audit_resolutions_helper_still_enforces_one_to_four) ... ok
+test_blocked_status_also_surfaces_resolution_error_in_gaps (tests.test_resolution_feedback.ResolutionSchemaTests.test_blocked_status_also_surfaces_resolution_error_in_gaps) ... ok
+test_continue_status_keeps_business_gaps_and_surfaces_resolution_error (tests.test_resolution_feedback.ResolutionSchemaTests.test_continue_status_keeps_business_gaps_and_surfaces_resolution_error) ... ok
+test_illegal_id_and_blank_fields_are_rejected_with_specific_reason (tests.test_resolution_feedback.ResolutionSchemaTests.test_illegal_id_and_blank_fields_are_rejected_with_specific_reason) ... ok
+test_schema_documents_resolution_bounds (tests.test_resolution_feedback.ResolutionSchemaTests.test_schema_documents_resolution_bounds) ... ok
+test_valid_one_and_four_evidence_strings_parse_as_done (tests.test_resolution_feedback.ResolutionSchemaTests.test_valid_one_and_four_evidence_strings_parse_as_done) ... ok
+test_zero_or_five_evidence_strings_are_rejected_with_specific_reason (tests.test_resolution_feedback.ResolutionSchemaTests.test_zero_or_five_evidence_strings_are_rejected_with_specific_reason) ... ok
+test_continue_oversized_closure_feeds_next_prompt_keeps_auds_open_no_commit (tests.test_resolution_feedback.ResolutionSupervisorFeedbackTests.test_continue_oversized_closure_feeds_next_prompt_keeps_auds_open_no_commit)
+Invalid continue closures must not close AUDs or approve commits; next prompt sees prior gaps. ... ok
+test_valid_compressed_closure_can_progress_after_feedback (tests.test_resolution_feedback.ResolutionSupervisorFeedbackTests.test_valid_compressed_closure_can_progress_after_feedback)
+After a failed oversized attempt, a 1-evidence-each closure may resolve the three AUDs. ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 1.685s
+
+OK
+EXIT=0

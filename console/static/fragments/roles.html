@@ -1,0 +1,13 @@
+<dialog id="roles-dialog" class="confirm-dialog">
+ <form id="roles-form">
+  <div class="dialog-heading"><h2>临时调整当前任务角色</h2></div>
+  <p>仅影响当前任务。保存后点击“恢复执行”继续。新角色使用独立会话，需求、审核结论、验收标准和累计预算保留。运行中的任务需先停止并保存检查点。</p>
+  <label>Worker 执行器<select name="provider" required></select></label>
+  <label>Worker 模型<input name="model" maxlength="200" placeholder="留空使用执行器默认模型"></label>
+  <label>Reviewer 执行器<select name="reviewer" required></select></label>
+  <label>Reviewer 模型<input name="reviewer_model" maxlength="200" placeholder="留空：同执行器沿用 Worker 模型，否则使用默认模型"></label>
+  <p>API Key 继续使用服务启动环境中的配置；此处不保存密钥。</p>
+  <p id="roles-error" role="alert" hidden></p>
+  <div class="dialog-footer"><button type="button" class="button secondary" data-close="roles-dialog">返回</button><button class="button primary" id="roles-submit">保存角色配置</button></div>
+ </form>
+</dialog>

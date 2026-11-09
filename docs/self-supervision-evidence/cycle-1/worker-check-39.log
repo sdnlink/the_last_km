@@ -1,0 +1,77 @@
+127.0.0.1 - - [09/Nov/2026 12:48:41] "POST /api/acceptance/scan HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:52] "GET /api/config HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:52] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:52] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:52] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:52] "GET /api/tasks/missing/logs HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:56] "POST /api/tasks/f692da655cde4af8bd6d57a26db121cc/delete HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:48:56] "POST /api/tasks/f692da655cde4af8bd6d57a26db121cc/delete HTTP/1.1" 400 -
+127.0.0.1 - - [09/Nov/2026 12:48:56] "GET /api/tasks/f692da655cde4af8bd6d57a26db121cc HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:56] "POST /api/tasks/f692da655cde4af8bd6d57a26db121cc/resume HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:58] "GET /pages/../server.py HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:58] "GET /fragments/../../README.md HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:58] "GET /pages/detail.html HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:48:58] "GET /index.html HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 12:49:01] "POST /api/tasks/ext-c33e15a8fe5b70c920b4/resume HTTP/1.1" 409 -
+run directory: /tmp/tmp0qlomod5/run
+worker: command
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=continue gaps=1 exit=0 elapsed=0.0s continue
+run error: BudgetExceeded: Agent call budget exhausted
+finished: budget_exceeded after 1 worker rounds
+report: /tmp/tmp0qlomod5/run/report.json
+run directory: /tmp/tmpgmr5ujbl/run
+worker: command
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=done gaps=0 exit=0 elapsed=0.1s done
+finished: done after 1 worker rounds
+report: /tmp/tmpgmr5ujbl/run/report.json
+run directory: /tmp/tmpo48rbhw_/run
+worker: command
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=continue gaps=0 exit=0 elapsed=0.0s continue
+finished: max_rounds after 1 worker rounds
+report: /tmp/tmpo48rbhw_/run/report.json
+run directory: /tmp/tmpuj9279nr/run
+worker: command
+resumed at round 1 worker_session=- reviewer_session=-
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=done gaps=0 exit=0 elapsed=0.1s done
+finished: done after 1 worker rounds
+report: /tmp/tmpuj9279nr/run/report.json
+run directory: /tmp/tmpvngqbdx9/run
+worker: command
+round 1: worker running
+resume process recovery: terminated
+finished: stopped after 0 worker rounds
+report: /tmp/tmpvngqbdx9/run/report.json
+run directory: /tmp/tmpnicgqghp/run
+worker: command
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=done gaps=0 exit=0 elapsed=0.0s done
+finished: done after 1 worker rounds
+report: /tmp/tmpnicgqghp/run/report.json
+run directory: /tmp/tmpdbva4uj1/run
+worker: command
+round 1: worker running
+run directory: /tmp/tmpdbva4uj1/run
+worker: command
+resumed at round 1 worker_session=- reviewer_session=-
+resume process recovery: terminated
+round 1: worker running
+round 1: no worker session id; the next round starts a new session
+round 1: worker status=done gaps=0 exit=0 elapsed=0.1s done
+finished: done after 1 worker rounds
+report: /tmp/tmpdbva4uj1/run/report.json
+127.0.0.1 - - [09/Nov/2026 12:49:32] "POST /api/acceptance/scan HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 12:49:32] "POST /api/tasks HTTP/1.1" 409 -
+----------------------------------------------------------------------
+Ran 483 tests in 80.559s
+
+OK
+EXIT=0

@@ -18,6 +18,7 @@ class ApprovedHistory(GitHistory):
         self.directory.mkdir(parents=True,exist_ok=True)
         self.head=self.initial='';self.last_worker={};self.last_record={};self.candidate={}
         self.business_head=self._business_identity()
+        self.last_reviewed={}
         if self.state_path.exists():
             saved=json.loads(self.state_path.read_text())
             if not saved.get('approval_only') or saved.get('project')!=str(self.cwd) or saved.get('ref')!=self.ref:
@@ -25,6 +26,7 @@ class ApprovedHistory(GitHistory):
             self.head,self.initial=saved['head'],saved['initial']
             self.last_worker,self.last_record=saved.get('last_worker',{}),saved.get('last_record',{})
             self.candidate=saved.get('candidate',{})
+            self.last_reviewed=saved.get('last_reviewed',{})
             self.business_head=saved.get('business_head',self.business_head)
             self.verify()
         else:
@@ -57,12 +59,34 @@ class ApprovedHistory(GitHistory):
         self._save()
 
     def review_context(self):
-        previous=self.last_worker
-        self.last_worker=self.candidate
-        try:
-            return ('Pending immutable Git TREE snapshot, not an approved commit. No branch has been advanced for this round.\n'
-                    +super().review_context())
-        finally:self.last_worker=previous
+        self.verify()
+        candidate = self.candidate
+        head = candidate['commit']
+        base = self.last_reviewed.get('tree') or self.initial
+        patch = self.git('diff', '--no-ext-diff', '--no-textconv', '--stat', base, head,
+                         '--', '.', ':(exclude).auto-moniter').decode(errors='replace')
+        changes = self.git('diff', '--no-ext-diff', '--no-textconv', base, head,
+                           '--', '.', ':(exclude).auto-moniter').decode(errors='replace')
+        from auto_moniter.runlog import clipped
+        return '\n'.join([
+            'Pending immutable Git TREE snapshot, not an approved commit.',
+            f'Worker checkpoint: {head}', f'Worker conclusion: {candidate["record"]}',
+            f'Previous completed business review tree: {base}',
+            'Inspect this delta and its affected callers, requirements and open AUDs:',
+            self.diff_command(base, head),
+            'Reuse unchanged verified findings from the previous business audit. '
+            'Reopen them only for a changed dependency, changed evidence, failed check or concrete counterexample. '
+            'Do not repeat a full audit or demand another identical test run just because the round changed.',
+            'The cumulative diff remains available when shared behavior or missing scope requires it:',
+            self.diff_command(self.initial, head),
+            'Cite the FULL worker checkpoint hash and actual changed-file evidence. '
+            'No file writes, tests, builds or Git commits are permitted for the reviewer.',
+            'Delta stat:\n' + clipped(patch, 12000), 'Delta:\n' + clipped(changes, 24000)])
+
+    def remember_review(self, index):
+        if self.candidate.get('round') == index:
+            self.last_reviewed = {'round': index, 'tree': self.candidate['commit']}
+            self._save()
 
     def review_problems(self,evidence):
         if not self.candidate or not any(self.candidate['commit'] in item for item in evidence):
@@ -77,4 +101,5 @@ class ApprovedHistory(GitHistory):
         return super().record(index,role,data,before=before,raw=raw)
 
     def export(self):
-        return {**super().export(),'approval_only':True,'candidate':self.candidate,'business_head':self.business_head}
+        return {**super().export(),'approval_only':True,'candidate':self.candidate,'business_head':self.business_head,
+                'last_reviewed':self.last_reviewed}

@@ -1,0 +1,89 @@
+(node:1713871) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TAP version 13
+# (node:1713880) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# (node:1713880) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/skn/code/auto_moniter/console/static/core.js?compat=1 is not specified and it doesn't parse as CommonJS.
+# Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+# To eliminate this warning, add "type": "module" to /home/skn/package.json.
+# Subtest: GET works without AbortSignal static helpers and releases listeners
+ok 1 - GET works without AbortSignal static helpers and releases listeners
+  ---
+  duration_ms: 16.204801
+  ...
+# Subtest: POST preserves token lookup and the JSON body
+ok 2 - POST preserves token lookup and the JSON body
+  ---
+  duration_ms: 6.401956
+  ...
+# Subtest: network failure releases the timeout
+ok 3 - network failure releases the timeout
+  ---
+  duration_ms: 6.839813
+  ...
+# Subtest: a stalled request times out with a readable error
+ok 4 - a stalled request times out with a readable error
+  ---
+  duration_ms: 8.275088
+  ...
+# Subtest: the timeout also covers reading the response body
+ok 5 - the timeout also covers reading the response body
+  ---
+  duration_ms: 3.716116
+  ...
+# Subtest: caller cancellation remains AbortError
+ok 6 - caller cancellation remains AbortError
+  ---
+  duration_ms: 4.513867
+  ...
+# Subtest: an already canceled request is not revived
+ok 7 - an already canceled request is not revived
+  ---
+  duration_ms: 4.474903
+  ...
+# Subtest: leaving the page cancels pending requests
+ok 8 - leaving the page cancels pending requests
+  ---
+  duration_ms: 3.418769
+  ...
+# Subtest: malformed JSON keeps the HTTP diagnostic
+ok 9 - malformed JSON keeps the HTTP diagnostic
+  ---
+  duration_ms: 3.688239
+  ...
+# (node:1713881) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# (node:1713881) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/skn/code/auto_moniter/console/static/dialogs.js?boundary=1 is not specified and it doesn't parse as CommonJS.
+# Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+# To eliminate this warning, add "type": "module" to /home/skn/package.json.
+# Subtest: selectedIdsForMode and checksForMode clear review_only and planning
+ok 10 - selectedIdsForMode and checksForMode clear review_only and planning
+  ---
+  duration_ms: 16.699212
+  ...
+# Subtest: applyVerificationModeToCreatePayload rejects modules checks for review_only
+ok 11 - applyVerificationModeToCreatePayload rejects modules checks for review_only
+  ---
+  duration_ms: 5.318693
+  ...
+# Subtest: create-form submit: residual checks cleared when mode is review_only; restored for executable
+ok 12 - create-form submit: residual checks cleared when mode is review_only; restored for executable
+  ---
+  duration_ms: 87.071686
+  ...
+# Subtest: create-form submit: modules[].checks with review_only blocks POST and keeps user input
+ok 13 - create-form submit: modules[].checks with review_only blocks POST and keeps user input
+  ---
+  duration_ms: 47.340055
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 297.270689
+
+EXIT:0

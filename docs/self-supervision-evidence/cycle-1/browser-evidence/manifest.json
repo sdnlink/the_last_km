@@ -1,0 +1,30 @@
+{
+  "source": "original headless Chrome evidence preserved by operator; not reconstructed screenshots",
+  "task_id": "cda15a5c834f46059d2b5e579b6db8d0",
+  "items": [
+    {
+      "file": "browser-evidence/before-submit.png",
+      "original": "/tmp/auto-selfhost-web-xb2Z7C/before-submit.png",
+      "bytes": 100629,
+      "sha256": "a43b1f3225980d5cd4d053152faa8a2da57691781b4f9d9965d18ff92f09213e"
+    },
+    {
+      "file": "browser-evidence/task-created.png",
+      "original": "/tmp/auto-selfhost-web-xb2Z7C/task-created.png",
+      "bytes": 36718,
+      "sha256": "4faf8f1f57d2f0f9fa033b29bcd1fd91ba854214103a8e1f9eb53ce339aaeadb"
+    },
+    {
+      "file": "browser-evidence/role-switch.png",
+      "original": "/tmp/auto-selfhost-web-caIaRt/role-switch.png",
+      "bytes": 91329,
+      "sha256": "11b5f9d03800fe810d063d6fb0e44025ddcc4e5c70a28e2e4592986c0d922388"
+    },
+    {
+      "file": "browser-evidence/resumed.png",
+      "original": "/tmp/auto-selfhost-web-caIaRt/resumed.png",
+      "bytes": 54437,
+      "sha256": "ca0f97a90ce8a00c6c04260a64dc55a66e2a1bb16cb8b0868182310d29ee1eb0"
+    }
+  ]
+}

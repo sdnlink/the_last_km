@@ -1,0 +1,75 @@
+[
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "tests.test_node_acceptance",
+      "-v"
+    ],
+    "started_at": "2026-11-09T03:37:34.753335+00:00",
+    "duration_s": 1.02,
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-01.log",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-q"
+    ],
+    "started_at": "2026-11-09T03:37:35.773573+00:00",
+    "duration_s": 61.228,
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-02.log",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-q"
+    ],
+    "started_at": "2026-11-09T03:38:37.002348+00:00",
+    "duration_s": 64.281,
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-03.log",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "node",
+      "--test",
+      "tests/test_console_requests.mjs"
+    ],
+    "started_at": "2026-11-09T03:39:41.284011+00:00",
+    "duration_s": 0.114,
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-04.log",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "started_at": "2026-11-09T03:39:41.398514+00:00",
+    "duration_s": 0.004,
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-05.log",
+    "actor": "worker",
+    "not_watcher_approval": true
+  }
+]

@@ -1,0 +1,21 @@
+test_audit_resolutions_helper_still_enforces_one_to_four (tests.test_resolution_feedback.ResolutionSchemaTests.test_audit_resolutions_helper_still_enforces_one_to_four) ... ok
+test_illegal_id_and_blank_fields_are_rejected_with_specific_reason (tests.test_resolution_feedback.ResolutionSchemaTests.test_illegal_id_and_blank_fields_are_rejected_with_specific_reason) ... ok
+test_schema_documents_resolution_bounds (tests.test_resolution_feedback.ResolutionSchemaTests.test_schema_documents_resolution_bounds) ... ok
+test_valid_one_and_four_evidence_strings_parse_as_done (tests.test_resolution_feedback.ResolutionSchemaTests.test_valid_one_and_four_evidence_strings_parse_as_done) ... ok
+test_zero_or_five_evidence_strings_are_rejected_with_specific_reason (tests.test_resolution_feedback.ResolutionSchemaTests.test_zero_or_five_evidence_strings_are_rejected_with_specific_reason) ... ok
+test_oversized_closure_keeps_issues_open_and_surfaces_reason_to_next_review (tests.test_resolution_feedback.ResolutionSupervisorFeedbackTests.test_oversized_closure_keeps_issues_open_and_surfaces_reason_to_next_review)
+Round-8 style 7/5 evidence lists must not close AUDs; next prompt sees the reason. ... ok
+test_blocked_without_blocker_continues (tests.test_verdict.VerdictTests.test_blocked_without_blocker_continues) ... ok
+test_completion_requires_explicit_valid_scope (tests.test_verdict.VerdictTests.test_completion_requires_explicit_valid_scope) ... ok
+test_done_with_gaps_is_continue (tests.test_verdict.VerdictTests.test_done_with_gaps_is_continue) ... ok
+test_empty_output_continues (tests.test_verdict.VerdictTests.test_empty_output_continues) ... ok
+test_last_conclusion_wins (tests.test_verdict.VerdictTests.test_last_conclusion_wins) ... ok
+test_parses_fenced_json (tests.test_verdict.VerdictTests.test_parses_fenced_json) ... ok
+test_unstructured_output_continues (tests.test_verdict.VerdictTests.test_unstructured_output_continues) ... ok
+test_malformed_closure_cannot_claim_done (tests.test_audit_issues.AuditLedgerTests.test_malformed_closure_cannot_claim_done) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.417s
+
+OK
+EXIT=0

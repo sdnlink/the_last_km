@@ -4,7 +4,7 @@ const loaded=new Map();
 const state={config:null,directionTask:null,directionPending:new Set()};
 let directionTimer,stopTarget;
 let gitSequence=0,gitController;
-let resumeTarget;
+let resumeTarget,rolesTarget;
 let acceptanceScan=null,acceptanceSequence=0;
 function acceptanceContext(){const f=$('#create-form');return {cwd:f.elements.cwd.value.trim(),task_type:f.elements.task_type.value,python:f.elements.acceptance_python.value.trim()};}
 function acceptanceChanged(){acceptanceSequence++;acceptanceScan=null;$('#acceptance-options').textContent='';$('#acceptance-notice').textContent='项目目录、类型或解释器已改变，请重新扫描。';}
@@ -21,12 +21,59 @@ async function scanAcceptance(){
  }catch(error){if(seq===acceptanceSequence)$('#acceptance-notice').textContent=error.message;return null;}
  finally{$('#scan-acceptance').disabled=false;}
 }
+/** Modes that must not carry executable checks or selected scan IDs. */
+export function modeOmitsExecution(mode){
+ return mode==='planning'||mode==='review_only';
+}
+/** Build selected_ids for the create payload from mode and currently checked boxes. */
+export function selectedIdsForMode(mode,checkedIds){
+ return modeOmitsExecution(mode)?[]:[...checkedIds];
+}
+/** Drop advanced custom commands when the chosen mode forbids execution. */
+export function checksForMode(mode,checks){
+ return modeOmitsExecution(mode)?[]:(Array.isArray(checks)?checks.filter(Boolean):[]);
+}
+/** Non-empty modules[].checks that would schedule watcher execution. */
+export function moduleExecutionCommands(modules){
+ if(!Array.isArray(modules))return [];
+ const out=[];
+ for(const item of modules){
+  if(!item||typeof item!=='object')continue;
+  const checks=Array.isArray(item.checks)?item.checks:[];
+  for(const command of checks){if(typeof command==='string'&&command.trim())out.push(command.trim());}
+ }
+ return out;
+}
+/**
+ * Apply review_only/planning execution boundary to a create-form payload.
+ * Rejects modules[].checks instead of silently stripping fixed module commands.
+ * Mutates and returns data for the /api/tasks body.
+ */
+export function applyVerificationModeToCreatePayload(data){
+ const mode=data.verification_mode;
+ data.checks=checksForMode(mode,data.checks);
+ if(data.acceptance_plan){
+  data.acceptance_plan={...data.acceptance_plan,selected_ids:selectedIdsForMode(mode,data.acceptance_plan.selected_ids||[])};
+ }
+ if(modeOmitsExecution(mode)&&moduleExecutionCommands(data.modules).length){
+  throw new Error('仅语义审核或制定方案不能附带 modules[].checks 执行命令；请清除模块检查或改用执行验收模式');
+ }
+ if(mode==='executable'&&!(data.acceptance_plan?.selected_ids||[]).length&&!(data.checks||[]).length){
+  throw new Error('请选择至少一个检查项；没有入口时可以先制定验收方案');
+ }
+ return data;
+}
 function acceptancePlan(){
  const f=$('#create-form');
  if(!acceptanceScan||JSON.stringify(acceptanceScan.context)!==JSON.stringify(acceptanceContext()))throw new Error('请先扫描当前项目并确认检查项');
+ const checked=[...$('#acceptance-options').querySelectorAll('[data-check-id]:checked')].map(c=>c.dataset.checkId);
  return {task_type:f.elements.task_type.value,python:acceptanceScan.python,signature:acceptanceScan.signature,
-  criteria:f.elements.acceptance_criteria.value.trim(),selected_ids:f.elements.verification_mode.value==='planning'?[]:[...$('#acceptance-options').querySelectorAll('[data-check-id]:checked')].map(c=>c.dataset.checkId)};
+  criteria:f.elements.acceptance_criteria.value.trim(),selected_ids:selectedIdsForMode(f.elements.verification_mode.value,checked)};
 }
+/** Test hook: seed acceptance scan state as if scanAcceptance just succeeded. */
+export function setAcceptanceScanForTest(scan){acceptanceScan=scan;acceptanceSequence+=1;}
+/** Test hook: bind create-form listeners after HTML is inserted. */
+export function bindCreateFormForTest(){bind('create');}
 let deleteTarget;
 export async function confirmDelete(id){
  try{
@@ -42,6 +89,17 @@ export async function openResume(id){
   const u=task.usage||task.health?.usage||{};
   $('#resume-usage').textContent=`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
   $('#resume-form').reset();$('#resume-error').hidden=true;$('#resume-dialog').showModal();
+ }catch(error){toast(error.message,true);}
+}
+export async function openRoles(id){
+ try{
+  await ensure('roles');const task=await api(`/api/tasks/${id}`);const cfg=await config();
+  if(!task.actions.includes('roles'))throw new Error('请先停止任务并等待检查点保存，再调整角色');
+  rolesTarget=id;const f=$('#roles-form');
+  const options=cfg.providers.filter(p=>p.name!=='paseo').map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
+  f.elements.provider.innerHTML=options;f.elements.reviewer.innerHTML=options;
+  for(const key of ['provider','reviewer','model','reviewer_model'])f.elements[key].value=task[key]||'';
+  $('#roles-error').hidden=true;$('#roles-dialog').showModal();
  }catch(error){toast(error.message,true);}
 }
 async function ensure(name){
@@ -161,6 +219,16 @@ export async function openGitRecord(id,commit){
  finally{if(seq===gitSequence&&$('#git-record-loading'))$('#git-record-loading').hidden=true;}
 }
 function bind(name){
+ if(name==='roles'){
+  $('#roles-form').addEventListener('submit',async e=>{
+   e.preventDefault();const id=rolesTarget;if(!id)return;
+   $('#roles-submit').disabled=true;$('#roles-error').hidden=true;
+   try{await api(`/api/tasks/${id}/roles`,Object.fromEntries(new FormData(e.target)));$('#roles-dialog').close();toast('角色配置已保存，恢复执行后生效');await refresh();}
+   catch(error){$('#roles-error').hidden=false;$('#roles-error').textContent=error.message;}
+   finally{$('#roles-submit').disabled=false;}
+  });return;
+ }
+
  if(name==='delete'){
   $('#confirm-delete').addEventListener('click',async()=>{
    const id=deleteTarget;if(!id)return;
@@ -213,7 +281,7 @@ function bind(name){
    try{
     if(!acceptanceScan&&data.verification_mode!=='executable')await scanAcceptance();
     data.acceptance_plan=acceptancePlan();
-    if(data.verification_mode==='executable'&&!data.acceptance_plan.selected_ids.length&&!data.checks.length)throw new Error('请选择至少一个检查项；没有入口时可以先制定验收方案');
+    applyVerificationModeToCreatePayload(data);
    }catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;$('#create-submit').disabled=false;return;}
    $('#create-submit').disabled=true;$('#form-error').hidden=true;
    try{const t=await api('/api/tasks',data);location.assign(`/tasks/${t.id}`);}

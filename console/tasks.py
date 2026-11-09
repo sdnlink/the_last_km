@@ -69,6 +69,23 @@ def timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _module_check_commands(modules) -> list[str]:
+    """Collect non-empty modules[].checks from a raw create payload (pre-ModuleLedger)."""
+    if not isinstance(modules, list):
+        return []
+    commands: list[str] = []
+    for item in modules:
+        if not isinstance(item, dict):
+            continue
+        checks = item.get('checks') or []
+        if not isinstance(checks, list):
+            continue
+        for command in checks:
+            if isinstance(command, str) and command.strip():
+                commands.append(command.strip())
+    return commands
+
+
 class TaskStore:
     def __init__(self, data_dir: Path, cwd: Path, runs_dirs: list[Path] | None = None):
         self.data_dir = data_dir.resolve()
@@ -227,6 +244,8 @@ class TaskStore:
                 and not health.get('lock_held') and not health.get('guardian_lock_held')
                 and not (run / 'process.json').exists()):
             actions.append('delete')
+        if meta.get('managed') and (status == 'queued' or 'resume' in actions):
+            actions.append('roles')
         control_message = ''
         if meta.get('error') and not live:
             control_message = '上次启动失败：' + str(meta['error'])
@@ -277,6 +296,8 @@ class TaskStore:
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
                      'provider': meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                      'reviewer': meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'),
+                     'model': meta.get('model', ''), 'reviewer_model': meta.get('reviewer_model', ''),
+                     'role_changes': meta.get('role_changes', []) if include_details else [],
                      'created_at': meta.get('created_at') or state.get('updated_at', ''),
                      'updated_at': state.get('updated_at') or meta.get('created_at', ''),
                      'started_at': meta.get('started_at'), 'resources': resources,
@@ -440,16 +461,38 @@ class TaskStore:
         checks = data.get('checks', [])
         if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\x00' in c for c in checks):
             raise TaskError('验收命令格式不正确，每行填写一条命令')
+        # Distinguish explicit mode from legacy clients that omit verification_mode.
+        mode_explicit = 'verification_mode' in data
         verification_mode = data.get('verification_mode', 'review_only')
         if verification_mode not in ('executable', 'review_only', 'planning'):
             raise TaskError('验收模式无效')
+        # Module-level checks also schedule sh -lc execution via ModuleLedger; inspect raw
+        # payload before settings()/save so contradictory modes never leave a half task.
+        module_check_commands = _module_check_commands(data.get('modules', []))
         if verification_mode == 'planning':
             checks = []
             if guided:
                 guided = {**guided,'selected_ids':[],'selected':[]}
+            if module_check_commands:
+                raise TaskError(
+                    '制定验收方案模式不能附带模块执行检查；请清除 modules[].checks，'
+                    '或改用执行验收模式（不会静默删除固定模块命令）'
+                )
             requirement = ('本任务仅制定可执行的验收方案，不实施原目标、不安装依赖、不运行部署。'
                            '阅读项目已有验证入口，列出需求到检查项、所需环境、固定样本、成功/失败断言和仍缺的测试资产；'
                            '将方案写入项目文档并交独立 reviewer 审核。完成本任务不代表原目标通过验收。\n\n原目标：\n' + requirement)
+        elif verification_mode == 'review_only' and mode_explicit:
+            # Explicit semantic-review-only must not schedule execution via top-level checks,
+            # acceptance selected_ids, or modules[].checks. Reject before save/launch.
+            selected_ids = list((guided or {}).get('selected_ids') or [])
+            if selected_ids or checks or module_check_commands:
+                raise TaskError(
+                    '仅独立语义审核不能附带执行检查；请切换到执行验收模式，或清除已选检查项、'
+                    '高级命令与 modules[].checks 后再提交（不会静默删除固定模块命令）'
+                )
+            if guided:
+                guided = {**guided, 'selected_ids': [], 'selected': []}
+            checks = []
         if verification_mode == 'executable' and not checks and not (guided and guided['selected']):
             raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
@@ -650,6 +693,50 @@ class TaskStore:
             if action not in view['actions']:
                 raise TaskError('当前状态不支持此操作，请刷新后重试', 409)
             run = Path(meta['run_dir'])
+            if action == 'roles':
+                from console.roles import prepare
+                from auto_moniter.role_changes import normalize_provider_config
+                role_change_path = run / 'role-change.json'
+                # None = not written yet; False = wrote over empty; bytes = prior authorization backup.
+                role_change_backup = None
+                try:
+                    with inactive_run(run):
+                        state = read_json(run / 'state.json')
+                        arguments = self._resume_args(meta, state) if state else self._new_args(meta)
+                        arguments, values, resolved = prepare(arguments, data or {}, Path(meta['cwd']))
+                        policy = state.get('quality_policy', meta.get('quality_policy', {}))
+                        if policy.get('review_tools') == 'files_only' and values['reviewer'] != 'claude':
+                            raise ValueError('当前只读文件审核策略要求 Claude reviewer')
+                        available = discover_providers()
+                        for role in ('provider', 'reviewer'):
+                            if not available.get(values[role]):
+                                raise ValueError('未找到执行器：' + values[role])
+                        origin = normalize_provider_config(state.get('provider_config')) if state else None
+                        assignment = {'id': uuid.uuid4().hex, 'at': timestamp(),
+                                      'from': origin, 'to': resolved,
+                                      'models': {'worker': values['model'], 'reviewer': values['reviewer_model']}}
+                        if state:
+                            # Keep the prior authorization if metadata save fails after overwrite.
+                            if role_change_path.is_file() and not role_change_path.is_symlink():
+                                role_change_backup = role_change_path.read_bytes()
+                            else:
+                                role_change_backup = False
+                            write_json(role_change_path, assignment, durable=True)
+                            meta['resume_argv'] = arguments
+                        meta.update(values)
+                        meta['role_changes'] = (meta.get('role_changes', []) + [assignment])[-20:]
+                        self._save(meta)
+                except (ValueError, OSError, ProviderError) as exc:
+                    if role_change_backup is not None:
+                        try:
+                            if role_change_backup is False:
+                                role_change_path.unlink(missing_ok=True)
+                            else:
+                                role_change_path.write_bytes(role_change_backup)
+                        except OSError:
+                            pass
+                    raise TaskError(str(exc), 409) from exc
+                return self.detail(ident)
             if action == 'delete':
                 if not data or data.get('confirm') != ident:
                     raise TaskError('请确认删除此任务', 400)
@@ -718,7 +805,7 @@ class TaskStore:
             for path in run.glob('*'):
                 if path.is_symlink() or not path.is_file():
                     continue
-                if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl'} and not re.fullmatch(r'\d+-(?:(worker|reviewer)(-text)?\.(log|md)|check-\d+\.log)', path.name):
+                if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+)?)(-text)?\.(log|md)|check-\d+\.log)', path.name):
                     continue
                 try:
                     files.append((path.stat().st_mtime, path.name))

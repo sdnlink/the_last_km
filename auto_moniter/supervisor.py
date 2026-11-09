@@ -409,200 +409,214 @@ class Supervisor:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
-            round_index = self._next_round
-            if self.config.max_rounds and round_index > self.config.max_rounds:
-                return self._finish(
-                    "max_rounds",
-                    f"Stopped after {self.config.max_rounds} worker rounds.",
-                    records,
-                    last_worker,
+            pending = self._pending_review(records)
+            if pending is not None:
+                record = pending
+                round_index, verdict, tree = record.index, record.verdict, record.tree
+                turn = _CompletedTurn(verdict.raw, record.session_id, 0, False, record.elapsed_s,
+                                      Path(record.output_path), [])
+                self.log(f"round {round_index}: reusing worker candidate; only the unfinished reviewer will run")
+                self._event('worker_candidate_reused', round=round_index, tree=tree)
+            else:
+                round_index = self._next_round
+                if self.config.max_rounds and round_index > self.config.max_rounds:
+                    return self._finish(
+                        "max_rounds",
+                        f"Stopped after {self.config.max_rounds} worker rounds.",
+                        records,
+                        last_worker,
+                    )
+                self._check_budget(new_call=True)
+                self._next_round = round_index + 1
+                self._beat(f"round {round_index}: starting worker")
+                if self.git_history:
+                    self._git_before = self.git_history.begin_round(round_index)
+
+                worker_start_tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
+                track_files = bool(self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
+                before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                # Compare to the last verified workspace, including changes made
+                # between turns; comparing only to turn-start would miss those edits.
+                impact_before = getattr(self, '_impact_snapshot', None)
+                if impact_before is None and worker_start_tree == previous_tree:
+                    impact_before = before_files
+                self.log(f"round {round_index}: worker running")
+                reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session
+                turn = self._invoke(
+                    self.config.provider,
+                    worker_prompt,
+                    self.worker_session_id if reuse_worker else "",
+                    role="worker",
+                    index=round_index,
+                    model=self.config.model,
+                    extra_args=self.config.extra_args,
+                    read_only=False,
                 )
-            self._check_budget(new_call=True)
-            self._next_round = round_index + 1
-            self._beat(f"round {round_index}: starting worker")
-            if self.git_history:
-                self._git_before = self.git_history.begin_round(round_index)
-
-            worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
-            before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if self.config.quality_policy else {}
-            # Compare to the last verified workspace, including changes made
-            # between turns; comparing only to turn-start would miss those edits.
-            impact_before = getattr(self, '_impact_snapshot', None)
-            self.log(f"round {round_index}: worker running")
-            reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session
-            turn = self._invoke(
-                self.config.provider,
-                worker_prompt,
-                self.worker_session_id if reuse_worker else "",
-                role="worker",
-                index=round_index,
-                model=self.config.model,
-                extra_args=self.config.extra_args,
-                read_only=False,
-            )
-            if turn.session_id:
-                self.worker_session_id = turn.session_id
-            elif not self.worker_session_id:
-                self.log(f"round {round_index}: no worker session id; the next round starts a new session")
-            verdict = self._verdict_from_turn(turn, role="worker")
-            self._rounds_since_review += 1
-            tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
-            after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if self.config.quality_policy else {}
-            protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
-            changed_count = sum(before_files.get(k) != after_files.get(k) for k in before_files.keys() | after_files.keys())
-            checkpoint_due = bool(self.config.quality_policy and turn.timed_out
-                                  and self.quality.config['review_interval_s'] and changed_count)
-            reopened = self.audit.invalidate(tree)
-            if reopened:
-                self._event("audit_issues_reopened", issues=reopened, tree=tree)
-            changed_files = [str(Path(k).relative_to(self.config.cwd)) for k in impact_before.keys() | after_files.keys()
-                             if impact_before.get(k) != after_files.get(k)] if impact_before is not None and self.config.quality_policy else None
-            invalidated = self.modules.invalidate(tree, changed_files)
-            self._impact_snapshot = after_files if self.config.quality_policy else None
-            if invalidated:
-                self._event("modules_invalidated", modules=invalidated, tree=tree)
-            failure = _failure_reason(turn, verdict)
-            record = RoundRecord(
-                index=round_index,
-                role="worker",
-                verdict=verdict,
-                exit_code=turn.exit_code,
-                timed_out=turn.timed_out,
-                elapsed_s=turn.elapsed_s,
-                session_id=self.worker_session_id,
-                output_path=str(turn.output_path),
-                tree=tree,
-                failure=failure,
-                interruption=turn.interruption,
-            )
-            records.append(record)
-            if protected_errors:
-                return self._finish('action_required', 'Protected acceptance baseline changed; restore original assertions before resuming. Files: '
-                                    + ', '.join(protected_errors), records, verdict)
-            if self.git_history and self.config.workflow!='review-first':
-                self._checkpoint(record, turn.text, self._git_before)
-            elif self.git_history:
-                self.git_history.prepare_review(round_index,self._git_before)
-            if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
-                self._merge_modules(verdict)
-            self._write_state(records, "running", stall, previous_gap_key, tree)
-            self.log(
-                f"round {round_index}: worker status={verdict.status} "
-                f"gaps={len(verdict.gaps)} exit={turn.exit_code} elapsed={turn.elapsed_s:.1f}s "
-                + " ".join(verdict.summary.split())[:200]
-            )
-            if self._stop:
-                break
-
-            if failure and not checkpoint_due:
-                category, recovery = classify(failure)
-                self._event("agent_failure", role="worker", category=category, recovery=recovery)
-                if recovery == "stop":
-                    return self._finish("action_required", "Worker authentication failed; repair credentials then resume. " + failure, records, verdict)
-                if recovery == "fresh_session" and self.config.provider.name == "paseo":
-                    errors = self._close_delivered_sessions()
-                    if errors:
-                        raise RecoveryError("Cannot close invalid session: " + "; ".join(errors))
-                    self.worker_session_id = ""
-                worker_failures += 1
-                # Keep a Paseo agent id. The daemon still owns that agent after
-                # a local CLI failure, and the next round must send to it.
-                if self.config.provider.name != "paseo":
-                    self.worker_session_id = ""
-                    self._drop_worker_session = True
-                last_worker = verdict
-                # A failed implementation attempt does not resolve audit gaps.
-                # Carry the last review into the replacement worker session.
-                if self.quality.config.get('verified_progress'):
-                    stall, previous_gap_key, previous_tree = self._track_stall(stall, previous_gap_key, previous_tree, verdict, tree)
+                if turn.session_id:
+                    self.worker_session_id = turn.session_id
+                elif not self.worker_session_id:
+                    self.log(f"round {round_index}: no worker session id; the next round starts a new session")
+                verdict = self._verdict_from_turn(turn, role="worker")
+                self._rounds_since_review += 1
+                tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
+                changed_count = sum(before_files.get(k) != after_files.get(k) for k in before_files.keys() | after_files.keys())
+                checkpoint_due = bool(self.config.quality_policy and turn.timed_out
+                                      and self.quality.config['review_interval_s'] and changed_count)
+                changed_files = [str(Path(k).relative_to(self.config.cwd)) for k in impact_before.keys() | after_files.keys()
+                                 if impact_before.get(k) != after_files.get(k)] if impact_before is not None and track_files else None
+                reopened = self.audit.invalidate(tree, self.modules.affected(changed_files), changed_files)
+                if reopened:
+                    self._event("audit_issues_reopened", issues=reopened, tree=tree)
+                invalidated = self.modules.invalidate(tree, changed_files)
+                self._impact_snapshot = after_files if track_files else None
+                if invalidated:
+                    self._event("modules_invalidated", modules=invalidated, tree=tree)
+                failure = _failure_reason(turn, verdict)
+                record = RoundRecord(
+                    index=round_index,
+                    role="worker",
+                    verdict=verdict,
+                    exit_code=turn.exit_code,
+                    timed_out=turn.timed_out,
+                    elapsed_s=turn.elapsed_s,
+                    session_id=self.worker_session_id,
+                    output_path=str(turn.output_path),
+                    tree=tree,
+                    failure=failure,
+                    interruption=turn.interruption,
+                )
+                records.append(record)
+                if protected_errors:
+                    return self._finish('action_required', 'Protected acceptance baseline changed; restore original assertions before resuming. Files: '
+                                        + ', '.join(protected_errors), records, verdict)
+                if self.git_history and self.config.workflow!='review-first':
+                    self._checkpoint(record, turn.text, self._git_before)
+                elif self.git_history:
+                    self.git_history.prepare_review(round_index,self._git_before)
+                if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
+                    self._merge_modules(verdict)
                 self._write_state(records, "running", stall, previous_gap_key, tree)
-                self.log(f"round {round_index}: worker failure {worker_failures}: {failure}")
-                if _limit_reached(self.config.failure_limit, worker_failures):
+                self.log(
+                    f"round {round_index}: worker status={verdict.status} "
+                    f"gaps={len(verdict.gaps)} exit={turn.exit_code} elapsed={turn.elapsed_s:.1f}s "
+                    + " ".join(verdict.summary.split())[:200]
+                )
+                if self._stop:
+                    break
+
+                if failure and not checkpoint_due:
+                    category, recovery = classify(failure)
+                    self._event("agent_failure", role="worker", category=category, recovery=recovery)
+                    if recovery == "stop":
+                        return self._finish("action_required", "Worker authentication failed; repair credentials then resume. " + failure, records, verdict)
+                    if recovery == "fresh_session" and self.config.provider.name == "paseo":
+                        errors = self._close_delivered_sessions()
+                        if errors:
+                            raise RecoveryError("Cannot close invalid session: " + "; ".join(errors))
+                        self.worker_session_id = ""
+                    worker_failures += 1
+                    # Keep a Paseo agent id. The daemon still owns that agent after
+                    # a local CLI failure, and the next round must send to it.
+                    if self.config.provider.name != "paseo":
+                        self.worker_session_id = ""
+                        self._drop_worker_session = True
+                    last_worker = verdict
+                    # A failed implementation attempt does not resolve audit gaps.
+                    # Carry the last review into the replacement worker session.
+                    if self.quality.config.get('verified_progress'):
+                        stall, previous_gap_key, previous_tree = self._track_stall(stall, previous_gap_key, previous_tree, verdict, tree)
+                    self._write_state(records, "running", stall, previous_gap_key, tree)
+                    self.log(f"round {round_index}: worker failure {worker_failures}: {failure}")
+                    if _limit_reached(self.config.failure_limit, worker_failures):
+                        return self._finish(
+                            "failed",
+                            f"Worker failed {worker_failures} times. Last failure: {failure}",
+                            records,
+                            verdict,
+                        )
+                    self._retry_pause(worker_failures + (3 if recovery == "backoff" else 0), category + " worker failure")
+                    continue
+                worker_failures = 0
+                self._drop_worker_session = False
+
+                if self._stop:
+                    break
+
+                if self.config.no_review:
+                    worker_problems = acceptance_problems(
+                        self.config.cwd,
+                        verdict.evidence,
+                        baseline=self._baseline_files,
+                        ignore_dir=self.run_dir,
+                    ) if _accepted(verdict) else []
+                    if _accepted(verdict):
+                        worker_problems.extend(self.modules.coverage(verdict))
+                    if _accepted(verdict) and not worker_problems and verdict.scope == "requirement" and self._delivery_checks(round_index, verdict, expected_tree=tree):
+                        self.modules.accept(verdict, None, round_index, tree)
+                        return self._finish(
+                            "done",
+                            verdict.summary or "Worker reported done.",
+                            records,
+                            verdict,
+                        )
+                    if _accepted(verdict) and not worker_problems and verdict.scope == "module":
+                        if self._delivery_checks(round_index, verdict, final=False, expected_tree=tree):
+                            self.modules.accept(verdict, None, round_index, tree)
+                            self._complete_module(verdict)
+                            self.log(f"round {round_index}: module completed; continuing original requirement")
+                    if _accepted(verdict) and worker_problems:
+                        verdict.status = "continue"
+                        verdict.gaps.extend(worker_problems)
+                    last_worker = verdict
+                    last_review = None
+                    stall, previous_gap_key, previous_tree = self._track_stall(
+                        stall, previous_gap_key, previous_tree, verdict, tree
+                    )
+                    self._write_state(records, "running", stall, previous_gap_key, tree)
+                    if _limit_reached(self.config.stall_limit, stall):
+                        return self._finish(
+                            "stalled",
+                            "Worker repeated the same open gaps without changing the workspace.",
+                            records,
+                            verdict,
+                        )
+                    if stall:
+                        self.log(f"round {round_index}: same gaps and unchanged workspace, continuing")
+                    if stall or not _accepted(verdict):
+                        self._retry_pause(stall + 1, "unfinished worker turn")
+                    continue
+
+                periodic_review = (self.config.workflow == 'review-first' and tree != worker_start_tree) or bool(
+                    self.config.review_every and self._rounds_since_review >= self.config.review_every)
+                if self.config.quality_policy:
+                    threshold = self.quality.config['review_changed_files']
+                    periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
+                    if checkpoint_due:
+                        self.worker_session_id = ''
+                if not _accepted(verdict) and not verdict.blockers and not periodic_review:
+                    # An unfinished worker should keep implementing. A completion
+                    # candidate (or an external blocker) is the review checkpoint.
+                    last_worker = verdict
+                    stall, previous_gap_key, previous_tree = self._track_stall(
+                        stall, previous_gap_key, previous_tree, verdict, tree
+                    )
+                    self._write_state(records, "running", stall, previous_gap_key, tree)
+                    if _limit_reached(self.config.stall_limit, stall):
+                        return self._finish("stalled", "Worker repeated the same open gaps without changing the workspace.", records, verdict)
+                    if stall:
+                        self._retry_pause(stall, "unchanged worker gaps")
+                    continue
+
+                if reviewer is None:
                     return self._finish(
                         "failed",
-                        f"Worker failed {worker_failures} times. Last failure: {failure}",
+                        "No reviewer is configured. Pass --reviewer, or --no-review to trust the worker.",
                         records,
                         verdict,
                     )
-                self._retry_pause(worker_failures + (3 if recovery == "backoff" else 0), category + " worker failure")
-                continue
-            worker_failures = 0
-            self._drop_worker_session = False
-
-            if self._stop:
-                break
-
-            if self.config.no_review:
-                worker_problems = acceptance_problems(
-                    self.config.cwd,
-                    verdict.evidence,
-                    baseline=self._baseline_files,
-                    ignore_dir=self.run_dir,
-                ) if _accepted(verdict) else []
-                if _accepted(verdict):
-                    worker_problems.extend(self.modules.coverage(verdict))
-                if _accepted(verdict) and not worker_problems and verdict.scope == "requirement" and self._delivery_checks(round_index, verdict, expected_tree=tree):
-                    self.modules.accept(verdict, None, round_index, tree)
-                    return self._finish(
-                        "done",
-                        verdict.summary or "Worker reported done.",
-                        records,
-                        verdict,
-                    )
-                if _accepted(verdict) and not worker_problems and verdict.scope == "module":
-                    if self._delivery_checks(round_index, verdict, final=False, expected_tree=tree):
-                        self.modules.accept(verdict, None, round_index, tree)
-                        self._complete_module(verdict)
-                        self.log(f"round {round_index}: module completed; continuing original requirement")
-                if _accepted(verdict) and worker_problems:
-                    verdict.status = "continue"
-                    verdict.gaps.extend(worker_problems)
-                last_worker = verdict
-                last_review = None
-                stall, previous_gap_key, previous_tree = self._track_stall(
-                    stall, previous_gap_key, previous_tree, verdict, tree
-                )
-                self._write_state(records, "running", stall, previous_gap_key, tree)
-                if _limit_reached(self.config.stall_limit, stall):
-                    return self._finish(
-                        "stalled",
-                        "Worker repeated the same open gaps without changing the workspace.",
-                        records,
-                        verdict,
-                    )
-                if stall:
-                    self.log(f"round {round_index}: same gaps and unchanged workspace, continuing")
-                if stall or not _accepted(verdict):
-                    self._retry_pause(stall + 1, "unfinished worker turn")
-                continue
-
-            periodic_review = self.config.workflow=='review-first' or bool(self.config.review_every and self._rounds_since_review >= self.config.review_every)
-            if self.config.quality_policy:
-                threshold = self.quality.config['review_changed_files']
-                periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
-                if checkpoint_due:
-                    self.worker_session_id = ''
-            if not _accepted(verdict) and not verdict.blockers and not periodic_review:
-                # An unfinished worker should keep implementing. A completion
-                # candidate (or an external blocker) is the review checkpoint.
-                last_worker = verdict
-                stall, previous_gap_key, previous_tree = self._track_stall(
-                    stall, previous_gap_key, previous_tree, verdict, tree
-                )
-                self._write_state(records, "running", stall, previous_gap_key, tree)
-                if _limit_reached(self.config.stall_limit, stall):
-                    return self._finish("stalled", "Worker repeated the same open gaps without changing the workspace.", records, verdict)
-                if stall:
-                    self._retry_pause(stall, "unchanged worker gaps")
-                continue
-
-            if reviewer is None:
-                return self._finish(
-                    "failed",
-                    "No reviewer is configured. Pass --reviewer, or --no-review to trust the worker.",
-                    records,
-                    verdict,
-                )
 
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             self._process_control()
@@ -617,13 +631,13 @@ class Supervisor:
                         rounds_since_review=self._rounds_since_review)
             review_session = "" if self.config.fresh_review else self.reviewer_session_id
             try:
-                review_turn = self._invoke(
+                review_turn = self._invoke_review(
                     reviewer,
                     review_prompt,
                     review_session,
                     role="reviewer",
                     index=round_index,
-                    model=self.config.reviewer_model or self.config.model,
+                    model=self._reviewer_model(),
                     extra_args=self.config.reviewer_extra_args,
                     read_only=True,
                 )
@@ -649,9 +663,13 @@ class Supervisor:
                     review.status = 'continue'
                     review.gaps.extend(git_problems)
                     review.next_actions.append('Review the exact worker Git checkpoint and cite its full hash in evidence.')
+                    if self.config.workflow == 'review-first':
+                        review.parse_error = 'invalid review checkpoint evidence'
             if not review_turn.exit_code and not review_turn.timed_out and not review_turn.interruption and not review.parse_error:
                 self._merge_modules(review)
             review_failure = _failure_reason(review_turn, review)
+            if self.config.workflow == 'review-first' and review.parse_error and not review_failure:
+                review_failure = 'invalid conclusion: ' + review.parse_error
             watcher_result = {'status': 'not_applied', 'closed': [], 'reasons': [],
                               'issues': {item['id']: item['status'] for item in self.audit.items}}
             if (not review_failure and not review.parse_error and not review_turn.interruption
@@ -679,6 +697,8 @@ class Supervisor:
                     review.next_actions.append("Preserve open audit IDs; the reviewer must close each issue with valid file evidence.")
                 else:
                     self._audit_feedback = review
+                    if isinstance(self.git_history, ApprovedHistory):
+                        self.git_history.remember_review(round_index)
                     self._rounds_since_review = 0
             review_record = RoundRecord(
                 index=round_index,
@@ -733,8 +753,15 @@ class Supervisor:
                         records,
                         review,
                     )
+                if self.config.workflow == 'review-first':
+                    return self._finish('action_required', 'Reviewer did not finish; worker candidate saved. ' + review_failure,
+                                        records, verdict)
                 self._retry_pause(reviewer_failures + (3 if recovery == "backoff" else 0), category + " reviewer failure")
                 continue
+            if review.parse_error and self.config.workflow == 'review-first':
+                return self._finish('action_required',
+                                    'Reviewer conclusion remains invalid after repair; worker candidate saved. '
+                                    + review.parse_error, records, verdict)
             reviewer_failures = 0
             if self._progress_reset:
                 self.quality.state['blocker_count'] = 0
@@ -826,7 +853,7 @@ class Supervisor:
         self.log('requirements: reviewer elaborating original request; worker has not started')
         try:
             turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export()),'',
-                              role='reviewer',index=0,model=self.config.reviewer_model or self.config.model,
+                              role='reviewer',index=0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
             if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
                 raise ValueError('Requirement reviewer changed the read-only workspace')
@@ -1022,6 +1049,10 @@ class Supervisor:
             verdict.parse_error = "invalid module plan"
             verdict.gaps.append(f"Module plan rejected: {exc}")
 
+    def _reviewer_model(self):
+        # Different providers have different model namespaces.
+        return self.config.reviewer_model or (self.config.model if self.config.reviewer and self.config.reviewer.name == self.config.provider.name else '')
+
     def _provider_config(self) -> dict:
         def identity(provider):
             if provider is None:
@@ -1156,7 +1187,7 @@ class Supervisor:
             live_check.emit({'kind': 'command', 'text': redact(command), 'status': 'running'})
             try:
                 result = run_command(
-                    PreparedCommand(["sh", "-lc", command]), self.config.cwd,
+                    PreparedCommand(["sh", "-c", command]), self.config.cwd,
                     timeout_s=self.config.check_timeout_s,
                     detect_input_requests=False,
                     should_stop=self._should_stop, on_child=self._remember_child,
@@ -1399,6 +1430,8 @@ class Supervisor:
             "progress_pending": self._progress_reset,
             "recovery_count": self._recovery_count,
             "provider_config": self._provider_config(),
+            "role_assignment_id": getattr(self, "_role_assignment_id", ""),
+            "worker_direction_ids": self._direction_ids['worker'],
             "modules": self.modules.export(),
             "audit_issues": self.audit.export(),
             "usage": self._usage(),
@@ -1483,16 +1516,23 @@ class Supervisor:
             self.log(f"resume refused: run already finished with status {status}")
             self._resume_refused = status
             return None
+        reassignment = None
         if "provider_config" in state:
-            saved_config = dict(state["provider_config"])
-            saved_config.setdefault("review_isolation", "provider")
-            saved_config.setdefault("worker_isolation", "provider")
-            saved_config.setdefault("protect_paths", [])
-            if saved_config != self._provider_config():
+            from .role_changes import authorized_change, normalize_provider_config
+            saved_config = normalize_provider_config(state["provider_config"])
+            reassignment = authorized_change(self.run_dir, saved_config, self._provider_config())
+            if saved_config != self._provider_config() and not reassignment:
                 raise ValueError("saved worker/reviewer providers, backends, modes, or command templates do not match; resume with the original configuration")
         self.worker_session_id = str(state.get("session_id") or "")
         self.reviewer_session_id = str(state.get("reviewer_session_id") or "")
         self._active_reviewer_id = str(state.get("active_reviewer_session_id") or "")
+        self._role_assignment_id = state.get("role_assignment_id", "")
+        if reassignment and reassignment['id'] != self._role_assignment_id:
+            if reassignment.get('models') != {'worker': self.config.model or '', 'reviewer': self.config.reviewer_model or ''}:
+                raise ValueError('Role assignment models do not match the saved task override')
+            self.worker_session_id = self.reviewer_session_id = self._active_reviewer_id = ''
+            self._role_assignment_id = reassignment['id']
+            self._event('roles_reassigned', assignment_id=self._role_assignment_id)
         self._no_progress = int(state.get("no_progress_turns") or 0)
         self._progress_reset = state.get("progress_pending", False)
         if type(self._progress_reset) is not bool:
@@ -1598,6 +1638,11 @@ class Supervisor:
             self.reviewer_session_id = ""
         last_worker = _verdict_from_state(state.get("last_worker"))
         last_review = _verdict_from_state(state.get("last_review"))
+        covered_directions = state.get('worker_direction_ids', [])
+        if (not isinstance(covered_directions, list) or len(covered_directions) > 64
+                or any(not isinstance(v, str) for v in covered_directions)):
+            raise ValueError('Invalid saved worker direction coverage')
+        self._direction_ids['worker'] = covered_directions
         self._review_feedback = last_review
         self._audit_feedback = _verdict_from_state(state.get("last_audit", state.get("last_review")))
         if "audit_issues" in state:
@@ -1657,6 +1702,12 @@ class Supervisor:
                 "a module milestone is not completion of the entire requirement.",
                 "This is a fresh session if you do not remember earlier edits. Read the workspace before changing it.",
                 "Close every open gap. Add the missing behavior, tests, and checks.",
+                "Address the named blocking findings as a bounded repair. Preserve verified behavior and unchanged "
+                "evidence; do not rewrite it simply because another round started. Run focused checks for the changed "
+                "behavior, then one relevant regression suite. Do not run equivalent full discovery commands twice "
+                "without a changed input or observed failure. The watcher executes the fixed delivery checks itself. "
+                "Keep evidence concise: real command, exit status, source version, remaining limitations. "
+                "A reviewer transport or conclusion-format failure requires reviewer repair, not implementation edits.",
                 "Make concrete progress or verify the deliverable; avoid unnecessary edits to already completed work.",
                 "If the review is wrong, fix the evidence and say why in summary. If it is right, do the work.",
                 "A person is not available. Decide and proceed.",
@@ -1742,6 +1793,17 @@ class Supervisor:
                 "A done conclusion without evidence is rejected. Cite files, commands, and observations in evidence.",
                 "Style nits alone are not gaps. A missing requirement, failing check, or unwired feature is a gap.",
                 "If you find gaps, status must be continue and next_actions must tell the worker exactly what to change.",
+                "For each blocking gap, give its AUD ID (if assigned), requirement/criterion, exact file or symbol, "
+                "reproducible trigger, expected versus observed behavior, minimal fix boundary, and a precise verification "
+                "command or assertion. Distinguish a reproduced failure from a code inference. "
+                "Inspect ALL execution entry points and the actual caller/submission path in the first audit; "
+                "return all currently known blockers together, not one new condition on each round. "
+                "Do not invent acceptance criteria beyond the original request and human amendments.",
+                "Reuse unchanged verified findings. Recheck the new delta, affected dependencies, open AUD fixes "
+                "and integration. A wording/log-format preference is not a blocking product defect unless it "
+                "contradicts acceptance or makes evidence materially false. Do not demand both unittest discover "
+                "variants when they collect the same suite. The watcher independently executes fixed checks; "
+                "do not require the worker to copy future watcher results into source documents before they exist.",
                 "Use blocked only when an external secret, credential, or unavailable service stops all progress.",
                 "If the worker claims blocked but you can continue without that dependency, status must be continue.",
                 "Monitoring continues through questions and blockers. Do not ask the person for permission to continue.",
@@ -1788,7 +1850,8 @@ class Supervisor:
                 workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir),
                 "",
                 "Workspace diff:",
-                workspace_diff(self.config.cwd, ignore_dir=self.run_dir),
+                ('(Use the immutable review delta below; request the cumulative diff only for affected integration.)'
+                 if isinstance(self.git_history, ApprovedHistory) else workspace_diff(self.config.cwd, ignore_dir=self.run_dir)),
                 self.git_history.review_context() if self.git_history else '',
                 "",
                 f"Worker transcript: {output_path}",
@@ -1796,6 +1859,72 @@ class Supervisor:
                 verdict_instructions(),
             ]
         )
+
+    def _pending_review(self, records):
+        """Resume an exact submitted candidate after review transport/format failure."""
+        if self.config.workflow != 'review-first' or self.config.no_review or self._pending_directions():
+            return None
+        worker = next((r for r in reversed(records) if r.role == 'worker'), None)
+        if not worker or worker.failure or worker.interruption or not _accepted(worker.verdict):
+            return None
+        review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
+        if review and not (review.failure or review.interruption or review.verdict.parse_error):
+            return None
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree:
+            return None
+        return worker
+
+    def _invoke_review(self, provider, prompt, session_id, **kwargs):
+        """One bounded repair belongs to the reviewer, never to the worker."""
+        tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        for attempt in range(2):
+            turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
+            review = self._verdict_from_turn(turn, role='reviewer')
+            if self.git_history and _accepted(review):
+                problems = self.git_history.review_problems(review.evidence)
+                if problems:
+                    review.status = 'continue'
+                    review.parse_error = 'invalid review checkpoint evidence'
+                    review.gaps.extend(problems)
+            failure = _failure_reason(turn, review)
+            invalid = failure or review.parse_error or turn.interruption
+            if not invalid or self._stop or self.config.workflow != 'review-first':
+                return turn
+            if attempt or (failure and classify(failure)[1] == 'stop'):
+                return turn
+            if (self._pending_directions()
+                    or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
+                return turn
+            self._event('reviewer_repair', round=kwargs['index'], reason=str(invalid)[:1000])
+            repair_id = self._agent_calls
+            failed_log = turn.output_path.with_name(f"{kwargs['index']:03d}-reviewer-repair-{repair_id}.log")
+            turn.output_path.replace(failed_log)
+            failed_text = self.run_dir / f"{kwargs['index']:03d}-reviewer-text.md"
+            if failed_text.exists():
+                failed_text.replace(self.run_dir / f"{kwargs['index']:03d}-reviewer-repair-{repair_id}-text.md")
+            write_json(self.run_dir / 'review-repair.json',
+                       {'round': kwargs['index'], 'tree': tree, 'attempt': attempt + 1,
+                        'reason': str(invalid)[:2000], 'feedback': review.to_dict()}, durable=True)
+            rejected = RoundRecord(kwargs['index'], 'reviewer', review, turn.exit_code,
+                                   turn.timed_out, turn.elapsed_s, turn.session_id, str(failed_log),
+                                   tree=tree, failure=str(invalid), interruption=turn.interruption,
+                                   watcher_result={'status': 'not_applied', 'closed': [], 'reasons': [str(invalid)],
+                                                   'issues': {v['id']: v['status'] for v in self.audit.items}})
+            self._records.append(rejected)
+            saved = json.loads((self.run_dir / 'state.json').read_text())
+            self._write_state(self._records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), tree)
+            # Keep the read-only tool and provider boundary. The next invocation is
+            # charged to the existing cumulative call/time budget.
+            marker = 'Previous independent review and monitor acceptance feedback:\n'
+            if marker in prompt:
+                start = prompt.index(marker) + len(marker)
+                end = prompt.index('\n\nLast completed business audit', start)
+                prompt = prompt[:start] + json.dumps(review.to_dict(), ensure_ascii=False, indent=2) + prompt[end:]
+            prompt += ('\n\nReviewer-only repair of the SAME candidate. Worker has not changed it. '
+                       'Retain already verified substantive findings; correct only the failed conclusion '
+                       'or complete the interrupted audit. Do not invent implementation work.\n'
+                       + json.dumps(review.to_dict(), ensure_ascii=False) + '\nValidation error: ' + str(invalid))
+        return turn
 
     def _invoke(
         self,

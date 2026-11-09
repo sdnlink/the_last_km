@@ -45,12 +45,29 @@ VERDICT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
         },
-        "issue_resolutions": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False,
-            "properties": {"id": {"type": "string"}, "summary": {"type": "string"},
-                           "evidence": {"type": "array", "items": {"type": "string"}}},
-            "required": ["id", "summary", "evidence"],
-        }},
+        "issue_resolutions": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "pattern": "^AUD-[1-9][0-9]{0,11}$",
+                        "minLength": 5,
+                    },
+                    "summary": {"type": "string", "minLength": 1},
+                    "evidence": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                },
+                "required": ["id", "summary", "evidence"],
+            },
+        },
     },
     "required": [
         "status",
@@ -75,7 +92,7 @@ _INPUT_REQUEST = re.compile(
     r"|(?:please|waiting for|awaiting|need (?:your|user))[^\n]{0,80}(?:confirm|approval|permission|input|response)"
     r"|(?:confirm|approve|allow|continue|proceed)[^\n]{0,60}(?:\[y/n\]|\[Y/n\]|\(y/n\)|\[yes/no\])"
     r"|(?:是否|要不要|需要我|可以|能否)[^\n]{0,60}(?:继续|开始|执行|实现|修改|修复|运行|确认)[^\n]{0,30}[？?]"
-    r"|(?:请|等待|需要)[^\n]{0,35}(?:你|您|用户)?(?:确认|批准|授权|回复|选择|提供)[^\n]{0,70}",
+    r"|(?:请(?:你|您|用户)?(?:先|明确|手动|人工)?|等待(?:你|您|用户)?的?|需要(?:你|您|用户)(?:先|明确|手动|人工)?)(?:确认|批准|授权|回复|选择|提供)[^\n。！？；]{0,70}",
     re.IGNORECASE,
 )
 
@@ -170,16 +187,33 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
         invalid.append("modules")
     if not isinstance(data.get("status"), str) or data["status"] not in _STATUS:
         invalid.append("status")
+    resolution_error = ""
     try:
         resolutions(verdict.issue_resolutions)
-    except ValueError:
+    except ValueError as exc:
         invalid.append("issue_resolutions")
+        resolution_error = str(exc).strip() or "issue_resolutions invalid"
+        # Reject the closure payload; keep the specific reason for the next agent.
         verdict.issue_resolutions = []
     if invalid:
-        verdict.parse_error = "invalid conclusion fields"
+        labels = sorted(set(invalid))
+        if resolution_error:
+            verdict.parse_error = "invalid issue_resolutions: " + resolution_error
+            # to_dict drops parse_error; always put the concrete reason in gaps for
+            # continue/done/blocked so the next worker/reviewer prompt can see it.
+            feedback = "Invalid issue_resolutions: " + resolution_error
+            if feedback not in verdict.gaps:
+                verdict.gaps.append(feedback)
+        else:
+            verdict.parse_error = "invalid conclusion fields"
         if verdict.status == "done":
             verdict.status = "continue"
-            verdict.gaps.append("Completion conclusion has missing or invalid fields: " + ", ".join(sorted(set(invalid))))
+            detail = ", ".join(labels)
+            completion = "Completion conclusion has missing or invalid fields: " + detail
+            if resolution_error:
+                completion += ". " + resolution_error
+            if completion not in verdict.gaps:
+                verdict.gaps.append(completion)
     # A claim of done with leftover work is not done.
     if verdict.status == "done" and (verdict.gaps or verdict.next_actions or verdict.blockers):
         verdict.status = "continue"
@@ -327,7 +361,14 @@ def verdict_instructions() -> str:
         "- If any requirement, edge case, test, or unwired path within the declared scope is still open, status must be continue and gaps must name it.\n"
         "- next_actions are concrete steps for the next turn.\n"
         "- Reviewers reporting an existing unresolved issue prefix its gaps entry with the monitor's AUD ID, e.g. AUD-1: assertion still fails. Use plain text for genuinely new findings and never invent AUD IDs.\n"
-        "- issue_resolutions is an array of {id, summary, evidence: [file, ...]}; use [] if none. Only the independent reviewer may close monitor-assigned AUD issues after inspecting the fix or showing why the finding is invalid. Cite current changed project files and explain each closure. Workers implement fixes and leave issue_resolutions=[]. Omitted or unresolved issues stay open; never invent issue IDs.\n"
+        "- issue_resolutions is an array of at most 128 objects {id, summary, evidence}; use [] if none. "
+        "Each id must match ^AUD-[1-9][0-9]{0,11}$ and be a monitor-assigned open issue. "
+        "summary must be a non-empty string. evidence must be 1 to 4 non-empty strings naming current changed files "
+        "(the monitor rejects 0 or more than 4). Only the independent reviewer may close issues after inspecting the fix "
+        "or showing why the finding is invalid. Workers implement fixes and leave issue_resolutions=[]. "
+        "Omitted or unresolved issues stay open; never invent issue IDs. "
+        "If a prior turn failed validation, the gap text includes the exact reason "
+        "(for example 'Issue resolution needs 1-4 evidence strings'); fix that reason rather than repeating oversized lists.\n"
         "- evidence lists files, commands, or observations that support the summary. Both worker and reviewer done conclusions must cite a workspace file created, changed or removed during this run and present in the current diff. A removed file must have existed in the initial monitor baseline; cite its original path without recreating it.\n"
         "- blockers are only external facts a person must resolve, such as a missing credential. Missing ideas are not blockers.\n"
         "- Do not stop early. A conclusion is a checkpoint, not permission to idle."

@@ -1,0 +1,78 @@
+[
+  {
+    "command": [
+      "sh",
+      "-lc",
+      "cd /home/skn/code/auto_moniter; export PATH=/home/skn/.local/bin:$PATH; /home/skn/code/auto_moniter/.venv/bin/python -m unittest discover -q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-42.log",
+    "summary": "Ran 483 tests OK under watcher-like sh -lc with ~/.local/bin codex on PATH",
+    "actor": "worker",
+    "not_watcher_approval": true,
+    "note": "After operator codex PATH link and protected-test restoration; does not claim watcher approval"
+  },
+  {
+    "command": [
+      "sh",
+      "-lc",
+      "cd /home/skn/code/auto_moniter; export PATH=/home/skn/.local/bin:$PATH; /home/skn/code/auto_moniter/.venv/bin/python -m unittest discover -s tests -q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-43.log",
+    "summary": "Ran 483 tests OK",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": ["node", "--test", "tests/test_console_requests.mjs"],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-44.log",
+    "summary": "9 pass 0 fail",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": ["git", "diff", "--check"],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-45.log",
+    "summary": "no whitespace errors",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "tests.test_role_changes",
+      "tests.test_resolution_feedback",
+      "tests.test_node_acceptance",
+      "tests.test_grok_streaming",
+      "tests.test_input_progress",
+      "-q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-1/worker-check-46.log",
+    "summary": "Ran 44 focused tests OK (role+resolution+node+grok+input_progress)",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "note": "Protected tests match main HEAD after operator restoration; worker did not re-edit them. SHA-256 tests/__init__.py=16281e5aac1f782803e087e9cf55b3c0d10f87ebddcc75e0e161cb2d43b8db1d tests/test_runtime_completion.py=73d156edcfc5710422ea7bb1b2e741d7066d850a6706bb2473d8545b6ddca638. Round-11 watcher invalid root cause was missing codex on sh -lc PATH (operator-codex-path-preparation.json), not nested TMPDIR. AUD close remains reviewer-only.",
+    "operator_receipts_read_only": [
+      ".auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/operator-codex-path-preparation.json",
+      ".auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/operator-protected-test-restoration.json"
+    ],
+    "changed_files_this_round": [
+      "docs/self-supervision-acceptance.md",
+      "docs/self-supervision-evidence/cycle-1/worker-checks-final-candidate.json",
+      "docs/self-supervision-evidence/cycle-1/worker-check-42.log",
+      "docs/self-supervision-evidence/cycle-1/worker-check-43.log",
+      "docs/self-supervision-evidence/cycle-1/worker-check-44.log",
+      "docs/self-supervision-evidence/cycle-1/worker-check-45.log",
+      "docs/self-supervision-evidence/cycle-1/worker-check-46.log"
+    ],
+    "actor": "worker"
+  }
+]

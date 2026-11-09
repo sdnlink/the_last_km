@@ -105,13 +105,14 @@ class ModuleLedger:
                 evidence = [text.encode("utf-8")[:1024].decode("utf-8", errors="ignore") for text in (reviewer or worker).evidence[:4]]
                 self.items[key].update(status="accepted", evidence=evidence, round=index, tree=tree, invalidated_reason="")
 
-    def invalidate(self, tree: str, changed_files: list[str] | None = None) -> list[str]:
+    def affected(self, changed_files: list[str] | None = None) -> set[str]:
+        """Missing scopes and shared files conservatively require revalidation."""
         affected = set(self.items)
-        if changed_files is not None and all(m.get('files') for m in self.items.values()):
-            affected = {key for key, m in self.items.items() if any(
-                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in m['files'])}
+        if changed_files is not None:
+            affected = {key for key, m in self.items.items() if not m.get('files') or any(
+                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in m.get('files', []))}
             # Undeclared files may be shared configuration; fail conservatively.
-            if any(not any(fnmatch.fnmatchcase(path, pattern) for m in self.items.values() for pattern in m['files'])
+            if any(not any(fnmatch.fnmatchcase(path, pattern) for m in self.items.values() for pattern in m.get('files', []))
                    for path in changed_files):
                 affected = set(self.items)
             while True:
@@ -119,6 +120,10 @@ class ModuleLedger:
                 if more <= affected:
                     break
                 affected |= more
+        return affected
+
+    def invalidate(self, tree: str, changed_files: list[str] | None = None) -> list[str]:
+        affected = self.affected(changed_files)
         changed = []
         for key, item in self.items.items():
             if item["status"] == "accepted" and item.get("tree") != tree:

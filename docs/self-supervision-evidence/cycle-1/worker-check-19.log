@@ -1,0 +1,22 @@
+test_explicit_human_requests_are_still_detected (tests.test_input_progress.InputProgressTests.test_explicit_human_requests_are_still_detected) ... ok
+test_progress_stream_does_not_interrupt_work_between_tool_calls (tests.test_input_progress.InputProgressTests.test_progress_stream_does_not_interrupt_work_between_tool_calls) ... ok
+test_review_progress_does_not_cross_sentence_boundaries (tests.test_input_progress.InputProgressTests.test_review_progress_does_not_cross_sentence_boundaries) ... ok
+test_applied_assignment_does_not_discard_new_sessions_on_next_resume (tests.test_role_changes.RoleChangeTests.test_applied_assignment_does_not_discard_new_sessions_on_next_resume) ... ok
+test_different_providers_do_not_share_model_names (tests.test_role_changes.RoleChangeTests.test_different_providers_do_not_share_model_names) ... ok
+test_legacy_checkpoint_missing_isolation_defaults_still_authorizes (tests.test_role_changes.RoleChangeTests.test_legacy_checkpoint_missing_isolation_defaults_still_authorizes)
+role-change.from must match resume setdefaults for old provider_config shapes. ... ok
+test_provider_specific_modes_reset_and_policy_is_preserved (tests.test_role_changes.RoleChangeTests.test_provider_specific_modes_reset_and_policy_is_preserved) ... ok
+test_queued_task_override_does_not_change_other_tasks_or_checks (tests.test_role_changes.RoleChangeTests.test_queued_task_override_does_not_change_other_tasks_or_checks) ... ok
+test_rejects_policy_changes_daemon_and_backend_arguments (tests.test_role_changes.RoleChangeTests.test_rejects_policy_changes_daemon_and_backend_arguments) ... ok
+test_stopped_role_change_writes_normalized_from_and_survives_save_failure (tests.test_role_changes.RoleChangeTests.test_stopped_role_change_writes_normalized_from_and_survives_save_failure)
+Second pending override must not leave a contradictory role-change if meta save fails. ... ok
+test_stopped_task_override_preserves_checkpoint_and_resume_controls (tests.test_role_changes.RoleChangeTests.test_stopped_task_override_preserves_checkpoint_and_resume_controls) ... ok
+test_switch_requires_exact_authorization_and_discards_old_sessions (tests.test_role_changes.RoleChangeTests.test_switch_requires_exact_authorization_and_discards_old_sessions) ... ok
+test_taskstore_role_change_from_legacy_checkpoint_missing_defaults (tests.test_role_changes.RoleChangeTests.test_taskstore_role_change_from_legacy_checkpoint_missing_defaults)
+When checkpoint omits isolation keys that equal resume defaults, roles still works. ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.839s
+
+OK
+EXIT=0

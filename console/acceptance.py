@@ -39,7 +39,7 @@ def scan(cwd, kind='code', python=''):
                        'effects': effects or '执行项目中的代码，可能生成缓存或测试输出；扫描不会执行。',
                        'estimate': estimate, 'recommended': recommended})
     # Bounded file inspection; never execute discovery hooks or import project code.
-    test_paths = []
+    test_paths, node_paths = [], []
     visited = 0
     for directory, dirs, files in os.walk(root, followlinks=False):
         visited += 1
@@ -48,9 +48,14 @@ def scan(cwd, kind='code', python=''):
         relative = Path(directory).relative_to(root)
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in {'node_modules','build','dist','target','site-packages','__pycache__'}) if len(relative.parts) < 4 else []
         for name in sorted(files):
+            path = Path(directory) / name
             if re.match(r'(test_.*|.*_test)\.py$', name) and len(test_paths) < 80:
-                test_paths.append(str((Path(directory) / name).relative_to(root)))
-        if len(test_paths) >= 80:
+                test_paths.append(str(path.relative_to(root)))
+            if (re.fullmatch(r'(?:test(?:[_.-].*)?|.*[_.-]test)\.(?:mjs|cjs|js)', name)
+                    and len(node_paths) < 80 and path.is_file()
+                    and path.resolve().is_relative_to(root) and path.stat().st_size <= 512 * 1024):
+                node_paths.append(str(path.relative_to(root)))
+        if len(test_paths) >= 80 and len(node_paths) >= 80:
             break
     test_text = '\n'.join(source(p) for p in test_paths)
     config = '\n'.join(source(p) for p in ('pyproject.toml','pytest.ini','setup.cfg','requirements.txt','requirements-dev.txt'))
@@ -63,6 +68,13 @@ def scan(cwd, kind='code', python=''):
         if 'pytest' in config or 'pytest' in test_text or re.search(r'^def test_', test_text, re.M):
             add('python-pytest', 'Python pytest 测试', '验证项目现有 pytest 测试', [interpreter, '-m', 'pytest', '-q'],
                 dependencies=['pytest'], artifacts=test_paths, recommended=not any(c['id']=='python-unittest' for c in checks))
+    if node_paths:
+        for name in node_paths:
+            sources[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
+        add('node-test', 'Node 内置自动化测试', '使用 Node 内置测试运行器验证已发现测试的成功、失败及回归断言',
+            ['node', '--test', *node_paths], artifacts=node_paths,
+            effects='执行列出的项目测试代码，可能写入文件、启动子进程或访问网络；不运行 npm 生命周期，不安装依赖。扫描只读取文件。',
+            recommended=True)
     ndr = all(source(p) for p in ('scripts/check_docs.py','scripts/check_hzd_contracts.py','scripts/check_development_contracts.py',
                                   'scripts/review_development.py','docs/sql/validation/2026-11-05-code-review.json'))
     for filename, title, purpose, deps in [
@@ -136,6 +148,15 @@ def select(cwd, plan):
     by_id = {c['id']:c for c in found['checks']}
     if set(ids) - by_id.keys():
         raise ValueError('所选检查入口不存在，请重新扫描')
+    if 'node-test' in ids:
+        # Watcher checks run through a login shell, whose PATH may differ from
+        # the console's. Bind the selected runner to the binary we preflight.
+        node = shutil.which('node')
+        if node:
+            node = os.path.abspath(node)
+            check = by_id['node-test']
+            check['executable'] = node
+            check['command'] = shlex.join([node, *shlex.split(check['command'])[1:]])
     return {**found,'criteria':criteria.strip(),'selected_ids':ids,'selected':[by_id[i] for i in ids]}
 
 

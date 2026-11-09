@@ -28,6 +28,20 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
     kind = value.get('type', '')
     if not isinstance(kind, str):
         return []
+    if kind in {'tool_call', 'tool_call_update'} and isinstance(value.get('toolCallId'), str):
+        if kind == 'tool_call':
+            return _public_events({'type':'function_call', 'call_id':value['toolCallId'],
+                                   'name':value.get('toolName', value.get('title', 'tool')),
+                                   'arguments':value.get('rawInput', {})}, at)
+        if value.get('status') not in {'completed', 'failed'}:
+            return []
+        text = '\n'.join(c.get('content', {}).get('text', '') for c in value.get('content', [])
+                         if isinstance(c, dict) and isinstance(c.get('content'), dict)
+                         and c['content'].get('type') == 'text')
+        return _public_events({'type':'tool_result', 'call_id':value['toolCallId'], 'content':text}, at)
+    if kind == 'end' and isinstance(value.get('structuredOutput'), dict):
+        summary = value['structuredOutput'].get('summary')
+        return [{'at': at, 'kind': 'message', 'text': redact(summary)[:4000]}] if isinstance(summary, str) and summary.strip() else []
     if kind in {'assistant','user'} and isinstance(value.get('message'),dict):
         events=[]
         for block in value['message'].get('content',[]):
@@ -134,6 +148,7 @@ class LiveOutput:
         self.decoders = [codecs.getincrementaldecoder('utf-8')(errors='replace') for _ in range(2)]
         self.pending = ['', '']
         self.discarding = [False, False]
+        self.text_fragments = ''
         if announce:
             self.emit({'kind': 'phase', 'text': f'{provider} 开始本轮执行', 'provider': provider})
 
@@ -174,8 +189,20 @@ class LiveOutput:
                 self.emit({'kind': 'output' if stream == 0 else 'error', 'text': redact(line)[:4000]})
             return
         if isinstance(value, dict):
+            if (value.get('type') == 'text' and isinstance(value.get('data'), str)
+                    and value.get('role', 'assistant') == 'assistant' and value.get('channel') != 'analysis'):
+                self.text_fragments += value['data']
+                if '\n' in self.text_fragments or len(self.text_fragments) >= 240:
+                    self._flush_text()
+                return
+            self._flush_text()
             for entry in public_events(value):
                 self.emit(entry)
+
+    def _flush_text(self):
+        if self.text_fragments.strip():
+            self.emit({'kind':'message', 'text':redact(self.text_fragments)[:4000]})
+        self.text_fragments = ''
 
     def close(self) -> None:
         for stream in range(2):
@@ -183,3 +210,4 @@ class LiveOutput:
             if not self.discarding[stream]:
                 self.line(self.pending[stream], stream)
             self.pending[stream] = ''
+        self._flush_text()

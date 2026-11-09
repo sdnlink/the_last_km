@@ -84,7 +84,7 @@ elif args[0] == 'logs':
                 children = []
 
                 def fail_cleanup(prepared, cwd, **kwargs):
-                    if role == "check" and prepared.argv[:2] != ["sh", "-lc"]:
+                    if role == "check" and prepared.argv[:2] != ["sh", "-c"]:
                         return run_command(prepared, cwd, **kwargs)
                     child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True)
                     children.append(child)

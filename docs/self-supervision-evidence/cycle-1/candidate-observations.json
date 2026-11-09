@@ -1,0 +1,60 @@
+{
+  "node_scan": {
+    "id": "node-test",
+    "title": "Node 内置自动化测试",
+    "purpose": "使用 Node 内置测试运行器验证已发现测试的成功、失败及回归断言",
+    "command": "node --test tests/test_console_requests.mjs",
+    "executable": "node",
+    "dependencies": [],
+    "artifacts": [
+      "tests/test_console_requests.mjs"
+    ],
+    "effects": "执行列出的项目测试代码，可能写入文件、启动子进程或访问网络；不运行 npm 生命周期，不安装依赖。扫描只读取文件。",
+    "estimate": "依项目规模而定",
+    "recommended": true
+  },
+  "chosen": [
+    {
+      "id": "node-test",
+      "title": "Node 内置自动化测试",
+      "purpose": "使用 Node 内置测试运行器验证已发现测试的成功、失败及回归断言",
+      "command": "/home/skn/.local/bin/node --test tests/test_console_requests.mjs",
+      "executable": "/home/skn/.local/bin/node",
+      "dependencies": [],
+      "artifacts": [
+        "tests/test_console_requests.mjs"
+      ],
+      "effects": "执行列出的项目测试代码，可能写入文件、启动子进程或访问网络；不运行 npm 生命周期，不安装依赖。扫描只读取文件。",
+      "estimate": "依项目规模而定",
+      "recommended": true
+    }
+  ],
+  "preflight": {
+    "ready": true,
+    "checks": [
+      {
+        "id": "node-test",
+        "title": "Node 内置自动化测试",
+        "status": "ready",
+        "errors": [],
+        "note": "仅检查运行前提，尚未执行功能检查。"
+      }
+    ],
+    "executed": false
+  },
+  "fixed_check_login_shell_probe": {
+    "argv": [
+      "sh",
+      "-lc",
+      "node --test tests/test_console_requests.mjs"
+    ],
+    "exit_code": 0,
+    "stdout": "TAP version 13\n# (node:1358856) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/skn/code/auto_moniter/console/static/core.js?compat=1 is not specified and it doesn't parse as CommonJS.\n# Reparsing as ES module because module syntax was detected. This incurs a performance overhead.\n# To eliminate this warning, add \"type\": \"module\" to /home/skn/package.json.\n# (Use `node --trace-warnings ...` to show where the warning was created)\n# Subtest: GET works without AbortSignal static helpers and releases listeners\nok 1 - GET works without AbortSignal static helpers and releases listeners\n  ---\n  duration_ms: 17.326366\n  ...\n# Subtest: POST preserves token lookup and the JSON body\nok 2 - POST preserves token lookup and the JSON body\n  ---\n  duration_ms: 7.950387\n  ...\n# Subtest: network failure releases the timeout\nok 3 - network failure releases the timeout\n  ---\n  duration_ms: 3.304733\n  ...\n# Subtest: a stalled request times out with a readable error\nok 4 - a stalled request times out with a readable error\n  ---\n  duration_ms: 3.230021\n  ...\n# Subtest: the timeout also covers reading the response body\nok 5 - the timeout also covers reading the response body\n  ---\n  duration_ms: 3.694007\n  ...\n# Subtest: caller cancellation remains AbortError\nok 6 - caller cancellation remains AbortError\n  ---\n  duration_ms: 5.110475\n  ...\n# Subtest: an already canceled request is not revived\nok 7 - an already canceled request is not revived\n  ---\n  duration_ms: 2.099586\n  ...\n# Subtest: leaving the page cancels pending requests\nok 8 - leaving the page cancels pending requests\n  ---\n  duration_ms: 2.332848\n  ...\n# Subtest: malformed JSON keeps the HTTP diagnostic\nok 9 - malformed JSON keeps the HTTP diagnostic\n  ---\n  duration_ms: 2.157834\n  ...\n1..9\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 115.694939\n",
+    "stderr": "",
+    "actor": "worker",
+    "not_watcher_log": true
+  },
+  "protected_baseline_diff": "",
+  "business_HEAD": "16b968aa2a4692d969b17f2c234f329c272ebccf",
+  "index_diff": ""
+}

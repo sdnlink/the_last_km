@@ -42,6 +42,7 @@ const actionLabels = {
   continue: "恢复执行",
   stop: "停止任务",
   resume: "恢复执行",
+  roles: "临时调整角色",
   delete: "删除任务",
 };
 const active = (t) => ["running", "starting", "paused"].includes(t.status);
@@ -98,7 +99,7 @@ function taskButtons(task, compact = false) {
   return task.actions
     .filter(
       (action) =>
-        !compact || ["start", "pause", "continue", "resume", "delete"].includes(action),
+        !compact || ["start", "pause", "continue", "resume", "delete", "roles"].includes(action),
     )
     .map((action) => {
       const cancellingPause =

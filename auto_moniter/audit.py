@@ -144,10 +144,18 @@ class AuditLedger:
         self._commit(items, self.next_id)
         return [item["id"] for item in proposals]
 
-    def invalidate(self, tree: str) -> list[str]:
+    def invalidate(self, tree: str, affected_modules: set[str] | None = None,
+                   changed_files: list[str] | None = None) -> list[str]:
         reopened = []
         for item in self.items:
             if item["status"] == "resolved" and item["tree"] != tree:
+                from auto_moniter.quality import cited
+                evidence_changed = changed_files is not None and any(
+                    cited([name], item['resolution']['evidence']) for name in changed_files)
+                if (affected_modules is not None and item['module_ids']
+                        and not affected_modules.intersection(item['module_ids']) and not evidence_changed):
+                    item['tree'] = tree
+                    continue
                 item.update(status="open", resolution=None, resolved_round=0, tree="")
                 reopened.append(item["id"])
         return reopened

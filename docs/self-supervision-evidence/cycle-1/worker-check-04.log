@@ -1,0 +1,59 @@
+TAP version 13
+# (node:1358503) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/skn/code/auto_moniter/console/static/core.js?compat=1 is not specified and it doesn't parse as CommonJS.
+# Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+# To eliminate this warning, add "type": "module" to /home/skn/package.json.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: GET works without AbortSignal static helpers and releases listeners
+ok 1 - GET works without AbortSignal static helpers and releases listeners
+  ---
+  duration_ms: 8.25777
+  ...
+# Subtest: POST preserves token lookup and the JSON body
+ok 2 - POST preserves token lookup and the JSON body
+  ---
+  duration_ms: 3.252953
+  ...
+# Subtest: network failure releases the timeout
+ok 3 - network failure releases the timeout
+  ---
+  duration_ms: 3.147373
+  ...
+# Subtest: a stalled request times out with a readable error
+ok 4 - a stalled request times out with a readable error
+  ---
+  duration_ms: 2.957061
+  ...
+# Subtest: the timeout also covers reading the response body
+ok 5 - the timeout also covers reading the response body
+  ---
+  duration_ms: 2.349084
+  ...
+# Subtest: caller cancellation remains AbortError
+ok 6 - caller cancellation remains AbortError
+  ---
+  duration_ms: 3.465178
+  ...
+# Subtest: an already canceled request is not revived
+ok 7 - an already canceled request is not revived
+  ---
+  duration_ms: 1.987931
+  ...
+# Subtest: leaving the page cancels pending requests
+ok 8 - leaving the page cancels pending requests
+  ---
+  duration_ms: 2.401035
+  ...
+# Subtest: malformed JSON keeps the HTTP diagnostic
+ok 9 - malformed JSON keeps the HTTP diagnostic
+  ---
+  duration_ms: 2.666475
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 83.73949

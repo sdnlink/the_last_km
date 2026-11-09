@@ -1,0 +1,3 @@
+# Preserve historical terminal evidence byte-for-byte, including blank traceback lines.
+# Source files keep Git's normal whitespace checks.
+docs/self-supervision-evidence/**/*.log -whitespace

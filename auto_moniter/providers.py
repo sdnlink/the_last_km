@@ -249,14 +249,23 @@ def extract_text(stdout: str) -> tuple[str, bool]:
 
     last = ""
     structured = False
+    fragments = []
     for event in events:
+        if (event.get('type') == 'text' and isinstance(event.get('data'), str)
+                and event.get('role', 'assistant') == 'assistant'
+                and event.get('channel') != 'analysis'):
+            fragments.append(event['data'])
+            continue
         text, event_structured = _event_text(event)
         if text:
             last = text
             structured = event_structured
+            fragments = []
+    if fragments:
+        return ''.join(fragments), False
     if last:
         return last, structured
-    return "", False
+    return ''.join(fragments), False
 
 
 def extract_error(*blobs: str) -> str:
@@ -294,7 +303,7 @@ def _event_text(event: dict) -> tuple[str, bool]:
         if isinstance(item, dict) and item.get("type") == "agent_message":
             return _event_text(item)
         return "", False
-    structured_output = event.get("structured_output")
+    structured_output = event.get("structured_output", event.get('structuredOutput') if event_type == 'end' else None)
     if isinstance(structured_output, dict) and _looks_like_verdict(structured_output):
         return json.dumps(structured_output), True
     for key in ("result", "last_message", "final_message", "response"):
@@ -556,11 +565,11 @@ class GrokProvider(Provider):
             mode,
             "--output-format",
             "streaming-json",
-            "--json-schema",
-            schema_file.read_text(encoding="utf-8"),
             "--prompt-file",
             str(prompt_file),
         ]
+        # Grok 1.0.77 schema-constrained generation skips tool execution.
+        # The prompt carries the conclusion contract; the watcher validates it.
         if mode == "bypassPermissions":
             cmd.append("--always-approve")
         if model:

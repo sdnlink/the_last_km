@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,21 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
         raise ValueError('原始启动配置与任务运行目录不一致')
     if not args.cwd.is_absolute() or args.cwd.resolve() != Path(state.get('cwd', '')).resolve():
         raise ValueError('原始启动配置与任务项目目录不一致')
+    history = state.get('git_history') or {}
+    if history.get('approval_only') and history.get('business_head'):
+        def git_value(*options):
+            try:
+                result = subprocess.run(['git', '-C', str(args.cwd), *options], capture_output=True,
+                                        text=True, timeout=5, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ValueError('无法核对原任务业务 HEAD，请检查 Git 环境') from exc
+            if result.returncode not in (0, 1, 128):
+                raise ValueError('无法核对原任务业务 HEAD，请检查 Git 环境')
+            return result.stdout.strip() if result.returncode == 0 else ''
+        actual = {'ref': git_value('symbolic-ref', '-q', 'HEAD'),
+                  'commit': git_value('rev-parse', '--verify', 'HEAD')}
+        if actual != history['business_head']:
+            raise ValueError('业务 HEAD 已在任务外变更；原审核版本不能直接恢复，请基于当前提交新建后续任务')
     if args.provider == 'command' or args.reviewer == 'command':
         raise ValueError('自定义命令任务请使用原 CLI 配置恢复')
     worker = resolve_provider(args.provider, paseo_backend=args.paseo_backend,
@@ -58,11 +74,10 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
     expected = state.get('provider_config')
     if not isinstance(expected, dict):
         raise ValueError('检查点缺少原始执行器配置')
-    expected = dict(expected)
-    expected.setdefault('review_isolation', 'provider')
-    expected.setdefault('worker_isolation', 'provider')
-    expected.setdefault('protect_paths', [])
-    if Supervisor._provider_config(SimpleNamespace(config=config)) != expected:
+    from auto_moniter.role_changes import authorized_change, normalize_provider_config
+    expected = normalize_provider_config(expected)
+    actual = Supervisor._provider_config(SimpleNamespace(config=config))
+    if actual != expected and not authorized_change(run, expected, actual):
         raise ValueError('原始启动配置与检查点的执行器、审核或隔离设置不一致')
     if args.check and args.check != state.get('checks', []):
         raise ValueError('原始验收命令与检查点不一致')

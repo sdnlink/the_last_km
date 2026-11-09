@@ -1,0 +1,93 @@
+[
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-2/worker-check-06.log",
+    "summary": "Ran 498 tests OK after AUD-5/6 module-check and form-submit fixes",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-2/worker-check-07.log",
+    "summary": "Ran 498 tests OK",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "node",
+      "--test",
+      "tests/test_console_requests.mjs",
+      "tests/test_review_only_boundary.mjs"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-2/worker-check-08.log",
+    "summary": "13 pass 0 fail (9 request + 4 boundary including create-form submit)",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-2/worker-check-09.log",
+    "summary": "no whitespace errors",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "command": [
+      "/home/skn/code/auto_moniter/.venv/bin/python",
+      "-m",
+      "unittest",
+      "tests.test_review_only_boundary",
+      "tests.test_node_acceptance",
+      "tests.test_role_changes",
+      "tests.test_resolution_feedback",
+      "tests.test_grok_streaming",
+      "tests.test_input_progress",
+      "-q"
+    ],
+    "exit_code": 0,
+    "log": "docs/self-supervision-evidence/cycle-2/worker-check-10.log",
+    "summary": "Ran 59 focused tests OK",
+    "actor": "worker",
+    "not_watcher_approval": true
+  },
+  {
+    "note": "CYCLE-2 post AUD-5/6/2 fix candidate. Joint CYCLE-1+CYCLE-2. modules[].checks rejected for explicit review_only and planning; create-form submit captures /api/tasks body. Protected tests match HEAD. No git commit. FINAL not started. issue_resolutions left to reviewer.",
+    "changed_files_this_round": [
+      "console/tasks.py",
+      "console/static/dialogs.js",
+      "tests/test_review_only_boundary.py",
+      "tests/test_review_only_boundary.mjs",
+      "docs/self-supervision-acceptance.md",
+      "docs/self-supervision-evidence/cycle-2/worker-check-06.log",
+      "docs/self-supervision-evidence/cycle-2/worker-check-07.log",
+      "docs/self-supervision-evidence/cycle-2/worker-check-08.log",
+      "docs/self-supervision-evidence/cycle-2/worker-check-09.log",
+      "docs/self-supervision-evidence/cycle-2/worker-check-10.log",
+      "docs/self-supervision-evidence/cycle-2/worker-checks-candidate.json"
+    ],
+    "actor": "worker"
+  }
+]

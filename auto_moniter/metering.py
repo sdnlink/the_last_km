@@ -24,7 +24,7 @@ class UsageMeter:
                 event = json.loads(line)
             except (ValueError, TypeError):
                 continue
-            if not isinstance(event, dict) or event.get('type') not in ('turn.completed', 'result'):
+            if not isinstance(event, dict) or event.get('type') not in ('turn.completed', 'result', 'end'):
                 continue
             usage = event.get('usage')
             if isinstance(usage, dict):
@@ -33,7 +33,7 @@ class UsageMeter:
                     if all(type(usage.get(k)) is int and usage[k] >= 0 for k in (left, right)):
                         tokens += usage[left] + usage[right]
                         # Cached input is already part of Codex input_tokens.
-                        if event['type'] == 'result':
+                        if event['type'] in ('result', 'end'):
                             tokens += sum(usage.get(k, 0) for k in ('cache_read_input_tokens', 'cache_creation_input_tokens')
                                           if type(usage.get(k, 0)) is int and usage.get(k, 0) >= 0)
                         reported = True

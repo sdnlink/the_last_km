@@ -1,0 +1,22 @@
+test_added_deleted_and_modified_assets_invalidate_selection (tests.test_node_acceptance.NodeAcceptanceTests.test_added_deleted_and_modified_assets_invalidate_selection) ... ok
+test_authenticated_web_scan_preflight_create_and_cli_wiring (tests.test_node_acceptance.NodeAcceptanceTests.test_authenticated_web_scan_preflight_create_and_cli_wiring) ... 127.0.0.1 - - [09/Nov/2026 11:40:34] "POST /api/acceptance/scan HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 11:40:34] "POST /api/tasks HTTP/1.1" 409 -
+ok
+test_available_node_preflight_is_ready_without_running_tests (tests.test_node_acceptance.NodeAcceptanceTests.test_available_node_preflight_is_ready_without_running_tests) ... ok
+test_directory_budget_stops_before_501st_directory (tests.test_node_acceptance.NodeAcceptanceTests.test_directory_budget_stops_before_501st_directory) ... ok
+test_discovers_builtin_runner_without_package_or_install_and_discloses_effects (tests.test_node_acceptance.NodeAcceptanceTests.test_discovers_builtin_runner_without_package_or_install_and_discloses_effects) ... ok
+test_missing_node_preflight_is_environment_unavailable_without_execution (tests.test_node_acceptance.NodeAcceptanceTests.test_missing_node_preflight_is_environment_unavailable_without_execution) ... ok
+test_no_matching_asset_and_external_symlinks_are_not_entries (tests.test_node_acceptance.NodeAcceptanceTests.test_no_matching_asset_and_external_symlinks_are_not_entries) ... ok
+test_node_is_found_even_when_python_asset_limit_is_reached_first (tests.test_node_acceptance.NodeAcceptanceTests.test_node_is_found_even_when_python_asset_limit_is_reached_first) ... ok
+test_quoted_filename_is_safe_when_selected_shell_command_executes (tests.test_node_acceptance.NodeAcceptanceTests.test_quoted_filename_is_safe_when_selected_shell_command_executes) ... ok
+test_scan_does_not_execute_import_or_change_test_assets (tests.test_node_acceptance.NodeAcceptanceTests.test_scan_does_not_execute_import_or_change_test_assets) ... ok
+test_selected_node_command_runs_in_watcher_check_pipeline (tests.test_node_acceptance.NodeAcceptanceTests.test_selected_node_command_runs_in_watcher_check_pipeline) ... ok
+test_server_rebuilds_commands_and_rejects_unknown_ids (tests.test_node_acceptance.NodeAcceptanceTests.test_server_rebuilds_commands_and_rejects_unknown_ids) ... ok
+test_signatures_hash_exact_node_bytes_and_oversized_files_are_excluded (tests.test_node_acceptance.NodeAcceptanceTests.test_signatures_hash_exact_node_bytes_and_oversized_files_are_excluded) ... ok
+test_start_rechecks_signature_and_missing_node_before_launch (tests.test_node_acceptance.NodeAcceptanceTests.test_start_rechecks_signature_and_missing_node_before_launch) ... ok
+test_traversal_excludes_hidden_dependencies_deep_paths_and_caps_assets (tests.test_node_acceptance.NodeAcceptanceTests.test_traversal_excludes_hidden_dependencies_deep_paths_and_caps_assets) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.940s
+
+OK

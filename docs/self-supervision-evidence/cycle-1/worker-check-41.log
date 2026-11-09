@@ -1,0 +1,693 @@
+TMPDIR /tmp/auto-moniter-test-tmp-0fsq4qcw
+127.0.0.1 - - [09/Nov/2026 13:08:34] "POST /api/acceptance/scan HTTP/1.1" 403 -
+.........................................................127.0.0.1 - - [09/Nov/2026 13:08:46] "GET /api/config HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:08:46] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:08:46] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:08:46] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:08:46] "GET /api/tasks/missing/logs HTTP/1.1" 404 -
+..............127.0.0.1 - - [09/Nov/2026 13:08:50] "POST /api/tasks/9ea22e280d68447f8f8428a1ddd05040/delete HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:08:50] "POST /api/tasks/9ea22e280d68447f8f8428a1ddd05040/delete HTTP/1.1" 400 -
+127.0.0.1 - - [09/Nov/2026 13:08:50] "GET /api/tasks/9ea22e280d68447f8f8428a1ddd05040 HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:08:50] "POST /api/tasks/9ea22e280d68447f8f8428a1ddd05040/resume HTTP/1.1" 404 -
+..........127.0.0.1 - - [09/Nov/2026 13:08:52] "GET /pages/../server.py HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:08:52] "GET /fragments/../../README.md HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:08:52] "GET /pages/detail.html HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:08:52] "GET /index.html HTTP/1.1" 404 -
+...127.0.0.1 - - [09/Nov/2026 13:08:55] "POST /api/tasks/ext-5f56b7172f5864e2795b/resume HTTP/1.1" 409 -
+........................................F........................................TMPDIR /tmp/auto-moniter-test-tmp-y8di23uw
+127.0.0.1 - - [09/Nov/2026 13:09:19] "POST /api/acceptance/scan HTTP/1.1" 403 -
+.........................................................127.0.0.1 - - [09/Nov/2026 13:09:30] "GET /api/config HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:09:30] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:09:30] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:09:30] "POST /api/tasks HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:09:30] "GET /api/tasks/missing/logs HTTP/1.1" 404 -
+..............127.0.0.1 - - [09/Nov/2026 13:09:34] "POST /api/tasks/aa09b0db69114038b95f83678c9d0feb/delete HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:09:34] "POST /api/tasks/aa09b0db69114038b95f83678c9d0feb/delete HTTP/1.1" 400 -
+127.0.0.1 - - [09/Nov/2026 13:09:34] "GET /api/tasks/aa09b0db69114038b95f83678c9d0feb HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:09:34] "POST /api/tasks/aa09b0db69114038b95f83678c9d0feb/resume HTTP/1.1" 404 -
+..........127.0.0.1 - - [09/Nov/2026 13:09:36] "GET /pages/../server.py HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:09:36] "GET /fragments/../../README.md HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:09:36] "GET /pages/detail.html HTTP/1.1" 404 -
+127.0.0.1 - - [09/Nov/2026 13:09:36] "GET /index.html HTTP/1.1" 404 -
+...127.0.0.1 - - [09/Nov/2026 13:09:38] "POST /api/tasks/ext-c515e8a72170d2d3799d/resume HTTP/1.1" 409 -
+.................................................................................E.EE.EEEE.E..........................................127.0.0.1 - - [09/Nov/2026 13:10:05] "POST /api/acceptance/scan HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:10:05] "POST /api/tasks HTTP/1.1" 409 -
+..........................................................................................................................................................................................................................................................................
+======================================================================
+ERROR: test_budget_exhaustion_does_not_restart (tests.test_guardian.GuardianTests.test_budget_exhaustion_does_not_restart)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 108, in test_budget_exhaustion_does_not_restart
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run", max_agent_calls=1, retry_delay_s=0), delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_declared_limits_and_success_do_not_restart (tests.test_guardian.GuardianTests.test_declared_limits_and_success_do_not_restart) (status='done')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 82, in test_declared_limits_and_success_do_not_restart
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run", max_rounds=1, retry_delay_s=0), delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_declared_limits_and_success_do_not_restart (tests.test_guardian.GuardianTests.test_declared_limits_and_success_do_not_restart) (status='continue')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 82, in test_declared_limits_and_success_do_not_restart
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run", max_rounds=1, retry_delay_s=0), delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it (tests.test_guardian.GuardianTests.test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 125, in test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it
+    result = Guardian(config, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_restart_limit_stops_leftover_worker_and_preserves_budget (tests.test_guardian.GuardianTests.test_restart_limit_stops_leftover_worker_and_preserves_budget)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 71, in test_restart_limit_stops_leftover_worker_and_preserves_budget
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run"), max_restarts=0, delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost (tests.test_guardian.GuardianTests.test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 100, in test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run"), delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_unexpected_monitor_death_resumes_same_run_without_resetting_calls (tests.test_guardian.GuardianTests.test_unexpected_monitor_death_resumes_same_run_without_resetting_calls)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 47, in test_unexpected_monitor_death_resumes_same_run_without_resetting_calls
+    result = Guardian(RunConfig("task", root, worker, no_review=True, run_dir=root / "run", retry_delay_s=0), delay_s=0, log=lambda _: None).run()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+======================================================================
+ERROR: test_guardian_forces_unresponsive_monitor_to_exit_within_deadline (tests.test_hardening.HardeningTests.test_guardian_forces_unresponsive_monitor_to_exit_within_deadline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_hardening.py", line 86, in test_guardian_forces_unresponsive_monitor_to_exit_within_deadline
+    result = guard.run()
+             ^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 94, in run
+    return self._run_locked()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/code/auto_moniter/auto_moniter/guardian.py", line 112, in _run_locked
+    self._child.start()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+
+----------------------------------------------------------------------
+Ran 483 tests in 78.429s
+
+FAILED (errors=8)
+RESULT 483 fail failures 0 errors 8
+F.TMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+FTMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+F.TMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+TMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+finished: stopped after 0 worker rounds
+report: /tmp/auto-moniter-test-tmp-0fsq4qcw/tmpu3d_5nta/run/report.json
+FTMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+FTMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+FTMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+F.TMPDIR /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 246, in prepare
+    _fixup_main_from_path(data['init_main_from_path'])
+  File "/home/skn/anaconda3/lib/python3.12/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/run_nested_discover.py", line 19, in <module>
+    assert str(os.environ["TMPDIR"]).startswith("/tmp/auto-moniter-test-tmp-"), os.environ["TMPDIR"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /home/skn/code/auto_moniter/.auto-moniter/console/runs/cda15a5c834f46059d2b5e579b6db8d0/tmp-nested-watch
+F..........................................127.0.0.1 - - [09/Nov/2026 13:11:06] "POST /api/acceptance/scan HTTP/1.1" 403 -
+127.0.0.1 - - [09/Nov/2026 13:11:06] "POST /api/tasks HTTP/1.1" 409 -
+..........................................................................................................................................................................................................................................................................
+======================================================================
+FAIL: test_failed_agent_plan_cannot_freeze_module_definitions (tests.test_evidence_contract.EvidenceContractTests.test_failed_agent_plan_cannot_freeze_module_definitions) (role='reviewer')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_evidence_contract.py", line 86, in test_failed_agent_plan_cannot_freeze_module_definitions
+    self.assertEqual(result.status, "done")
+AssertionError: 'stopped' != 'done'
+- stopped
++ done
+
+
+======================================================================
+FAIL: test_budget_exhaustion_does_not_restart (tests.test_guardian.GuardianTests.test_budget_exhaustion_does_not_restart)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 109, in test_budget_exhaustion_does_not_restart
+    self.assertEqual(result.status, "budget_exceeded")
+AssertionError: 'recovery_failed' != 'budget_exceeded'
+- recovery_failed
++ budget_exceeded
+
+
+======================================================================
+FAIL: test_declared_limits_and_success_do_not_restart (tests.test_guardian.GuardianTests.test_declared_limits_and_success_do_not_restart) (status='done')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 83, in test_declared_limits_and_success_do_not_restart
+    self.assertEqual(result.status, "done" if status == "done" else "max_rounds")
+AssertionError: 'recovery_failed' != 'done'
+- recovery_failed
++ done
+
+
+======================================================================
+FAIL: test_declared_limits_and_success_do_not_restart (tests.test_guardian.GuardianTests.test_declared_limits_and_success_do_not_restart) (status='continue')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 83, in test_declared_limits_and_success_do_not_restart
+    self.assertEqual(result.status, "done" if status == "done" else "max_rounds")
+AssertionError: 'recovery_failed' != 'max_rounds'
+- recovery_failed
++ max_rounds
+
+
+======================================================================
+FAIL: test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it (tests.test_guardian.GuardianTests.test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 126, in test_restart_counter_is_retained_and_fresh_start_does_not_overwrite_it
+    self.assertEqual(result.status, "done")
+AssertionError: 'restart_limit' != 'done'
+- restart_limit
++ done
+
+
+======================================================================
+FAIL: test_restart_limit_stops_leftover_worker_and_preserves_budget (tests.test_guardian.GuardianTests.test_restart_limit_stops_leftover_worker_and_preserves_budget)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 72, in test_restart_limit_stops_leftover_worker_and_preserves_budget
+    self.assertEqual(result.status, "restart_limit")
+AssertionError: 'recovery_failed' != 'restart_limit'
+- recovery_failed
++ restart_limit
+
+
+======================================================================
+FAIL: test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost (tests.test_guardian.GuardianTests.test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 101, in test_saved_delivery_report_prevents_restart_if_pipe_reply_is_lost
+    self.assertEqual(result.status, "done")
+AssertionError: 'recovery_failed' != 'done'
+- recovery_failed
++ done
+
+
+======================================================================
+FAIL: test_unexpected_monitor_death_resumes_same_run_without_resetting_calls (tests.test_guardian.GuardianTests.test_unexpected_monitor_death_resumes_same_run_without_resetting_calls)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_guardian.py", line 48, in test_unexpected_monitor_death_resumes_same_run_without_resetting_calls
+    self.assertEqual(result.status, "done")
+AssertionError: 'recovery_failed' != 'done'
+- recovery_failed
++ done
+
+
+======================================================================
+FAIL: test_guardian_forces_unresponsive_monitor_to_exit_within_deadline (tests.test_hardening.HardeningTests.test_guardian_forces_unresponsive_monitor_to_exit_within_deadline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/skn/code/auto_moniter/tests/test_hardening.py", line 87, in test_guardian_forces_unresponsive_monitor_to_exit_within_deadline
+    self.assertEqual(result.status, "stopped")
+AssertionError: 'recovery_failed' != 'stopped'
+- recovery_failed
++ stopped
+
+
+----------------------------------------------------------------------
+Ran 483 tests in 184.656s
+
+FAILED (failures=9)
+RESULT 483 fail failures 9 errors 0

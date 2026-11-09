@@ -1,0 +1,46 @@
+{
+  "recorded_at": "2026-11-09T03:37:34.662304+00:00",
+  "task_id": "cda15a5c834f46059d2b5e579b6db8d0",
+  "source_files": {
+    "requirement.md": "ad305280b3b68a60747654d6d9b0b3b4236da63c3256563615848606c2e1389a",
+    "reviewed-requirement.json": "23d92fc7413e63727bc51a1bc448cc748d45fa69fb3227586133f78f082df41c",
+    "launch.json": "a7d7c35169652bbcc1b77ad9b98f2d5615e78dd7c9c159fe769da2ae86175b7e",
+    "modules.json": "7a6dc7a5eda6285d7cefdda3db669889d638bc9d5095ac7f824c70d483d3aef0",
+    "quality-policy.json": "661b374094fc56adb7bb8b4aeaca30105e69f54ac3348296ca4d8ba2d42fada8",
+    "000-reviewer-text.md": "d181cc1a44819693cb64347f9e4d3238f5929389ca36a7ca55d03ef004ed27c7"
+  },
+  "events": [
+    {
+      "at": "2026-11-09T03:26:49.022292+00:00",
+      "event": "agent_start",
+      "role": "reviewer",
+      "round": "0",
+      "provider": "codex"
+    },
+    {
+      "at": "2026-11-09T03:33:07.065534+00:00",
+      "event": "requirements_reviewed",
+      "status": "ready"
+    },
+    {
+      "at": "2026-11-09T03:33:07.190756+00:00",
+      "event": "agent_start",
+      "role": "worker",
+      "round": "1",
+      "provider": "codex"
+    }
+  ],
+  "baseline_observation": {
+    "HEAD": "16b968aa2a4692d969b17f2c234f329c272ebccf",
+    "tree": "13f9d9850d6fed00d8aa707abb890db9a2a4fa38",
+    "initial_worktree_clean": true,
+    "initial_index_clean": true,
+    "package_json_exists": false,
+    "node_asset": "tests/test_console_requests.mjs",
+    "scan_check_ids": [
+      "python-unittest",
+      "git-diff"
+    ],
+    "scan_signature": "af07d4af3e32bd3097c7d537aab8e44cd42826bc575a58833b91bbd6e1cf93e2"
+  }
+}

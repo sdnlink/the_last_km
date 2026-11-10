@@ -22,8 +22,8 @@ VERDICT_SCHEMA: dict[str, Any] = {
         "module_ids": {"type": "array", "items": {"type": "string"}},
         "modules": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "acceptance": {"type": "array", "items": {"type": "string"}}, "depends_on": {"type": "array", "items": {"type": "string"}}},
-            "required": ["id", "title", "acceptance", "depends_on"],
+            "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "acceptance": {"type": "array", "items": {"type": "string"}}, "depends_on": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}},
+            "required": ["id", "title", "acceptance", "depends_on", "files"],
         }},
         "done": {
             "type": "array",
@@ -350,6 +350,7 @@ def verdict_instructions() -> str:
         "- scope is module or requirement. A module is a bounded part of the original requirement; requirement means the entire original requirement.\n"
         "- In your first turn, declare ALL modules from the original requirement in modules: [{id, title, acceptance: [criterion, ...], depends_on: [module_id, ...]}]. Use depends_on=[] when there are no dependencies. Include integration and failure-path checks. Do not omit unfinished modules.\n"
         "- IDs are stable ASCII identifiers. Definitions and criteria cannot be removed or weakened. Later turns may use modules=[] or append newly discovered missing modules.\n"
+        "- Worker module declarations use files=[]. Only reviewers may supply files as conservative relative path/glob impact scopes including implementation, tests, shared callers and dependencies. User-fixed files remain authoritative.\n"
         "- module_ids names the modules completed and verified in this conclusion. Reviewers list only IDs they independently accept. The monitor requires joint coverage of every pending module before final delivery.\n"
         "- summary, and every item in done, gaps, next_actions, evidence, and blockers, is a string.\n"
         "- Use done only when every item within the declared scope is implemented, checked, and has no remaining gap.\n"

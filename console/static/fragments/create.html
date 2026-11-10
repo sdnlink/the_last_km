@@ -77,7 +77,7 @@
             <p>独立语义审核始终保留。未选择的功能、数据库、HTTP、端到端和性能检查不能推定通过。</p>
             <details><summary>高级：解释器与自定义命令</summary>
               <label>Python 解释器<input name="acceptance_python" placeholder="自动选择项目 .venv 或控制台 Python；也可填绝对路径"></label>
-              <label>额外验收命令<textarea name="checks" rows="3" placeholder="熟悉项目时填写，每行一条；通常只需勾选上面的检查项"></textarea></label>
+              <label>额外验收命令<textarea name="checks" rows="3" placeholder="熟悉项目时填写，每行一条；通常只需勾选上面的检查项"></textarea><small>仅 git diff --check 只能检查格式，不能证明功能可用。请选择与本轮需求对应的行为测试；原有测试通过也不等于新增能力已验证。</small></label>
               <small>自定义命令会在项目目录执行，其依赖和副作用无法由入口扫描完整确认。</small>
             </details>
           </section>

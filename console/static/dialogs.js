@@ -367,7 +367,7 @@ function bind(name){
     const plan=acceptancePlan();if(!plan.selected_ids.length)throw new Error('请先选择需要检查运行前提的项目检查项');
     const result=await api('/api/acceptance/preflight',{cwd:acceptanceContext().cwd,acceptance_plan:plan});
     if(!currentCreate(windowSequence)||sequence!==acceptanceSequence)return;
-    $('#acceptance-notice').textContent=(result.ready?'运行前提已就绪，尚未执行业务检查。':'运行环境尚未就绪，尚未执行业务检查。')+result.checks.map(c=>`${c.title}：${c.errors.join('；')||'前提就绪'}`).join('。');
+    $('#acceptance-notice').textContent=(result.ready?'运行前提已就绪，尚未执行业务检查。':'运行环境尚未就绪，尚未执行业务检查。')+result.checks.map(c=>`${c.title}：${c.errors.join('；')||'前提就绪'}`).join('。')+(result.coverage_warning||'');
    }catch(error){if(currentCreate(windowSequence)&&sequence===acceptanceSequence)$('#acceptance-notice').textContent=error.message;}
    finally{if(currentCreate(windowSequence)&&request===preflightRequest)$('#preflight-acceptance').disabled=false;}
   });

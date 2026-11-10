@@ -440,6 +440,10 @@ class Supervisor:
             if self._stop:
                 break
             self._check_budget()
+            from auto_moniter.runtime_policy import reserve_seconds
+            reserve = reserve_seconds(self.config.max_runtime_s)
+            if reserve and self.config.max_runtime_s - self._elapsed() <= reserve:
+                return self._finish('budget_exceeded', 'Runtime budget reserved for handoff; no new model call started.', records, last_worker)
             if self._sync_business_head(records):
                 last_worker = None
                 last_review = self._audit_feedback
@@ -560,6 +564,8 @@ class Supervisor:
                     break
 
                 if failure and not checkpoint_due:
+                    if turn.interruption == 'network retry budget':
+                        return self._finish('action_required', 'Continuous model connection failures exceeded the transport retry budget; work saved. Resolve service availability before resuming.', records, verdict)
                     category, recovery = classify(failure)
                     self._event("agent_failure", role="worker", category=category, recovery=recovery)
                     if recovery == "stop":
@@ -747,7 +753,7 @@ class Supervisor:
                     if self.config.workflow == 'review-first':
                         review.parse_error = 'invalid review checkpoint evidence'
             if not review_turn.exit_code and not review_turn.timed_out and not review_turn.interruption and not review.parse_error:
-                self._merge_modules(review)
+                self._merge_modules(review, reviewer=True)
             review_failure = _failure_reason(review_turn, review)
             if self.config.workflow == 'review-first' and review.parse_error and not review_failure:
                 review_failure = 'invalid conclusion: ' + review.parse_error
@@ -845,8 +851,10 @@ class Supervisor:
                                     'Reviewer conclusion remains invalid after repair; worker candidate saved. '
                                     + review.parse_error, records, verdict)
             reviewer_failures = 0
-            if self._progress_reset:
-                self.quality.state['blocker_count'] = 0
+            if review.blockers:
+                write_json(self.run_dir / 'environment-blocks.json', safe({
+                    'blockers': review.blockers, 'round': round_index, 'tree': review_tree,
+                    'action': 'Do runnable independent work. Retry these validations only when the named environment changes; do not recode correct behavior to bypass them.'}), durable=True)
             if self.config.quality_policy and self.quality.review_blockers(review.blockers):
                 write_json(self.run_dir / 'dependency-block.json', {'blockers': review.blockers,
                            'review_count': self.quality.state['blocker_count'], 'round': round_index,
@@ -1334,14 +1342,24 @@ class Supervisor:
         self._event('git_checkpoint', role=record.role, round=record.index,
                     commit=record.git_checkpoint['commit'], ref=self.git_history.ref)
 
-    def _merge_modules(self, verdict: Verdict) -> None:
+    def _merge_modules(self, verdict: Verdict, *, reviewer=False) -> None:
         try:
+            proposals = []
+            scopes = []
             for item in verdict.modules:
+                if reviewer and isinstance(item, dict) and item.get('files'):
+                    from auto_moniter.modules import definitions
+                    definitions([item])
+                    scopes.append((item['id'], item['files']))
+                    item = {k:v for k,v in item.items() if k != 'files'}
                 if isinstance(item, dict) and item.get('files') and (item.get('id') not in self.modules.items or item['files'] != self.modules.items[item['id']].get('files')):
                     raise ValueError('Module impact files must be supplied by the user, not by an agent')
                 if isinstance(item, dict) and item.get("checks") and (item.get("id") not in self.modules.items or item["checks"] != self.modules.items[item["id"]].get("checks")):
                     raise ValueError("Executable module checks must be supplied by the user in --modules, not by an agent")
-            self.modules.merge(verdict.modules)
+                proposals.append(item)
+            self.modules.merge(proposals)
+            for key, paths in scopes:
+                self.modules.review_scope(key, paths)
         except ValueError as exc:
             verdict.status = "continue"
             verdict.parse_error = "invalid module plan"
@@ -1692,6 +1710,14 @@ class Supervisor:
             if errors:
                 summary += " Agent shutdown errors: " + "; ".join(errors)
                 status = "recovery_failed"
+            write_json(self.run_dir / 'handoff.json', safe({
+                'status': status, 'reason': summary, 'usage': self._usage(),
+                'workspace': workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir),
+                'candidate': getattr(self.git_history, 'candidate', {}) if self.git_history else {},
+                'last_worker': next((r.verdict.to_dict() for r in reversed(records) if r.role=='worker'), None),
+                'last_review': next((r.verdict.to_dict() for r in reversed(records) if r.role=='reviewer'), None),
+                'modules': self.modules.export(), 'audit_issues': self.audit.export(),
+                'note': 'Unaccepted work and interrupted output require independent review; no delivery implied.'}), durable=True)
         if status == "done":
             self._check_budget()
             current = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
@@ -1903,6 +1929,9 @@ class Supervisor:
             raise ValueError('Saved follow-up cycles do not belong to this requirement')
         if not isinstance(saved_policy, dict):
             raise ValueError('Invalid saved quality policy')
+        if saved_policy:
+            from auto_moniter.quality import policy
+            saved_policy = policy(saved_policy)
         Quality(saved_policy, {}, state.get('quality_state'))
         if self.config.quality_policy and self.config.quality_policy != saved_policy:
             raise ValueError('Quality policy cannot change on resume; create a follow-up task')
@@ -2216,6 +2245,12 @@ class Supervisor:
                 "Do not drop an unresolved issue because the worker restarted or claimed it was fixed. "
                 "The previous conclusion is context, not proof; judge it independently. "
                 "Previously accepted module milestones do not imply completion of pending modules.",
+                "Provide conservative files impact scopes in modules, including implementation, regression assets, "
+                "shared configuration and dependencies you inspected. A missing scope requires broad revalidation. "
+                "needs_review audit issues retain an earlier closure: check affected behavior and reuse unchanged "
+                "evidence, do not demand recoding unless a concrete regression is found. Reconfirm their AUD IDs "
+                "with current evidence. Distinguish environment-unavailable checks from implementation defects; "
+                "put actual unavailable tools/platforms in blockers, and continue independent work.",
                 "Accept the work only when the requirement is implemented and you cannot name a concrete missing behavior, broken path, or missing check.",
                 "A done conclusion without evidence is rejected. Cite files, commands, and observations in evidence.",
                 "Style nits alone are not gaps. A missing requirement, failing check, or unwired feature is a gap.",
@@ -2438,7 +2473,14 @@ class Supervisor:
             if self.config.max_runtime_s:
                 prompt += f'Remaining total budget now: {max(0, self.config.max_runtime_s - self._elapsed()):.0f}s. '
             prompt += 'Preserve time to report evidence, remaining gaps and a safe handoff before these hard limits.\n'
+            prompt += ('Environment failures are not coding defects: preserve known missing-tool/platform evidence. '
+                       'Do not repeat an unavailable build or create substitute platforms to claim full validation. '
+                       'Continue independent implementation and focused runnable checks; if only external validation '
+                       'remains, return blocked with the exact dependency and evidence.\n')
         messages = self.directions.messages()
+        blocked_path = self.run_dir / 'environment-blocks.json'
+        if blocked_path.exists() and not blocked_path.is_symlink() and blocked_path.stat().st_size <= 65536:
+            prompt += '\nKnown environment validation gaps (not proof of code defects):\n' + blocked_path.read_text()
         if role == 'worker' and self.git_history:
             destination = (self.git_history.business_head['ref'] if getattr(self.git_history, 'business_commits', False)
                            else self.git_history.ref)
@@ -2489,6 +2531,11 @@ class Supervisor:
             if not read_only and self._worker_isolation:
                 prepared = self._worker_isolation.wrap(prepared, provider.name)
             timeout = self.config.turn_timeout_s
+            from auto_moniter.runtime_policy import reserve_seconds
+            reserve = reserve_seconds(self.config.max_runtime_s)
+            if reserve and role == 'worker':
+                available = max(.01, self.config.max_runtime_s-self._elapsed()-reserve)
+                timeout = min(timeout, available) if timeout else available
             if role == 'worker' and self.config.workflow != 'review-first' and self.quality.config.get('review_interval_s'):
                 interval = self.quality.config['review_interval_s']
                 timeout = min(timeout, interval) if timeout else interval
@@ -2501,6 +2548,7 @@ class Supervisor:
                 max_output_bytes=self.config.max_output_bytes,
                 memory_bytes=self.config.memory_bytes, file_bytes=self.config.file_bytes,
                 on_output=live_output.feed,
+                network_retry_s=self.quality.config.get('network_retry_s', 120),
             )
             completed = True
         except (OSError, ValueError, ProviderError) as exc:
@@ -2944,6 +2992,7 @@ def run_command(
     memory_bytes: int = 0,
     file_bytes: int = 0,
     on_output: Callable[[int, bytes], None] | None = None,
+    network_retry_s: float = 0,
 ) -> TurnResult:
     if max_output_bytes <= 0:
         raise ValueError("max_output_bytes must be positive")
@@ -2968,6 +3017,8 @@ def run_command(
     last_output_at = time.monotonic()
     buffers = [bytearray(), bytearray()]
     watchers = [_InputWatch(), _InputWatch()]
+    from auto_moniter.runtime_policy import RetryWatch
+    retries = RetryWatch(network_retry_s)
     pending = memoryview((prepared.stdin_text or "").encode("utf-8"))
     output_size = 0
     try:
@@ -2988,7 +3039,9 @@ def run_command(
                 stopped = should_stop is not None and should_stop()
                 timed_out = deadline is not None and time.monotonic() >= deadline
                 idle_s = time.monotonic() - last_output_at
-                if detect_input_requests and any(watcher.waiting for watcher in watchers) and idle_s >= input_grace_s:
+                if retries.exhausted():
+                    interruption = 'network retry budget'
+                elif detect_input_requests and any(watcher.waiting for watcher in watchers) and idle_s >= input_grace_s:
                     interruption = "input request"
                 elif idle_timeout_s and idle_s >= idle_timeout_s:
                     timed_out = True
@@ -3037,6 +3090,7 @@ def run_command(
                         key.fileobj.close()
                         continue
                     last_output_at = time.monotonic()
+                    retries.feed(key.data, chunk)
                     kept = chunk[:max(0, max_output_bytes - output_size)]
                     buffers[key.data].extend(kept)
                     if kept and on_output:

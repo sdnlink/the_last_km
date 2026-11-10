@@ -11,7 +11,7 @@ from auto_moniter.workspace import file_snapshot
 DEFAULTS = {'protect_tests': True, 'verified_progress': True, 'no_progress_limit': 12,
             'review_interval_s': 600, 'review_changed_files': 20, 'blocked_review_limit': 3,
             'requirements': [], 'validation_paths': [], 'review_tools': 'provider',
-            'max_tokens': 0, 'max_cost_usd': 0}
+            'max_tokens': 0, 'max_cost_usd': 0, 'network_retry_s': 120}
 
 
 def policy(value):
@@ -23,7 +23,7 @@ def policy(value):
     for key in ('protect_tests', 'verified_progress'):
         if type(result[key]) is not bool:
             raise ValueError(key + ' must be boolean')
-    for key in ('no_progress_limit', 'review_interval_s', 'review_changed_files', 'blocked_review_limit', 'max_tokens'):
+    for key in ('no_progress_limit', 'review_interval_s', 'review_changed_files', 'blocked_review_limit', 'max_tokens', 'network_retry_s'):
         if type(result[key]) is not int or not 0 <= result[key] <= 10**12:
             raise ValueError(key + ' must be a nonnegative integer')
     cost = result['max_cost_usd']

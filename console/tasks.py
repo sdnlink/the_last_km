@@ -344,6 +344,7 @@ class TaskStore:
                      'modules': modules, 'accepted_modules': accepted, 'total_modules': len(modules),
                      'summary': state.get('summary') or (state.get('last_worker') or {}).get('summary', ''),
                      'failure': failure,
+                     'acceptance_warning': meta.get('acceptance_warning', ''),
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),
                      'git_history': state.get('git_history', {'enabled': False}),
                      'git_checkpoints': [{**item['git_checkpoint'], 'summary': present_conclusion(item).get('summary', ''),
@@ -584,6 +585,8 @@ class TaskStore:
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
+            from console.acceptance import coverage_warning
+            meta['acceptance_warning'] = coverage_warning([*checks, *module_check_commands])
             if guided:
                 meta['acceptance_plan'] = guided
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']

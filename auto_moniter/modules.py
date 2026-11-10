@@ -109,10 +109,10 @@ class ModuleLedger:
         """Missing scopes and shared files conservatively require revalidation."""
         affected = set(self.items)
         if changed_files is not None:
-            affected = {key for key, m in self.items.items() if not m.get('files') or any(
-                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in m.get('files', []))}
+            affected = {key for key, m in self.items.items() if not self.impact_files(key) or any(
+                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in self.impact_files(key))}
             # Undeclared files may be shared configuration; fail conservatively.
-            if any(not any(fnmatch.fnmatchcase(path, pattern) for m in self.items.values() for pattern in m.get('files', []))
+            if any(not any(fnmatch.fnmatchcase(path, pattern) for key in self.items for pattern in self.impact_files(key))
                    for path in changed_files):
                 affected = set(self.items)
             while True:
@@ -121,6 +121,19 @@ class ModuleLedger:
                     break
                 affected |= more
         return affected
+
+    def impact_files(self, key):
+        item = self.items[key]
+        return item.get('files') or item.get('review_files', [])
+
+    def review_scope(self, key, paths):
+        if key not in self.items:
+            raise ValueError('Review scope names an unknown module')
+        definitions([{'id': key, 'title': key, 'acceptance': ['scope'], 'files': paths}])
+        if paths and not self.items[key].get('files'):
+            combined = list(dict.fromkeys([*self.items[key].get('review_files', []), *paths]))
+            definitions([{'id': key, 'title': key, 'acceptance': ['scope'], 'files': combined}])
+            self.items[key]['review_files'] = combined
 
     def invalidate(self, tree: str, changed_files: list[str] | None = None) -> list[str]:
         affected = self.affected(changed_files)
@@ -131,7 +144,7 @@ class ModuleLedger:
                     item['tree'] = tree
                     continue
                 item["status"] = "pending"
-                item["invalidated_reason"] = "Workspace changed since acceptance; regression checks and review required"
+                item["invalidated_reason"] = "Revalidation required; historical acceptance retained, no reproduced regression yet"
                 changed.append(key)
         return changed
 
@@ -172,4 +185,5 @@ class ModuleLedger:
                 raise ValueError("invalid saved module acceptance round or duplicate ID")
             seen.add(item["id"])
             ledger.items[item["id"]].update(status=item["status"], evidence=item["evidence"], round=item["round"], tree=item.get("tree", ""), invalidated_reason=item.get("invalidated_reason", ""))
+            ledger.review_scope(item['id'], item.get('review_files', []))
         return ledger

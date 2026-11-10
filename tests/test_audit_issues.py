@@ -46,7 +46,7 @@ class AuditLedgerTests(unittest.TestCase):
                 ledger.resolve(proposals, 2, TREE, lambda evidence: ["invalid"] if evidence == ["nonexistent"] else [])
             self.assertEqual(ledger.export(), before)
 
-    def test_closure_reopens_after_source_change_and_restore_preserves_history(self):
+    def test_closure_requires_review_after_source_change_and_preserves_history(self):
         ledger = AuditLedger()
         ledger.record(["missing check"], 1, ["A"])
         ledger.resolve([resolution()], 2, TREE, lambda _: [])
@@ -55,7 +55,8 @@ class AuditLedgerTests(unittest.TestCase):
         self.assertEqual(restored.invalidate(TREE), [])
         self.assertEqual(restored.invalidate("b" * 64), ["AUD-1"])
         self.assertEqual(restored.pending()[0]["summary"], "missing check")
-        self.assertIsNone(restored.items[0]["resolution"])
+        self.assertEqual(restored.items[0]['status'], 'needs_review')
+        self.assertEqual(restored.items[0]['resolution'], ledger.items[0]['resolution'])
         self.assertEqual(AuditLedger.restore(restored.export()).export(), restored.export())
 
     def test_module_scope_keeps_global_findings_and_blocks_only_relevant_modules(self):

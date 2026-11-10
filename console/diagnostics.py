@@ -78,6 +78,10 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     elif 'timed out' in text or 'turn limit' in text:
         code='turn_timeout';title='模型或检查达到单次时限';reason='本轮未在配置时限内返回有效完成结论，已有代码需要继续验证。'
         actions=['查看本轮日志，缩小单次修复范围或明确调整单轮时限，再按原累计预算继续。']
+    elif 'reserved for handoff' in text:
+        code='runtime_handoff';title='已预留时间保存交接';role='watcher';phase='预算收尾'
+        reason='剩余运行预算进入收尾区间，未再启动模型调用。已保存候选、未完成项和验证记录，不代表交付通过。'
+        actions=['查看 handoff.json；需要继续时明确追加预算，再恢复原任务。']
     elif 'runtime budget' in text:
         code='runtime_budget';title='累计运行时间耗尽';role='watcher';phase='运行预算检查'
         usage=state.get('usage') or {};used=usage.get('elapsed_s');limit=usage.get('max_runtime_s')

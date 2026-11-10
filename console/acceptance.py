@@ -12,6 +12,12 @@ import sys
 KINDS = {'code', 'documentation', 'service', 'other'}
 
 
+def coverage_warning(checks):
+    if not checks or all(re.fullmatch(r'\s*git\s+diff\s+--check\s*', c) for c in checks):
+        return '当前验收仅包含格式检查或没有执行检查，不能证明功能可用。请补充与本轮需求对应的行为测试；reviewer 仍需核对未覆盖能力。'
+    return ''
+
+
 def read(path, root):
     if not path.is_file() or not path.resolve().is_relative_to(root) or path.stat().st_size > 512 * 1024:
         return ''
@@ -130,7 +136,7 @@ def scan(cwd, kind='code', python=''):
     return {'cwd':str(root),'task_type':kind,'python':interpreter,'checks':checks,'signature':signature,'ci_sources':ci,
             'semantic_review':{'title':'独立语义审核','purpose':'reviewer 核对需求完整性、描述准确性与未覆盖边界；不能代替运行测试。'},
             'unverified':['未声明或未选择的功能、数据库/HTTP/端到端、性能和客户验收均不能由扫描结果推定通过。'],
-            'notice':'扫描只读取有限项目文件，不执行测试、不安装依赖。没有发现入口不代表项目没有验证能力。'}
+            'notice':'扫描只读取有限项目文件，不执行测试、不安装依赖。没有发现入口不代表项目没有验证能力。格式检查或旧测试通过不证明新增功能可用，请选择需求对应的行为验证。'}
 
 
 def select(cwd, plan):
@@ -190,4 +196,5 @@ def preflight(plan):
                 errors.append('项目声明了依赖但没有 node_modules；请先准备环境，不会自动安装')
         results.append({'id':check['id'],'title':check['title'],'status':'environment_unavailable' if errors else 'ready',
                         'errors':errors,'note':'仅检查运行前提，尚未执行功能检查。'})
-    return {'ready':all(r['status']=='ready' for r in results),'checks':results,'executed':False}
+    return {'ready':all(r['status']=='ready' for r in results),'checks':results,'executed':False,
+            'coverage_warning':coverage_warning([c['command'] for c in plan['selected']])}

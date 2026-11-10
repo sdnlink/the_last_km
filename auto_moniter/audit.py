@@ -62,11 +62,11 @@ class AuditLedger:
         return {"next_id": self.next_id, "pruned_closed": self.pruned_closed, "items": copy.deepcopy(self.items)}
 
     def _commit(self, items: list[dict], next_id: int) -> None:
-        if sum(item["status"] == "open" for item in items) > MAX_OPEN:
+        if sum(item["status"] != "resolved" for item in items) > MAX_OPEN:
             raise AuditCapacityError("Open audit issues exceed 128; resolve existing issues before continuing")
         closed = sorted((item for item in items if item["status"] == "resolved"),
                         key=lambda item: (item["resolved_round"], int(item["id"][4:])))
-        keep_closed = min(KEEP_CLOSED, MAX_OPEN - sum(item["status"] == "open" for item in items))
+        keep_closed = min(KEEP_CLOSED, MAX_OPEN - sum(item["status"] != "resolved" for item in items))
         dropped = {item["id"] for item in closed[:max(0, len(closed) - keep_closed)]}
         items = [item for item in items if item["id"] not in dropped]
         value = {"next_id": next_id, "pruned_closed": self.pruned_closed + len(dropped), "items": items}
@@ -176,16 +176,18 @@ class AuditLedger:
                         and not affected_modules.intersection(item['module_ids']) and not evidence_changed):
                     item['tree'] = tree
                     continue
-                item.update(status="open", resolution=None, resolved_round=0, tree="")
+                # Changed dependencies require validation, not a claim that the
+                # original defect recurred. Keep the previous closure evidence.
+                item.update(status="needs_review")
                 reopened.append(item["id"])
         return reopened
 
     def pending(self, module_ids: set[str] | None = None) -> list[dict]:
-        return copy.deepcopy([item for item in self.items if item["status"] == "open"
+        return copy.deepcopy([item for item in self.items if item["status"] != "resolved"
                               and (module_ids is None or not item["module_ids"] or module_ids.intersection(item["module_ids"]))])
 
     def prompt(self) -> list[dict]:
-        return [{key: item[key] for key in ("id", "summary", "module_ids")} for item in self.pending()]
+        return [{key: item[key] for key in ("id", "summary", "module_ids", "status", "resolution")} for item in self.pending()]
 
     @classmethod
     def restore(cls, value: object) -> AuditLedger:
@@ -216,7 +218,7 @@ class AuditLedger:
                 raise ValueError("Invalid saved audit rounds")
             if item["last_seen_round"] < item["first_seen_round"] or not isinstance(item["tree"], str):
                 raise ValueError("Invalid saved audit history")
-            if item["status"] == "resolved":
+            if item["status"] in {"resolved", "needs_review"}:
                 if not re.fullmatch(r"[0-9a-f]{64}", item["tree"]) or item["resolved_round"] < item["last_seen_round"]:
                     raise ValueError("Invalid saved audit closure")
                 if not isinstance(item["resolution"], dict) or set(item["resolution"]) != {"summary", "evidence"}:

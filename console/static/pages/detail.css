@@ -1,1 +1,19 @@
 .task-detail-page { min-width: 0; }
+
+.detail-heading-with-menu { display:grid; grid-template-columns:minmax(210px,auto) minmax(0,1fr) auto; }
+.detail-menu { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+.detail-menu a { display:flex; align-items:center; gap:6px; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; font-size:12px; line-height:18px; white-space:nowrap; }
+.detail-menu a:hover { border-color:var(--accent); background:#f7fafc; }
+.detail-menu svg { width:14px; height:14px; color:var(--accent); }
+.detail-git-content { padding:0 24px 24px; }
+.detail-git-content .git-history, .detail-git-content .git-history-empty { margin-top:0; }
+.detail-metadata .detail-body > h3:first-child { margin-top:0; }
+
+@media (max-width:1100px) {
+ .detail-heading-with-menu { grid-template-columns:minmax(0,1fr) auto; }
+ .detail-menu { grid-column:1 / -1; grid-row:2; justify-content:flex-start; }
+}
+@media (max-width:640px) {
+ .detail-menu { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+ .detail-git-content { padding:0 16px 16px; }
+}

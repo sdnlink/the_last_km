@@ -69,7 +69,7 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
     if not isinstance(rounds, list):
         rounds = state.get('records') or []
     conclusions = [present_conclusion(item)
-                   for item in rounds[-40:] if item.get('role') in {'worker', 'reviewer'}]
+                   for item in rounds if item.get('role') in {'worker', 'reviewer'}]
     # Older/pruned runs still expose their latest business conclusions.
     for role in ('worker', 'reviewer'):
         last_key = 'last_worker' if role == 'worker' else 'last_review'

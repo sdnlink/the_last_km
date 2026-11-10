@@ -77,8 +77,10 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path.startswith('/api/tasks/'):
                 parts = url.path.strip('/').split('/')
                 if len(parts) == 4 and parts[3] == 'logs':
-                    name = parse_qs(url.query).get('file', [''])[0]
-                    self._json(self.server.store.logs(parts[2], name))
+                    query = parse_qs(url.query)
+                    name = query.get('file', [''])[0]
+                    page, size = int(query.get('page', ['1'])[0]), int(query.get('page_size', ['10'])[0])
+                    self._json(self.server.store.logs(parts[2], name, page, size))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
                 elif len(parts) == 5 and parts[3] == 'git':

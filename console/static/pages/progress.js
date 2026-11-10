@@ -1,13 +1,16 @@
 import {$,escape,badge,taskButtons,active,taskPriority,phases,roleStatuses,duration,stableHTML} from '/ui.js';
 import {api,watch} from '/core.js';
 import {failureHTML,renderWorkflow,renderConclusions} from '/task-view.js';
+import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const selected=new URLSearchParams(location.search).get('task');
 let tasks=[],current=null,firstList=true;
 function renderPicker(){
  const query=$('#progress-search').value.toLowerCase();
  const visible=tasks.filter(t=>($('#progress-state').value==='all'||active(t)||t.id===selected)&&`${t.title} ${t.cwd}`.toLowerCase().includes(query)).sort((a,b)=>taskPriority(a)-taskPriority(b));
  $('#progress-task-count').textContent=`${visible.length} 个可跟进任务`;
- stableHTML($('#progress-tasks'),visible.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.cwd)}</small><p>${escape(t.failure?.title||phases[t.health.phase]||t.summary||'等待启动')}</p></a>`).join('')||'<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>');
+ const page=paginate('progress-tasks',visible,{rowHeight:135});
+ $('#progress-pagination').innerHTML=page.controls;
+ stableHTML($('#progress-tasks'),page.items.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.cwd)}</small><p>${escape(t.failure?.title||phases[t.health.phase]||t.summary||'等待启动')}</p></a>`).join('')||'<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>');
 }
 function renderCurrent(t){
  current=t;$('#progress-empty').hidden=true;$('#progress-selected').hidden=false;
@@ -23,8 +26,10 @@ function renderCurrent(t){
  renderWorkflow(t,{role:$('#progress-role').value,currentOnly:$('#progress-round').value==='current',showRoles:false});renderConclusions(t);
 }
 export function mount(){
- $('#progress-state').addEventListener('change',renderPicker);$('#progress-search').addEventListener('input',renderPicker);
- for(const id of ['progress-round','progress-role'])$(`#${id}`).addEventListener('change',()=>{if(current)renderCurrent(current);});
+ onPaginationChange(key=>{if(key==='progress-tasks')renderPicker();else if(current)renderCurrent(current);});
+ const pickerChanged=()=>{resetPage('progress-tasks');renderPicker();};
+ $('#progress-state').addEventListener('change',pickerChanged);$('#progress-search').addEventListener('input',pickerChanged);
+ for(const id of ['progress-round','progress-role'])$(`#${id}`).addEventListener('change',()=>{resetPage('workflow');if(current)renderCurrent(current);});
  watch(async()=>{
   const list=await api('/api/tasks');tasks=list.tasks;if(firstList&&!tasks.some(active))$('#progress-state').value='all';firstList=false;renderPicker();
   if(selected){try{renderCurrent(await api(`/api/tasks/${encodeURIComponent(selected)}/progress`));}catch(error){if(error.status===404){$('#progress-empty').hidden=false;$('#progress-selected').hidden=true;$('#progress-empty h2').textContent='此任务已不存在';$('#progress-empty p').textContent='请从左侧重新选择要跟进的任务。';}else throw error;}}

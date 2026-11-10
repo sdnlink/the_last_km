@@ -32,6 +32,7 @@ from console.recovery import resume_arguments
 from console.workflow import work_details
 from console.git_records import read_git_record, GitRecordError
 from console.conclusions import present_conclusion
+from console.logs import LogReader
 from console.diagnostics import diagnose, console_result
 
 
@@ -324,7 +325,7 @@ class TaskStore:
                      'git_history': state.get('git_history', {'enabled': False}),
                      'git_checkpoints': [{**item['git_checkpoint'], 'summary': present_conclusion(item).get('summary', ''),
                                           'status': item.get('status', '')}
-                                         for item in rounds[-20:] if item.get('git_checkpoint')],
+                                         for item in rounds if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
                      'acceptance_plan': meta.get('acceptance_plan', {}) if include_details else {},
                      'acceptance_results': read_json(run/'acceptance-results.json') if include_details else {},
@@ -831,7 +832,9 @@ class TaskStore:
                 write_json(run / 'control.json', {'action': action}, durable=True)
             return self.detail(ident)
 
-    def logs(self, ident: str, name: str = '') -> dict:
+    def logs(self, ident: str, name: str = '', page: int = 1, page_size: int = 10) -> dict:
+        if type(page) is not int or not 0 <= page <= 1000000000 or type(page_size) is not int or not 1 <= page_size <= 100:
+            raise TaskError('日志页码须为非负整数，每页数量须为 1 至 100', 400)
         with self._lock:
             run = Path(self._get(ident)['run_dir'])
             files = []
@@ -844,9 +847,14 @@ class TaskStore:
                     files.append((path.stat().st_mtime, path.name))
                 except FileNotFoundError:
                     continue  # The supervisor can rotate/prune logs during enumeration.
-            names = [name for _, name in sorted(files, reverse=True)[:100]]
+            names = [name for _, name in sorted(files, reverse=True)]
             selected = name or next((n for n in names if '-text.md' in n), names[0] if names else '')
             if selected and selected not in names:
                 raise TaskError('日志文件不存在', 404)
-            return {'files': names, 'selected': selected, 'content': tail(run / selected) if selected else '',
-                    'limit_bytes': 65536}
+            if not hasattr(self, '_log_reader'):
+                self._log_reader = LogReader()
+            try:
+                data = self._log_reader.read(run / selected if selected else None, page, page_size)
+            except FileNotFoundError:
+                raise TaskError('日志文件不存在', 404) from None
+            return {'files': names, 'selected': selected, **data}

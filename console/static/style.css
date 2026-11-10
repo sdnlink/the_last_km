@@ -1673,5 +1673,21 @@ a.nav-item, a.button, a.detail-button, a.task-title, a.board-title, .detail-back
 a.button { display:inline-flex; align-items:center; justify-content:center; }
 .page-heading { gap:20px; }
 [hidden] { display:none !important; }
+.pagination { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:16px 0; color:var(--muted); font-size:11px; }
+.pagination > label, .pagination-actions, .pagination-actions label { display:flex; align-items:center; gap:6px; }
+.pagination-actions { margin-left:auto; flex-wrap:wrap; }
+.pagination button, .pagination select, .pagination input { margin:0; width:auto; font:inherit; color:var(--text); background:#fff; border:1px solid var(--line); border-radius:5px; padding:6px 8px; min-height:30px; }
+.pagination button { cursor:pointer; }
+.pagination button:disabled { opacity:.4; cursor:default; }
+.pagination input { width:48px; text-align:center; }
+.list-pagination > .pagination, .panel > .pagination, .table-wrap + .pagination { padding:16px 24px; }
+@media(max-width:640px) {
+ .pagination { gap:8px; }
+ .pagination-actions { margin-left:0; width:100%; gap:5px; }
+ .pagination button, .pagination input { padding:6px; }
+ .panel > .pagination { padding:12px 16px; }
+}
 /* Role summaries are shared by task cards and the selected progress view. */
 .board-roles { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0; color:var(--muted); font-size:10px; }
+
+.progress-picker .pagination-actions { margin-left:0; }

@@ -70,7 +70,18 @@ export function initialize() {
   $('#workspace-name').textContent=document.body.dataset.workspace.split('/').filter(Boolean).at(-1)||'/';
   const nav=document.body.dataset.page==='detail'?'tasks':document.body.dataset.page;
   $$('[data-nav]').forEach(el=>{el.classList.toggle('active',el.dataset.nav===nav);if(el.dataset.nav===nav)el.setAttribute('aria-current','page');});
+  let backdropStart=null;
+  const outside=(dialog,event)=>{
+    const rect=dialog.getBoundingClientRect();
+    return event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom;
+  };
+  document.addEventListener('pointerdown',event=>{
+    const dialog=$$('dialog[open]').at(-1);
+    backdropStart=dialog&&event.button===0&&outside(dialog,event)?dialog:null;
+  });
   document.addEventListener('click',async e=>{
+    const backdrop=backdropStart;backdropStart=null;
+    if(backdrop?.open&&outside(backdrop,e)){backdrop.close();return;}
     const close=e.target.closest('[data-close]');if(close){$(`#${close.dataset.close}`)?.close();return;}
     const gitRecord=e.target.closest('[data-git-record]');if(gitRecord){(await import('./dialogs.js')).openGitRecord(gitRecord.dataset.id,gitRecord.dataset.gitRecord);return;}
     const action=e.target.closest('[data-action]');if(action){if(action.dataset.action==='roles'){(await import('./dialogs.js')).openRoles(action.dataset.id);}else if(action.dataset.action==='delete'){(await import('./dialogs.js')).confirmDelete(action.dataset.id);}else if(action.dataset.action==='stop'){(await import('./dialogs.js')).confirmStop(action.dataset.id);}else if(action.dataset.action==='resume'){(await import('./dialogs.js')).openResume(action.dataset.id);}else runAction(action.dataset.id,action.dataset.action);return;}

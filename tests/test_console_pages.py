@@ -89,6 +89,37 @@ class ConsolePageTests(unittest.TestCase):
                         self.assertNotIn('work', task)
                         self.assertNotIn('directions', task)
 
+    def test_detail_menus_have_direct_routes_and_only_render_selected_content(self):
+        markers = {'conclusions': 'detail-conclusions', 'git': 'detail-git',
+                   'requirements': 'detail-body', 'logs': 'log-output'}
+        titles = {'conclusions': '交互结论', 'git': 'Git 追溯',
+                  'requirements': '需求与验收信息', 'logs': '执行日志 · 原始输出'}
+        status, home = self.get(f'/tasks/{self.task["id"]}')
+        self.assertEqual(status, 200)
+        self.assertIn('detail-menu', IdParser(home).ids)
+        self.assertFalse(set(markers.values()) & IdParser(home).ids)
+        self.assertIn('data-section="home"', home)
+        for section in markers:
+            self.assertIn(f'href="/tasks/{self.task["id"]}/{section}"', home)
+        for section, marker in markers.items():
+            with self.subTest(section=section):
+                status, body = self.get(f'/tasks/{self.task["id"]}/{section}')
+                self.assertEqual(status, 200)
+                ids = IdParser(body).ids
+                self.assertIn(marker, ids)
+                self.assertFalse((set(markers.values()) - {marker}) & ids)
+                self.assertIn(f'data-section="{section}"', body)
+                self.assertIn(f'<title>{titles[section]} · Auto Moniter 开发控制台</title>', body)
+                self.assertIn(f'href="/tasks/{self.task["id"]}">← 返回任务详情</a>', body)
+                self.assertFalse({'detail-menu', 'role-details', 'workflow-stages', 'detail-live'} & ids)
+                self.assertNotIn('PRIVATE_RAW_LOG_CONTENT', body)
+                self.assertNotIn('<!-- DETAIL_', body)
+        for suffix in ('missing', 'logs/extra', '../logs'):
+            self.assertEqual(self.get(f'/tasks/{self.task["id"]}/{suffix}')[0], 404)
+        status, body = self.get('/tasks/ext-' + 'a' * 20 + '/git')
+        self.assertEqual(status, 200)
+        self.assertIn('id="detail-git"', body)
+
     def test_progress_requests_only_selected_task_and_keeps_detail_and_logs_separate(self):
         with patch.object(self.store.activity, 'snapshot', return_value={'events': [], 'round': 1}) as reader:
             status, text = self.get('/api/tasks/' + self.task['id'] + '/progress')
@@ -107,10 +138,25 @@ class ConsolePageTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('PRIVATE_RAW_LOG_CONTENT', logs)
 
+    def test_log_api_defaults_to_ten_lines_and_validates_pagination(self):
+        (self.run / '001-worker.log').write_text(''.join(f'line-{n}\n' for n in range(25)))
+        path = '/api/tasks/' + self.task['id'] + '/logs'
+        status, text = self.get(path)
+        data = json.loads(text)
+        self.assertEqual(status, 200)
+        self.assertEqual(data['page_size'], 10)
+        self.assertEqual(len(data['lines']), 10)
+        self.assertEqual(data['total_lines'], 25)
+        self.assertEqual(json.loads(self.get(path+'?page=2')[1])['lines'][0]['text'], 'line-10')
+        self.assertEqual(len(json.loads(self.get(path+'?page_size=20')[1])['lines']), 20)
+        for query in ('page=-1', 'page=invalid', 'page_size=0', 'page_size=101', 'page_size=invalid'):
+            self.assertEqual(self.get(path+'?'+query)[0], 400)
+
     def test_page_assets_and_dialog_fragments_are_separate_and_allowlisted(self):
         for path in ('/pages/overview.js', '/pages/progress.js', '/pages/work.css', '/fragments/create.html', '/fragments/git.html'):
             self.assertEqual(self.get(path)[0], 200)
-        for path in ('/pages/../server.py', '/fragments/../../README.md', '/pages/detail.html', '/index.html'):
+        for path in ('/pages/../server.py', '/fragments/../../README.md', '/pages/detail.html',
+                     '/pages/detail-logs.html', '/index.html'):
             self.assertEqual(self.get(path)[0], 404)
         _, bootstrap = self.get('/app.js')
         self.assertIn('import(', bootstrap)

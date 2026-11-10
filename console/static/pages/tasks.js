@@ -1,5 +1,6 @@
 import {$,$$,escape,icon,active,attention,phases,duration,percent,bytes,badge,taskButtons} from '/ui.js';
-import {api,watch} from '/core.js';
+import {api,watch,refresh} from '/core.js';
+import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const state = {tasks:[],search:new URLSearchParams(location.search).get('q') || '',filter:new URLSearchParams(location.search).get('status') || 'all'};
 function renderTasks() {
   const search = state.search.toLowerCase();
@@ -21,7 +22,10 @@ function renderTasks() {
         .toLowerCase()
         .includes(search),
     );
-  $("#task-rows").innerHTML = tasks
+  const page=paginate('tasks',tasks,{rowHeight:85});
+  $("#tasks-pagination").innerHTML=page.controls;
+  $("#task-rows").dataset.pageList='tasks';
+  $("#task-rows").innerHTML = page.items
     .map((t, index) => {
       const progress = t.total_modules
         ? Math.round((t.accepted_modules / t.total_modules) * 100)
@@ -52,14 +56,16 @@ function renderTasks() {
     : "尝试调整状态筛选或搜索关键词。";
   $("#empty-create").hidden = !noTasks;
   $("#table-caption").textContent =
-    `显示 ${tasks.length} 项，共 ${state.tasks.length} 个任务`;
+    `显示 ${page.total?page.start+1:0}–${page.end} 项，筛选 ${tasks.length} 项 / 全部 ${state.tasks.length} 个任务`;
 }
 
 export function mount() {
+  onPaginationChange(key=>{if(key==='tasks')renderTasks();});
+  $('#refresh').addEventListener('click',refresh);
   if(!['all','active','paused','stopped','queued','done','attention'].includes(state.filter))state.filter='all';
   $('#search').value=state.search;
   $$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));
-  $('#search').addEventListener('input',e=>{state.search=e.target.value;renderTasks();});
-  $('#filters').addEventListener('click',e=>{const el=e.target.closest('[data-filter]');if(!el)return;state.filter=el.dataset.filter;renderTasks();$$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));});
+  $('#search').addEventListener('input',e=>{state.search=e.target.value;resetPage('tasks');renderTasks();});
+  $('#filters').addEventListener('click',e=>{const el=e.target.closest('[data-filter]');if(!el)return;state.filter=el.dataset.filter;resetPage('tasks');renderTasks();$$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));});
   watch(async()=>{const data=await api('/api/tasks');state.tasks=data.tasks;$('#task-count').textContent=data.tasks.length;$('#filter-active').textContent=data.tasks.filter(t=>['running','starting'].includes(t.status)).length;renderTasks();$('#last-updated').textContent=`更新于 ${new Date(data.at).toLocaleTimeString('zh-CN',{hour12:false})}`;});
 }

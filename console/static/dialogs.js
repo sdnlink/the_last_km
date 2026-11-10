@@ -1,4 +1,5 @@
-import {$,escape,icon,timeLabel} from './ui.js';
+import {$,escape,icon,timeLabel,stableHTML} from './ui.js';
+import {paginate,resetPage,onPaginationChange} from './pagination.js';
 import {api,config,fragment,toast,runAction,refresh} from './core.js';
 const loaded=new Map();
 const state={config:null,rolesConfig:null,directionTask:null,directionPending:new Set()};
@@ -186,7 +187,9 @@ export async function openRoles(id){
   $('#roles-error').hidden=true;showTaskDialog('roles',id);
  }catch(error){if(currentTaskDialog('roles',sequence))toast(error.message,true);}
 }
+let paginationBound=false;
 async function ensure(name){
+ if(name==='direction'&&!paginationBound){paginationBound=true;onPaginationChange(key=>{if(key==='directions'&&state.currentDirection&&$('#direction-dialog')?.open)renderDirectionHistory(state.currentDirection);});}
  if(!loaded.has(name))loaded.set(name,(async()=>{
    if(!$('#dialog-styles')){const link=document.createElement('link');link.id='dialog-styles';link.rel='stylesheet';link.href='/dialogs.css';document.head.append(link);}
    const html=await fragment(name);$('#dialog-root').insertAdjacentHTML('beforeend',html);bind(name);
@@ -254,15 +257,16 @@ function renderDirectionHistory(task) {
       : receipt.responded_at || receipt.status === "responded"
         ? `第 ${receipt.responded_round || receipt.round} 轮已返回结果${receipt.status === "sent" ? `；第 ${receipt.round} 轮处理中` : ""}`
         : `已发送至第 ${receipt.round} 轮，等待结果`;
+  const page=paginate('directions',(task.directions||[]).slice().reverse(),{rowHeight:140});
   const html =
-    (task.directions || [])
+    page.items
       .map(
         (item) =>
           `<article><div><strong>你 · ${escape(timeLabel(item.at))}</strong><span>执行器：${escape(label(item.worker))}</span></div><p>${escape(item.text)}</p><small>审查器：${escape(task.reviewer === "—" ? "未配置独立审查器" : label(item.reviewer))}</small></article>`,
       )
       .join("") ||
     '<p class="muted">尚未补充要求。可以根据交互结果直接调整优先级、实现方式或补充验收关注点。</p>';
-  $("#direction-history").innerHTML = html;
+  const root=$('#direction-history');root.dataset.pageList='directions';stableHTML(root,html+page.controls);
 }
 
 export async function openCreate(){
@@ -279,7 +283,7 @@ async function pollDirection(){
  if(state.directionTask===id&&$('#direction-dialog').open)directionTimer=setTimeout(pollDirection,3000);
 }
 export async function openDirection(id){
- try{await ensure('direction');state.directionTask=id;$('#direction-error').hidden=true;$('#direction-text').value=localStorage.getItem(`auto-moniter-direction-${id}`)||'';$('#direction-pause').checked=false;$('#direction-history').textContent='加载任务要求…';$('#direction-submit').disabled=true;if(!$('#direction-dialog').open)$('#direction-dialog').showModal();await pollDirection();}
+ try{await ensure('direction');resetPage('directions');state.directionTask=id;$('#direction-error').hidden=true;$('#direction-text').value=localStorage.getItem(`auto-moniter-direction-${id}`)||'';$('#direction-pause').checked=false;$('#direction-history').textContent='加载任务要求…';delete $('#direction-history').dataset.html;$('#direction-submit').disabled=true;if(!$('#direction-dialog').open)$('#direction-dialog').showModal();await pollDirection();}
  catch(error){toast(error.message,true);}
 }
 export async function confirmStop(id){

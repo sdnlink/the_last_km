@@ -14,7 +14,7 @@ from pathlib import Path
 from auto_moniter.redaction import safe
 from auto_moniter.runlog import clipped
 from auto_moniter.storage import write_json
-from auto_moniter.workspace import file_snapshot
+from auto_moniter.workspace import workspace_paths
 
 
 class GitHistoryError(RuntimeError):
@@ -98,12 +98,15 @@ class GitHistory:
 
     def _tree(self, record: Path | None = None) -> str:
         # Source selection matches acceptance and excludes runtime/build artifacts.
-        files = [Path(name).relative_to(self.cwd).as_posix() for name in file_snapshot(self.cwd, ignore_dir=self.run_dir)]
+        files = [path.relative_to(self.cwd).as_posix() for path in workspace_paths(self.cwd, ignore_dir=self.run_dir)]
         with tempfile.TemporaryDirectory(prefix='auto-moniter-git-index-') as tmp:
             env = {'GIT_INDEX_FILE': str(Path(tmp) / 'index')}
             self.git('read-tree', '--empty', env=env)
-            for offset in range(0, len(files), 128):
-                self.git('--literal-pathspecs', 'add', '--force', '--', *files[offset:offset + 128], env=env)
+            if files:
+                # One private-index update, including literal spaces/newlines and
+                # pathspec-looking filenames; never touch the user's real index.
+                self.git('update-index', '--add', '-z', '--stdin',
+                         data=b''.join(os.fsencode(p) + b'\0' for p in files), env=env)
             if self.head:
                 # Carry immutable older records from Git, not writable project files.
                 records = self.git('-C', str(self.root), '--literal-pathspecs', 'ls-tree', '-r', '-z',

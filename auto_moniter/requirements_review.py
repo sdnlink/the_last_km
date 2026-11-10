@@ -1,8 +1,13 @@
 """Read-only reviewer elaboration; preserve the person's original scope."""
 import json
 import re
+import hashlib
 
 MAX_CYCLES = 32
+
+
+def requirement_hash(text):
+    return hashlib.sha256(text.replace('\r\n', '\n').replace('\r', '\n').strip().encode()).hexdigest()
 
 SCHEMA = {'type':'object','additionalProperties':False,'properties':{
     'status':{'type':'string','enum':['ready','needs_input']},
@@ -72,6 +77,11 @@ def prompt(config, modules, *, follow_up=None):
             'Return only the supplied requirement-elaboration JSON schema, not an implementation completion verdict. '
             'Preserve every original requirement, explicit exclusion, fixed module, executable check and human authority. '
             'Add concrete acceptance criteria, failure/edge cases, constraints and reasonable assumptions within the original scope. '
+            'Plan small deliverable increments: inspect only enough capability inventory to implement the next requested behavior. '
+            'Do not make an exhaustive repository audit a dependency of all implementation unless the person requires it. '
+            'Reuse verified findings and define dependencies only for actual data or integration needs. '
+            'Fixed checks are a minimum: identify focused behavioral checks for the requested changes, '
+            'rather than treating unrelated existing tests or diff formatting as proof of new functionality. '
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
             + _follow_up_block(follow_up) +

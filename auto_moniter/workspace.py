@@ -28,6 +28,25 @@ _IGNORED_PARTS = {
 _DIFF_LIMIT = 12000
 
 
+def snapshot_fingerprint(cwd: Path, snapshot: dict[str, str]) -> str:
+    """Fingerprint an already read boundary snapshot without rereading files."""
+    digest = hashlib.sha256()
+    for name in sorted(snapshot, key=Path):
+        token = snapshot[name]
+        if token == "unreadable":
+            raise PermissionError(f"Cannot fingerprint unreadable workspace file: {name}")
+        digest.update(str(Path(name).relative_to(cwd)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(token.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def workspace_paths(cwd: Path, *, ignore_dir: Path | None = None) -> Iterator[Path]:
+    """Select the same source paths as snapshots, without hashing their contents."""
+    yield from _workspace_files(cwd, ignore_dir)
+
+
 def workspace_fingerprint(cwd: Path, *, ignore_dir: Path | None = None) -> str:
     digest = hashlib.sha256()
     for path in sorted(_workspace_files(cwd, ignore_dir)):

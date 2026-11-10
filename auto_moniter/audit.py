@@ -14,6 +14,12 @@ KEEP_CLOSED = 20
 MAX_BYTES = 512 * 1024
 
 
+def finding_modules(text: str, known_modules, default) -> list[str]:
+    """Use only an explicit known module prefix, never incidental body mentions."""
+    prefix = re.match(r'^([A-Za-z0-9_.-]+)\s*[／/:：]', text)
+    return [prefix[1]] if prefix and prefix[1] in known_modules else sorted(set(default))
+
+
 class AuditCapacityError(ValueError):
     pass
 
@@ -68,12 +74,12 @@ class AuditLedger:
             raise AuditCapacityError("Audit issue ledger exceeds 512 KiB; no open issue was discarded")
         self.items, self.next_id, self.pruned_closed = items, next_id, value["pruned_closed"]
 
-    def record(self, findings: list[str], index: int, module_ids: list[str] | None = None) -> list[str]:
+    def record(self, findings: list[str], index: int, module_ids: list[str] | None = None, *, known_modules=()) -> list[str]:
         items = copy.deepcopy(self.items)
         next_id = self.next_id
         added = []
-        modules = sorted(set(module_ids or []))
         for finding in findings:
+            modules = finding_modules(finding, known_modules, module_ids or [])
             text, old = self._match(finding, modules, items)
             if old:
                 old.update(status="open", last_seen_round=index, resolution=None, resolved_round=0, tree="")
@@ -104,29 +110,43 @@ class AuditLedger:
                            and item["module_ids"] == modules), None)
 
     def update(self, findings: list[str], proposals: object, index: int, tree: str,
-               module_ids: list[str], check_evidence) -> tuple[list[str], list[str]]:
+               module_ids: list[str], check_evidence, *, known_modules=()) -> tuple[list[str], list[str]]:
         """Apply valid closures and new findings together within the capacity budget."""
         module_ids = sorted(set(module_ids))
         try:
             proposals = resolutions(proposals)
             mentioned = set()
             for finding in findings:
-                _, old = self._match(finding, module_ids, self.items)
+                _, old = self._match(finding, finding_modules(finding, known_modules, module_ids), self.items)
                 if old:
                     mentioned.add(old["id"])
             if mentioned.intersection(item["id"] for item in proposals):
                 raise ValueError("An issue cannot be closed while the same review reports it as an open finding")
             staged = copy.deepcopy(self)
             closed = staged.resolve(proposals, index, tree, check_evidence)
-            reported = staged.record(findings, index, module_ids)
+            reported = staged.record(findings, index, module_ids, known_modules=known_modules)
         except AuditCapacityError:
             raise
         except ValueError:
             # An invalid closure must not erase otherwise valid new findings.
-            self.record(findings, index, module_ids)
+            self.record(findings, index, module_ids, known_modules=known_modules)
             raise
         self.items, self.next_id, self.pruned_closed = staged.items, staged.next_id, staged.pruned_closed
         return reported, closed
+
+    def reconcile_modules(self, known_modules) -> list[dict]:
+        """Repair legacy blanket ownership from the original reviewer prefix.
+
+        IDs, findings, states and resolution evidence are preserved. Unknown or
+        ambiguous prefixes keep their conservative saved ownership.
+        """
+        changes = []
+        for item in self.items:
+            modules = finding_modules(item['summary'], known_modules, item['module_ids'])
+            if modules != item['module_ids']:
+                changes.append({'id': item['id'], 'before': item['module_ids'], 'after': modules})
+                item['module_ids'] = modules
+        return changes
 
     def resolve(self, proposals: object, index: int, tree: str, check_evidence) -> list[str]:
         proposals = resolutions(proposals)

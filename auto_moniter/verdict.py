@@ -355,6 +355,7 @@ def verdict_instructions() -> str:
         "- Use done only when every item within the declared scope is implemented, checked, and has no remaining gap.\n"
         "- done with scope=module submits a completed module for review; it does not end the original requirement. Name the module in summary and done.\n"
         "- A module done verdict has no gaps, next_actions, or blockers within that module; the supervisor continues the remaining original modules after acceptance.\n"
+        "- Waiting for independent review is not an implementation gap. Submit a verified module as done now; keep unrelated pending modules in the ledger, not in this module's gaps.\n"
         "- done with scope=requirement explicitly confirms ALL original modules, integration paths, and acceptance checks are complete and ready for delivery.\n"
         "- Questions, requests for confirmation, plans, incomplete modules, and waiting for input are continue, never done.\n"
         "- Continue authorized work without waiting for a person to reply. Use reasonable defaults within the stated scope.\n"

@@ -35,6 +35,7 @@ from auto_moniter.workspace import (
     acceptance_problems,
     file_lock,
     file_snapshot,
+    snapshot_fingerprint,
     workspace_diff,
     workspace_fingerprint,
     workspace_snapshot,
@@ -419,6 +420,7 @@ class Supervisor:
             last_worker = last_review = None
 
         while not self._stop:
+            repair_review = False
             self._process_control()
             if self._stop:
                 break
@@ -452,10 +454,11 @@ class Supervisor:
                 if self.git_history:
                     self._git_before = self.git_history.begin_round(round_index)
 
-                worker_start_tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
-                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
                 track_files = bool(self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
                 before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
+                                     workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
+                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
                 # Compare to the last verified workspace, including changes made
                 # between turns; comparing only to turn-start would miss those edits.
                 impact_before = getattr(self, '_impact_snapshot', None)
@@ -483,8 +486,9 @@ class Supervisor:
                 verdict = self._verdict_from_turn(turn, role="worker")
                 self._rounds_since_review += 1
                 self._worker_seconds_since_review += turn.elapsed_s
-                tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
                 after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                tree = (snapshot_fingerprint(self.config.cwd, after_files) if track_files else
+                        workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
                 changed_count = sum(before_files.get(k) != after_files.get(k) for k in before_files.keys() | after_files.keys())
                 checkpoint_due = bool(self.config.quality_policy and turn.timed_out
@@ -625,6 +629,14 @@ class Supervisor:
                     periodic_review |= checkpoint_due or bool(threshold and changed_count >= threshold)
                     if checkpoint_due:
                         self.worker_session_id = ''
+                # A scoped repair with changed source and evidence should get a
+                # bounded audit now, rather than wait behind unrelated modules.
+                # This requests review only; it never promotes continue to done.
+                repair_review = bool(self.config.workflow == 'review-first' and tree != worker_start_tree
+                                     and verdict.scope == 'module' and verdict.module_ids
+                                     and verdict.done and verdict.evidence
+                                     and self.audit.pending(set(verdict.module_ids)))
+                periodic_review |= repair_review
                 if not _accepted(verdict) and not verdict.blockers and not periodic_review:
                     # An unfinished worker should keep implementing. A completion
                     # candidate (or an external blocker) is the review checkpoint.
@@ -656,7 +668,7 @@ class Supervisor:
                 raise RuntimeError("Workspace changed after worker conclusion; worker evidence is stale")
             self._beat(f"round {round_index}: starting reviewer")
             self.log(f"round {round_index}: reviewer running")
-            self._event("review_checkpoint", reason="completion" if _accepted(verdict) else ("blocker" if verdict.blockers else "periodic"),
+            self._event("review_checkpoint", reason="completion" if _accepted(verdict) else ("blocker" if verdict.blockers else ("audit_repair" if repair_review else "periodic")),
                         rounds_since_review=self._rounds_since_review)
             review_session = "" if self.config.fresh_review else self.reviewer_session_id
             try:
@@ -956,8 +968,8 @@ class Supervisor:
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         self.requirements_review={'status':'reviewing','summary':'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
                                   'cycle': len(self.requirement_cycles) + 1}
-        self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
         before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
+        self._write_state(records,'running',0,'',before)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
         schema.write_text(json.dumps(requirements_review.SCHEMA))
@@ -977,7 +989,7 @@ class Supervisor:
             brief=requirements_review.parse(turn.text)
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
-            brief['original_sha256']=hashlib.sha256(self.config.requirement.strip().encode()).hexdigest()
+            brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
             self.requirements_review=brief
             self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
             write_json(self.run_dir/'reviewed-requirement.json',safe(brief),durable=True)
@@ -1187,12 +1199,16 @@ class Supervisor:
 
     def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str) -> dict:
         modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope == "module" else []
+        corrections = self.audit.reconcile_modules(self.modules.items)
+        if corrections:
+            self._event('audit_issue_scope_corrected', changes=corrections)
         findings = _audit_findings(review)
         open_before = {item["id"] for item in self.audit.pending()}
         def check_evidence(evidence):
             return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
                                        git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
-        reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules, check_evidence)
+        reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules, check_evidence,
+                                            known_modules=self.modules.items)
         if reported:
             self._event("audit_issues_reported", issues=reported)
         if closed:
@@ -1768,10 +1784,14 @@ class Supervisor:
         if not isinstance(self.requirements_review,dict):
             raise ValueError('Invalid saved requirement elaboration')
         self.requirement_cycles = _restore_requirement_cycles(state.get('requirement_cycles', []))
-        original=(self.run_dir/'requirement.md').read_text().strip()
+        # read_text normalizes CRLF, which would invalidate legacy hashes made
+        # from the original Web form text. Validate exact saved bytes as well as
+        # the canonical newline representation; never trust incoming replacement text.
+        original=(self.run_dir/'requirement.md').read_bytes().decode('utf-8').strip()
         if self.requirements_review.get('status')=='ready':
             requirements_review.parse(json.dumps({k:v for k,v in self.requirements_review.items() if k in requirements_review.SCHEMA['required']}))
-            if self.requirements_review.get('original_sha256')!=hashlib.sha256(original.encode()).hexdigest():
+            hashes = {hashlib.sha256(original.encode()).hexdigest(), requirements_review.requirement_hash(original)}
+            if self.requirements_review.get('original_sha256') not in hashes:
                 raise ValueError('Requirement elaboration belongs to another original request')
         if self.requirement_cycles and not requirements_review.requests_follow_up(original):
             raise ValueError('Saved follow-up cycles do not belong to this requirement')
@@ -1954,8 +1974,12 @@ class Supervisor:
                 "The person authorized continuous work on this requirement. Resolve routine choices yourself within that scope.",
                 "If you asked a question or requested confirmation, continue immediately using reasonable defaults; no reply is needed.",
                 "A blocker does not end monitoring: keep doing independent work and recheck the dependency without inventing access.",
-                "After you finish this turn, keep looking for missing behavior, tests, edge cases, and incomplete wiring.",
-                "If anything required is still missing, status must be continue and gaps must name it.",
+                "Within this turn's declared scope, check missing behavior, tests, edge cases, and incomplete wiring.",
+                "When a module is implemented and verified, return status=done, scope=module and its module_ids. "
+                "Other pending modules and waiting for independent review are not gaps in that completed module. "
+                "The watcher reviews, verifies and commits it before continuing the original requirement.",
+                "Keep capability inventory bounded to what the next implementation needs; use real data dependencies, "
+                "not a complete audit of the whole repository as a prerequisite for every user-visible change.",
                 "",
                 "Requirement:",
                 self.config.requirement.strip(),
@@ -1984,7 +2008,7 @@ class Supervisor:
         own_block = json.dumps(last_worker.to_dict(), ensure_ascii=False, indent=2) if last_worker else "{}"
         return "\n".join(
             [
-                "Continue the same task. The supervisor rejected idle completion.",
+                "Continue the same task from the saved checkpoint and independent review.",
                 "If the previous module passed review, preserve it and implement the next unfinished module "
                 "from the original requirement. Recheck the whole original requirement for remaining modules; "
                 "a module milestone is not completion of the entire requirement.",
@@ -1996,6 +2020,9 @@ class Supervisor:
                 "without a changed input or observed failure. The watcher executes the fixed delivery checks itself. "
                 "Keep evidence concise: real command, exit status, source version, remaining limitations. "
                 "A reviewer transport or conclusion-format failure requires reviewer repair, not implementation edits.",
+                "If this module's repairs and focused checks are complete, submit status=done, scope=module "
+                "and the repaired module_ids now. Pending unrelated modules or reviewer approval are not "
+                "implementation gaps in this module. Do not expand to other modules while this handoff is ready.",
                 "Make concrete progress or verify the deliverable; avoid unnecessary edits to already completed work.",
                 "If the review is wrong, fix the evidence and say why in summary. If it is right, do the work.",
                 "A person is not available. Decide and proceed.",
@@ -2084,6 +2111,9 @@ class Supervisor:
                 "For each blocking gap, give its AUD ID (if assigned), requirement/criterion, exact file or symbol, "
                 "reproducible trigger, expected versus observed behavior, minimal fix boundary, and a precise verification "
                 "command or assertion. Distinguish a reproduced failure from a code inference. "
+                "Prefix each new scoped finding with its actual known module ID and /, e.g. M2/summary. "
+                "Keep existing AUD IDs. Findings for future modules remain pending under those modules; "
+                "do not assign all findings to the current worker module or block it on unrelated unfinished work. "
                 "Inspect ALL execution entry points and the actual caller/submission path in the first audit; "
                 "return all currently known blockers together, not one new condition on each round. "
                 "Do not invent acceptance criteria beyond the original request and human amendments.",

@@ -61,6 +61,29 @@ class AuditLedger:
     def export(self) -> dict:
         return {"next_id": self.next_id, "pruned_closed": self.pruned_closed, "items": copy.deepcopy(self.items)}
 
+    def local_findings(self, findings):
+        """Foreign references may describe new defects, never authorize closures.
+
+        Resolve against the ledger BEFORE allocation so a new local number
+        cannot accidentally alias a later foreign reference in the same review.
+        Keep the source reference as prose for provenance and stable deduplication.
+        """
+        known = {item['id'] for item in self.items}
+        result, references = [], []
+        for finding in findings:
+            if isinstance(finding, str) and len(finding.encode('utf-8')) > 2000:
+                raise AuditCapacityError('Audit finding exceeds 2000 UTF-8 bytes; simplify the finding before continuing')
+            text = _text(finding)
+            match = re.match(r'^(AUD-[1-9][0-9]{0,11})\s*[:：]\s*(.+)$', text, re.S)
+            if match and match[1] not in known:
+                text = match[2] + f' [external audit reference: {match[1]}]'
+                if len(text.encode('utf-8')) > 2000:
+                    raise AuditCapacityError('Audit finding with provenance exceeds 2000 UTF-8 bytes; simplify the finding before continuing')
+                _text(text)
+                references.append({'source_id': match[1], 'finding': text})
+            result.append(text)
+        return result, references
+
     def _commit(self, items: list[dict], next_id: int) -> None:
         if sum(item["status"] != "resolved" for item in items) > MAX_OPEN:
             raise AuditCapacityError("Open audit issues exceed 128; resolve existing issues before continuing")

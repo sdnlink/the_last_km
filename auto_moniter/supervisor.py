@@ -763,6 +763,9 @@ class Supervisor:
                     and (_accepted(review) or review.gaps or review.next_actions or review.blockers or review.issue_resolutions)):
                 # Provider/format failures must not replace the last business audit.
                 try:
+                    rejected = getattr(self, '_review_audit_rejection', None)
+                    if rejected and rejected['round'] == round_index:
+                        raise ValueError(rejected['reason'])
                     watcher_result = self._record_audit(review, verdict, round_index, review_tree)
                 except AuditCapacityError as exc:
                     self._audit_feedback = review
@@ -847,9 +850,11 @@ class Supervisor:
                 self._retry_pause(reviewer_failures + (3 if recovery == "backoff" else 0), category + " reviewer failure")
                 continue
             if review.parse_error and self.config.workflow == 'review-first':
+                retried = getattr(self, '_review_audit_retry_exhausted', None) == round_index
                 return self._finish('action_required',
-                                    'Reviewer conclusion remains invalid after repair; worker candidate saved. '
-                                    + review.parse_error, records, verdict)
+                                    ('Reviewer audit update rejected after reviewer-only retry; worker candidate saved. ' if retried
+                                     else 'Reviewer audit update rejected; worker candidate saved. ')
+                                    + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
             reviewer_failures = 0
             if review.blockers:
                 write_json(self.run_dir / 'environment-blocks.json', safe({
@@ -1314,13 +1319,17 @@ class Supervisor:
         corrections = self.audit.reconcile_modules(self.modules.items)
         if corrections:
             self._event('audit_issue_scope_corrected', changes=corrections)
-        findings = _audit_findings(review)
+        findings, references = self.audit.local_findings(_audit_findings(review))
         open_before = {item["id"] for item in self.audit.pending()}
         def check_evidence(evidence):
             return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
                                        git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
         reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules, check_evidence,
                                             known_modules=self.modules.items)
+        if references:
+            for reference in references:
+                reference['local_ids'] = [item['id'] for item in self.audit.items if item['summary'] == reference['finding']]
+            self._event('audit_external_references_registered', references=references)
         if reported:
             self._event("audit_issues_reported", issues=reported)
         if closed:
@@ -2304,6 +2313,10 @@ class Supervisor:
                 "",
                 "Open audit issues (must not disappear by omission):",
                 json.dumps(self.audit.prompt(), ensure_ascii=False),
+                "AUD IDs belong only to THIS run's ledger above. IDs quoted in predecessor tasks, documents, "
+                "requirements or transcripts are historical references, not current issue identifiers. "
+                "Report newly found or inherited defects as plain findings prefixed by their current module ID. "
+                "Only IDs present in this ledger may be used in issue_resolutions; never invent or transplant closures.",
                 "For each fixed or invalid finding, return issue_resolutions with its exact AUD ID, an explanation and changed-file evidence. "
                 "Do not mark an issue resolved based only on a worker claim. Unresolved issues remain open across turns and resume.",
                 "When an existing issue remains open, prefix its gaps entry with its exact AUD ID (for example 'AUD-1: assertion still fails'). "
@@ -2335,15 +2348,19 @@ class Supervisor:
         if isinstance(self.git_history, ApprovedHistory) and not self.git_history.candidate:
             return None
         worker = next((r for r in reversed(records) if r.role == 'worker'), None)
-        if not worker or worker.failure or worker.interruption or not _accepted(worker.verdict):
+        if not worker or worker.failure or worker.interruption:
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
+        rejected_audit = bool(review and (review.watcher_result.get('status') == 'rejected'
+                                         or review.failure or review.interruption or review.verdict.parse_error))
+        if not _accepted(worker.verdict) and not rejected_audit:
+            return None
         publication = getattr(self.git_history, 'last_business_commit', {})
         published = publication.get('round') == worker.index and publication.get('candidate_tree') == self.git_history.candidate.get('commit') if publication else False
         ready = self._saved_approval(worker.index, worker.tree)
         if published and worker.verdict.module_ids and all(self.modules.items.get(k, {}).get('status') == 'accepted' for k in worker.verdict.module_ids):
             return None
-        if review and not (review.failure or review.interruption or review.verdict.parse_error or published or ready):
+        if review and not (review.failure or review.interruption or review.verdict.parse_error or rejected_audit or published or ready):
             return None
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree:
             return None
@@ -2363,6 +2380,7 @@ class Supervisor:
 
     def _invoke_review(self, provider, prompt, session_id, **kwargs):
         """One bounded repair belongs to the reviewer, never to the worker."""
+        self._review_audit_rejection = None
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         ready = self._saved_approval(kwargs['index'], tree)
         if (ready and ready.get('provider_config') == self._provider_config()
@@ -2397,6 +2415,46 @@ class Supervisor:
                     review.parse_error = 'invalid review checkpoint evidence'
                     review.gaps.extend(problems)
             failure = _failure_reason(turn, review)
+            if (not failure and not review.parse_error and not turn.interruption
+                    and self.config.workflow == 'review-first'
+                    and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
+                # Validate ledger operations inside the existing reviewer-only
+                # repair loop, not after its retry opportunity has already passed.
+                import copy
+                original_findings = _audit_findings(review)
+                local, references = self.audit.local_findings(original_findings)
+                if references:
+                    converted = dict(zip(original_findings, local))
+                    for field in ('gaps', 'blockers', 'next_actions'):
+                        setattr(review, field, [converted.get(text, text) for text in getattr(review, field)])
+                    # Keep the provider transcript unchanged; the structured
+                    # result used by the watcher carries explicit provenance.
+                    turn.text = json.dumps(review.to_dict(), ensure_ascii=False)
+                    self._event('audit_external_references_normalized', round=kwargs['index'], references=references)
+                staged = copy.deepcopy(self.audit)
+                findings, _ = staged.local_findings(_audit_findings(review))
+                worker = next((r.verdict for r in reversed(self._records) if r.role=='worker'), Verdict('continue'))
+                modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope=='module' else []
+                def evidence_errors(evidence):
+                    return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files,
+                        ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
+                try:
+                    staged.update(findings, review.issue_resolutions, kwargs['index'], tree, modules,
+                                  evidence_errors, known_modules=self.modules.items)
+                except AuditCapacityError:
+                    raise
+                except ValueError as exc:
+                    # Retain substantive findings even if a closure is invalid.
+                    # No proposed closure is applied until the whole payload is valid.
+                    reported = self.audit.record(findings, kwargs['index'], modules, known_modules=self.modules.items)
+                    if reported:
+                        self._event('audit_findings_preserved', issues=reported, round=kwargs['index'])
+                    review.parse_error = 'invalid audit update: ' + str(exc)
+                    review.status = 'continue'
+                    review.gaps.append(review.parse_error)
+                    if attempt:
+                        self._review_audit_retry_exhausted = kwargs['index']
+                        self._review_audit_rejection = {'round': kwargs['index'], 'reason': str(exc)}
             invalid = failure or review.parse_error or turn.interruption
             if not invalid or self._stop or self.config.workflow != 'review-first':
                 return turn
@@ -2433,7 +2491,9 @@ class Supervisor:
             prompt += ('\n\nReviewer-only repair of the SAME candidate. Worker has not changed it. '
                        'Retain already verified substantive findings; correct only the failed conclusion '
                        'or complete the interrupted audit. Do not invent implementation work.\n'
-                       + json.dumps(review.to_dict(), ensure_ascii=False) + '\nValidation error: ' + str(invalid))
+                       + json.dumps(review.to_dict(), ensure_ascii=False) + '\nValidation error: ' + str(invalid)
+                       + '\nAuthoritative current-run audit ledger after preserving findings:\n'
+                       + json.dumps(self.audit.prompt(), ensure_ascii=False))
         return turn
 
     def _invoke(

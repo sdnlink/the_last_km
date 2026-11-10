@@ -749,7 +749,8 @@ class ConfiguredProvider(Provider):
                          delegate.separate_review_session,delegate.mode)
 
     def __getattr__(self,name):
-        return getattr(self.delegate,name)
+        # During spawn unpickling, delegate is not restored when Python probes __setstate__.
+        return getattr(object.__getattribute__(self,'delegate'),name)
 
     def validate_review(self, extra_args=()):
         self.delegate.validate_review(extra_args)

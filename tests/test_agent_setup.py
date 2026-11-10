@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 from pathlib import Path
 import stat
 import sys
@@ -135,6 +136,50 @@ else:
         result=run_command(prepared,self.project,timeout_s=5)
         self.assertEqual(result.exit_code,0,result.stderr)
         self.assertTrue(next(row for row in self.manager.snapshot()['agents'] if row['id']=='copilot')['installed'])
+
+    def test_configured_provider_round_trip_preserves_delegation_and_review_permissions(self):
+        self.manager.save({'agents':[{'id':'paseo','enabled':True,'model':'saved-model'}]})
+        provider=resolve_provider('paseo',paseo_backend='claude',role='reviewer',settings_path=self.manager.path)
+        restored=pickle.loads(pickle.dumps(provider))
+        self.assertEqual(restored.backend,'claude')
+        self.assertEqual(restored.profile['model'],'saved-model')
+        restored.validate_review()
+        with self.assertRaises(AttributeError):getattr(restored,'missing_attribute')
+
+    def test_guardian_spawns_configured_worker_and_reviewer_and_saves_delivery(self):
+        from auto_moniter.guardian import Guardian
+        from auto_moniter.supervisor import RunConfig
+        from tests.test_supervisor import _verdict
+        profiles=[]
+        payload=json.dumps({'type':'result','result':json.dumps(_verdict('done',evidence=['app.py']))})
+        for name,key_env in [('codex','OPENAI_API_KEY'),('claude','ANTHROPIC_AUTH_TOKEN')]:
+            binary=self.root/('guarded-'+name)
+            binary.write_text(f'''#!{sys.executable}
+import json,os,sys
+from pathlib import Path
+assert os.environ[{key_env!r}] == {('private-'+name+'-key')!r}
+assert {name+'-model'!r} in sys.argv
+sys.stdin.read()
+if {name!r} == 'codex':
+ Path('app.py').write_text('delivered\\n')
+else:
+ assert sys.argv[sys.argv.index('--permission-mode')+1] == 'plan'
+print({payload!r})
+''')
+            binary.chmod(0o700)
+            profiles.append({'id':name,'enabled':True,'executable':str(binary),
+                'model':name+'-model','auth_mode':'api_key','api_key':'private-'+name+'-key'})
+        self.manager.save({'agents':profiles})
+        worker=resolve_provider('codex',settings_path=self.manager.path)
+        reviewer=resolve_provider('claude',role='reviewer',settings_path=self.manager.path)
+        run=self.data/'guarded-run'
+        report=Guardian(RunConfig('Deliver app.py',self.project,worker,reviewer=reviewer,
+            run_dir=run,git_history='off',max_rounds=1,max_agent_calls=2,retry_delay_s=0),
+            delay_s=0,log=lambda _:None).run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual(json.loads((run/'state.json').read_text())['usage']['agent_calls'],2)
+        self.assertEqual(json.loads((run/'guardian.json').read_text())['restarts'],0)
+        self.assertEqual((self.project/'app.py').read_text(),'delivered\n')
 
     def test_user_install_outside_path_is_available_for_task_launch(self):
         target=self.root/'.local/bin/gemini';target.parent.mkdir(parents=True)

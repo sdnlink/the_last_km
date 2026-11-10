@@ -120,11 +120,18 @@ class Verdict:
     modules: list[dict] = field(default_factory=list)
     issue_resolutions: list[dict] = field(default_factory=list)
 
+    task_id: str = ""
+    task_status: str = ""
+    next_task: dict | None = None
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("raw", None)
         data.pop("parse_error", None)
         data.pop("structured", None)
+        if not self.task_id and not self.task_status and self.next_task is None:
+            for key in ("task_id", "task_status", "next_task"):
+                data.pop(key)
         return data
 
 
@@ -172,6 +179,7 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
         module_ids=_string_list(data.get("module_ids")),
         modules=data.get("modules", []),
         issue_resolutions=data.get("issue_resolutions", []),
+        task_id=data.get("task_id", ""), task_status=data.get("task_status", ""), next_task=data.get("next_task"),
     )
     # Older conclusions may omit the closure array. They cannot close any issue.
     invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data and name != "issue_resolutions"]

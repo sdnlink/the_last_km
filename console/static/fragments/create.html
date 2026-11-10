@@ -112,6 +112,9 @@
                     required
                 /></label>
               </div>
+              <label><input type="checkbox" name="function_dispatch" checked /> 由 reviewer 逐函数下发任务
+                <small>每次只下发一个可实现、可验证的函数条目。审核通过后再推进下一项。</small>
+              </label>
               <label>审核频率（worker 轮次）
                 <input name="review_every" type="number" min="0" max="100000" value="5" required />
                 <small>1：每轮正常结果后审核；2：每两轮；默认 5。0：关闭按轮次审核，仍审核完成候选和外部阻塞；质量策略的时间或文件数检查点也可提前触发。失败轮次累计计数，但等待 worker 正常返回后才进入审核。</small>

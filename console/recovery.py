@@ -95,6 +95,8 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
               '--provider', args.provider, '--worker-isolation', args.worker_isolation,
               '--review-isolation', args.review_isolation, '--git-history', args.git_history]
     result.append('--workflow='+state.get('workflow','legacy'))
+    if state.get('function_dispatch'):
+        result.append('--function-dispatch')
     strings = {'model': '--model', 'mode': '--mode', 'paseo_backend': '--paseo-backend',
                'paseo_mode': '--paseo-mode', 'reviewer': '--reviewer', 'reviewer_model': '--reviewer-model',
                'reviewer_mode': '--reviewer-mode', 'reviewer_paseo_backend': '--reviewer-paseo-backend',

@@ -33,6 +33,7 @@ from auto_moniter.providers import (
 from auto_moniter.workspace import (
     LockError,
     acceptance_problems,
+    evidence_paths,
     file_lock,
     file_snapshot,
     snapshot_fingerprint,
@@ -53,6 +54,7 @@ from auto_moniter.history import prune_files
 from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
+from auto_moniter import function_tasks
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
@@ -121,6 +123,7 @@ class RunConfig:
     git_history: str = 'auto'
     quality_policy: dict = field(default_factory=dict)
     workflow: str = 'legacy'
+    function_dispatch: bool = False
 
 
 @dataclass
@@ -138,6 +141,8 @@ class RoundRecord:
     interruption: str = ""
     git_checkpoint: dict = field(default_factory=dict)
     watcher_result: dict = field(default_factory=dict)
+    reported_status: str = ""
+    delivery: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -184,6 +189,10 @@ class RunReport:
                     "interruption": record.interruption,
                     "git_checkpoint": record.git_checkpoint,
                     "watcher_result": record.watcher_result,
+                    "reported_status": record.reported_status or record.verdict.status,
+                    **({"delivery": record.delivery} if record.delivery else {}),
+                    **({key: record.verdict.to_dict()[key] for key in ("task_id", "task_status", "next_task")}
+                       if record.verdict.task_id else {}),
                 }
                 for record in self.records
             ],
@@ -223,6 +232,11 @@ class Supervisor:
         self._recovery_note = ""
         self.modules = ModuleLedger(config.modules)
         self.audit = AuditLedger()
+        self.function_tasks = function_tasks.FunctionTasks()
+        self._dispatch_directions = []
+        self._function_issue_ids = []
+        self._last_invocation = {}
+        self._delivery_diagnosis = {}
         self._started = time.monotonic()
         self._elapsed_before = 0.0
         self._agent_calls = 0
@@ -360,7 +374,8 @@ class Supervisor:
                 return RunReport(self._resume_refused, 0, f"Run already finished with status {self._resume_refused}. Start a new --run-dir to run again.", "invalid")
             if not requirement_path.is_file():
                 return RunReport("invalid", 0, "Cannot resume run: requirement.md is missing.", "invalid")
-        self.schema_path.write_text(json.dumps(VERDICT_SCHEMA, indent=2), encoding="utf-8")
+        verdict_schema = function_tasks.schema(VERDICT_SCHEMA) if self.config.function_dispatch else VERDICT_SCHEMA
+        self.schema_path.write_text(json.dumps(verdict_schema, indent=2), encoding="utf-8")
         if self.config.keep_rounds is None:
             self.config.keep_rounds = 100
         if self.config.review_every is None:
@@ -426,7 +441,8 @@ class Supervisor:
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
                 or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
-            if not self._elaborate_requirement(records):
+            if not self._elaborate_requirement(records, next_function=bool(self.config.function_dispatch and
+                    (self.function_tasks.current or self.function_tasks.accepted))):
                 return self._finish('stopped' if self._stop_requested else 'action_required',
                                     self.requirements_review.get('summary','Requirement review did not complete; worker was not started.'), records, None)
 
@@ -461,6 +477,8 @@ class Supervisor:
                 if self.git_history:
                     self._git_before = self.git_history.candidate['base']
                 self.log(f"round {round_index}: reusing worker candidate; only the unfinished reviewer will run")
+                last_review = next((r.verdict for r in reversed(records)
+                                    if r.role == 'reviewer' and r.index == round_index), last_review)
                 self._event('worker_candidate_reused', round=round_index, tree=tree)
             else:
                 round_index = self._next_round
@@ -471,6 +489,11 @@ class Supervisor:
                         records,
                         last_worker,
                     )
+                if self.config.function_dispatch and (not self.function_tasks.current or
+                        any(m['id'] not in self._dispatch_directions for m in self.directions.messages())):
+                    if not self._elaborate_requirement(records, next_function=True):
+                        return self._finish('stopped' if self._stop_requested else 'action_required',
+                            self.requirements_review.get('summary', 'Reviewer did not supply a valid next function.'), records, last_worker)
                 self._check_budget(new_call=True)
                 self._next_round = round_index + 1
                 self._beat(f"round {round_index}: starting worker")
@@ -507,6 +530,8 @@ class Supervisor:
                 elif not self.worker_session_id:
                     self.log(f"round {round_index}: no worker session id; the next round starts a new session")
                 verdict = self._verdict_from_turn(turn, role="worker")
+                if self.config.function_dispatch and not _failure_reason(turn, verdict) and not turn.interruption:
+                    self._validate_function_worker(verdict)
                 self._rounds_since_review += 1
                 self._worker_seconds_since_review += turn.elapsed_s
                 after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
@@ -666,7 +691,7 @@ class Supervisor:
                                      and verdict.scope == 'module' and verdict.module_ids
                                      and verdict.done and verdict.evidence
                                      and self.audit.pending(set(verdict.module_ids)))
-                periodic_review |= repair_review
+                periodic_review |= repair_review or bool(self.config.function_dispatch and verdict.task_status == 'done')
                 if not _accepted(verdict) and not verdict.blockers and not periodic_review:
                     # An unfinished worker should keep implementing. A completion
                     # candidate (or an external blocker) is the review checkpoint.
@@ -734,6 +759,7 @@ class Supervisor:
                     raise RuntimeError("Could not close Paseo reviewer; stop before starting another worker round.")
                 self._active_reviewer_id = ""
             review = self._verdict_from_turn(review_turn, role="reviewer")
+            reported_review_status = review.status
             if self._business_head_changed():
                 records.append(RoundRecord(round_index, 'reviewer', review, review_turn.exit_code,
                     review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
@@ -804,6 +830,7 @@ class Supervisor:
                 failure=review_failure,
                 interruption=review_turn.interruption,
                 watcher_result=watcher_result,
+                reported_status=reported_review_status,
             )
             records.append(review_record)
             if self.git_history and self.config.workflow!='review-first':
@@ -855,6 +882,21 @@ class Supervisor:
                                     ('Reviewer audit update rejected after reviewer-only retry; worker candidate saved. ' if retried
                                      else 'Reviewer audit update rejected; worker candidate saved. ')
                                     + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
+            next_functions = None
+            if self.config.function_dispatch:
+                try:
+                    next_functions = self._review_function(verdict, review, round_index, review_tree)
+                except ValueError as exc:
+                    review.status = 'continue'
+                    review_record.watcher_result.update(status='rejected', reasons=[str(exc)])
+                    return self._finish('action_required', 'Function handoff rejected: ' + str(exc), records, review)
+                if next_functions is not None and self.function_tasks.current['delivery_scope'] == 'function':
+                    self._check_budget()
+                    self._advance_function(next_functions, review_record)
+                    last_worker, last_review = verdict, review
+                    stall, previous_gap_key, previous_tree = 0, '', tree
+                    self._write_state(records, 'running', stall, previous_gap_key, tree)
+                    continue
             reviewer_failures = 0
             if review.blockers:
                 write_json(self.run_dir / 'environment-blocks.json', safe({
@@ -889,10 +931,14 @@ class Supervisor:
                     problems.append("Unresolved audit issues: " + ", ".join(item["id"] for item in pending)
                                     + ". The reviewer must explicitly close each issue with evidence.")
             if _accepted(review) and not problems:
+                review_record.delivery = {'status': 'validating', 'reasons': []}
                 if verdict.scope == "requirement" and review.scope == "requirement":
                     accepted = self._delivery_checks(round_index, review, expected_tree=review_tree) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree)
                     if accepted:
+                        review_record.delivery = {'status': 'accepted', 'reasons': []}
                         self.modules.accept(verdict, review, round_index, review_tree)
+                        if next_functions is not None:
+                            self._advance_function(next_functions, review_record)
                         if self._begin_follow_up(records, review, review_record):
                             self.log(f"round {round_index}: requirement accepted and committed; continuing next requirement elaboration")
                             last_worker = last_review = None
@@ -908,14 +954,20 @@ class Supervisor:
                 else:
                     joint_ids = set(verdict.module_ids) & set(review.module_ids)
                     if self._delivery_checks(round_index, review, final=False, expected_tree=review_tree, module_ids=joint_ids) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
+                        review_record.delivery = {'status': 'accepted', 'reasons': []}
                         self.modules.accept(verdict, review, round_index, review_tree)
+                        if next_functions is not None:
+                            self._advance_function(next_functions, review_record)
                         review.scope = "module"
                         review.module_ids = sorted(joint_ids)
                         self._complete_module(review)
                         self.log(f"round {round_index}: module accepted; continuing original requirement")
                     else:
                         review_record.verdict = review
+                if review_record.delivery['status'] == 'validating':
+                    review_record.delivery = {'status': 'rejected', 'reasons': list(review.gaps)}
             if _accepted(review) and problems:
+                review_record.delivery = {'status': 'rejected', 'reasons': problems}
                 review.status = "continue"
                 review.gaps.extend(problems)
                 review.next_actions.append("Make the required workspace change and cite a real file in evidence.")
@@ -1075,29 +1127,70 @@ class Supervisor:
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != self._delivery_tree:
             raise RuntimeError('Workspace changed while closing delivered agents; revalidation required')
 
-    def _elaborate_requirement(self,records):
+    def _elaborate_requirement(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
-        self.requirements_review={'status':'reviewing','summary':'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
+        previous_brief = self.requirements_review
+        self.requirements_review={'status':'reviewing','summary':'Reviewer is selecting the next function.' if next_function else 'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
                                   'cycle': len(self.requirement_cycles) + 1}
         before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         self._write_state(records,'running',0,'',before)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
-        schema.write_text(json.dumps(requirements_review.SCHEMA))
+        plan_schema = function_tasks.schema(requirements_review.SCHEMA, planning=True) if self.config.function_dispatch else requirements_review.SCHEMA
+        schema.write_text(json.dumps(plan_schema))
         self.schema_path=schema
         self.log('requirements: reviewer elaborating next requirement; worker has not started' if follow_up else 'requirements: reviewer elaborating original request; worker has not started')
         try:
             if self._stop:
                 return False
-            turn=self._invoke(self.config.reviewer,requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None),'',
-                              role='reviewer',index=900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
+            prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None)
+            if self.config.function_dispatch:
+                prompt += ('\n\nYou own function decomposition. Propose exactly one next_task for a single named function, '
+                           'with file, objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
+                           'Use delivery_scope=function for intermediate work; module or requirement only for a final function plus the corresponding verification. '
+                           'Declare original modules once in modules (files=[]; no commands); use modules=[] when the ledger is already populated. '
+                           'For needs_input use next_task=null. Do not assign the full backlog. '
+                           'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
+                if next_function:
+                    prompt += '\nReuse the existing brief; choose only the next unaccepted function. Brief: ' + json.dumps(previous_brief, ensure_ascii=False)
+            turn=self._invoke(self.config.reviewer,prompt,'',
+                              role='reviewer',index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
             if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
                 raise ValueError('Requirement reviewer changed the read-only workspace')
             if turn.session_id:self._active_reviewer_id=turn.session_id
             if turn.exit_code or turn.timed_out or turn.interruption:
                 raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
-            brief=requirements_review.parse(turn.text)
+            if self.config.function_dispatch:
+                plan = json.loads(turn.text)
+                if not isinstance(plan, dict) or not {'next_task','modules'} <= plan.keys():
+                    raise ValueError('Reviewer must supply a structured function assignment and module plan')
+                assignment, modules = plan.pop('next_task'), plan.pop('modules')
+                brief = requirements_review.parse(json.dumps(plan))
+                if brief['status']=='ready':
+                    from auto_moniter.modules import definitions
+                    proposed = definitions(modules)
+                    if any(m.get('files') or m.get('checks') for m in proposed):
+                        raise ValueError('Planning cannot supply executable checks or override fixed file scopes')
+                    if self.modules.items and any(m['id'] not in self.modules.items for m in proposed):
+                        raise ValueError('Function planning cannot expand fixed module scope')
+                    staged = ModuleLedger.restore(self.modules.export())
+                    staged.merge(proposed)
+                    dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
+                    if next_function and dispatch.current:
+                        revised = function_tasks.validate(assignment, staged.items)
+                        if any(revised[k] != dispatch.current[k] for k in ('id','file','symbol','module_id','delivery_scope','depends_on')):
+                            raise ValueError('Updated instructions must refine the current function without replacing its identity or delivery scope')
+                        dispatch.current = None
+                    dispatch.assign(assignment, staged.items)
+                    self.function_tasks = dispatch
+                    self.modules = staged
+                    self._dispatch_directions = list(self._direction_ids['reviewer'])
+                    self._event('function_assigned', task_id=assignment['id'], file=assignment['file'], symbol=assignment['symbol'])
+                elif assignment is not None:
+                    raise ValueError('Blocked planning cannot dispatch a function')
+            else:
+                brief=requirements_review.parse(turn.text)
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
@@ -1331,6 +1424,8 @@ class Supervisor:
                 reference['local_ids'] = [item['id'] for item in self.audit.items if item['summary'] == reference['finding']]
             self._event('audit_external_references_registered', references=references)
         if reported:
+            if self.config.function_dispatch:
+                self._function_issue_ids = sorted(set(self._function_issue_ids) | set(reported))
             self._event("audit_issues_reported", issues=reported)
         if closed:
             self._event("audit_issues_resolved", issues=closed, tree=tree)
@@ -1657,6 +1752,83 @@ class Supervisor:
     def _pending_directions(self) -> bool:
         return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
 
+    def _validate_function_worker(self, verdict):
+        task = self.function_tasks.current
+        expected = task['delivery_scope']
+        invalid = (verdict.parse_error or verdict.task_id != task['id'] or
+                   verdict.task_status not in ('done', 'incomplete') or
+                   verdict.next_task is not None or verdict.modules or verdict.issue_resolutions or
+                   set(verdict.module_ids) - {task['module_id']} or
+                   (_accepted(verdict) and (expected == 'function' or verdict.scope != expected
+                    or verdict.module_ids != [task['module_id']] or verdict.task_status != 'done')) or
+                   (verdict.task_status == 'done' and (not verdict.evidence or verdict.gaps or
+                    verdict.blockers or verdict.next_actions or (expected != 'function' and not _accepted(verdict)))))
+        if invalid:
+            verdict.status = 'continue'
+            verdict.task_status = 'incomplete'
+            verdict.task_id = task['id']
+            verdict.modules = []
+            verdict.issue_resolutions = []
+            verdict.next_task = None
+            verdict.module_ids = []
+            verdict.gaps.append('Report only the dispatched function with its exact task ID and verified completion evidence.')
+
+    def _review_function(self, worker, review, index, tree):
+        task = self.function_tasks.current
+        if not task or review.task_id != task['id'] or review.task_status not in ('accepted', 'changes_required'):
+            raise ValueError('Reviewer must conclude on the dispatched function ID')
+        if review.task_status == 'changes_required':
+            if _accepted(review) or review.next_task is not None or not (review.gaps or review.blockers):
+                raise ValueError('Rejected function requires focused gaps and cannot dispatch another task')
+            return None
+        expected = task['delivery_scope']
+        if (worker.task_id != task['id'] or worker.task_status != 'done' or review.gaps or review.blockers or review.next_actions
+                or (expected == 'function' and _accepted(review))
+                or (expected != 'function' and (not _accepted(review) or review.scope != expected
+                    or review.module_ids != [task['module_id']]))):
+            raise ValueError('Function approval requires matching worker completion and delivery scope')
+        if self._pending_directions():
+            review.status = 'continue'
+            review.task_status = 'changes_required'
+            review.gaps.append('New user instructions require reviewer planning before this function can advance.')
+            return None
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree:
+            raise ValueError('Function review is stale because the workspace changed')
+        if self.git_history:
+            problems = self.git_history.review_problems(review.evidence)
+            if problems:
+                raise ValueError('; '.join(problems))
+        unresolved = [i['id'] for i in self.audit.pending() if i['id'] in self._function_issue_ids]
+        if unresolved:
+            raise ValueError('Dispatched function has unresolved audit issues: ' + ', '.join(unresolved))
+        target = (self.config.cwd / task['file']).resolve()
+        for role, conclusion in [('worker', worker), ('reviewer', review)]:
+            problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
+                ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
+            if problems:
+                raise ValueError(role + ': ' + '; '.join(problems))
+            if target not in evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir):
+                raise ValueError(role + ' must cite the changed assignment file: ' + task['file'])
+        staged = function_tasks.FunctionTasks(self.function_tasks.export())
+        staged.accept(worker, review, index, tree)
+        if expected == 'requirement' and review.next_task is not None:
+            raise ValueError('Final delivery cannot include another implementation assignment')
+        if review.next_task is not None:
+            staged.assign(review.next_task, self.modules.items)
+        return staged
+
+    def _advance_function(self, staged, review_record):
+        task = self.function_tasks.current
+        self.function_tasks = staged
+        self._function_issue_ids = []
+        self._dispatch_directions = list(self._direction_ids['reviewer'])
+        review_record.watcher_result['function'] = {'status': 'accepted', 'task_id': task['id'],
+                                                     'tree': review_record.tree}
+        self._progress_reset |= self.quality.milestone('function:' + task['id'])
+        self._event('function_accepted', task_id=task['id'], tree=review_record.tree)
+        if staged.current:
+            self._event('function_assigned', task_id=staged.current['id'], file=staged.current['file'], symbol=staged.current['symbol'])
+
     def _verdict_from_turn(self, turn: "_CompletedTurn", *, role: str) -> Verdict:
         verdict = parse_verdict(turn.text, structured=turn.structured)
         if turn.interruption == "input request":
@@ -1751,6 +1923,17 @@ class Supervisor:
         )
         if verdict and verdict.blockers and status == "blocked":
             report.summary = summary + " Blockers: " + "; ".join(verdict.blockers)
+        if status == 'budget_exceeded' and 'runtime budget' in summary.lower():
+            from auto_moniter.delivery_diagnosis import diagnose
+            check_path = self.run_dir / 'acceptance-results.json'
+            checks = {}
+            if check_path.is_file() and not check_path.is_symlink() and check_path.stat().st_size <= 512*1024:
+                try:
+                    checks = json.loads(check_path.read_text())
+                except (OSError, ValueError):
+                    pass
+            self._delivery_diagnosis = diagnose(report.to_dict()['records'], last_call=self._last_invocation,
+                acceptance=checks if isinstance(checks, dict) else {}, current=self.function_tasks.current)
         path = self.run_dir / "report.json"
         self._event("run_finished", status=status, summary=summary)
         self._finished_status = status
@@ -1764,6 +1947,8 @@ class Supervisor:
                                          "no_progress_turns": self._no_progress, "recovery_count": self._recovery_count, "accepted_tree": self._delivery_tree,
                                          "review_schedule": self._review_schedule(),
                                          "audit_issues": self.audit.export(),
+                                         "delivery_diagnosis": self._delivery_diagnosis,
+                                         "function_tasks": self.function_tasks.export(),
                                          "history": self._history_info()}), durable=True)
         self._write_state(records, status, 0, "", records[-1].tree if records else "", result_summary=report.summary)
         self._beat(f"finished: {status}")
@@ -1837,6 +2022,12 @@ class Supervisor:
             "cwd": str(self.config.cwd),
             "state_version": 1,
             "workflow": self.config.workflow,
+            "function_dispatch": self.config.function_dispatch,
+            "function_tasks": self.function_tasks.export(),
+            "dispatch_directions": self._dispatch_directions,
+            "function_issue_ids": self._function_issue_ids,
+            "last_invocation": self._last_invocation,
+            "delivery_diagnosis": self._delivery_diagnosis,
             "requirements_review": self.requirements_review,
             "requirement_cycles": self.requirement_cycles,
             "quality_policy": self.config.quality_policy,
@@ -1921,6 +2112,19 @@ class Supervisor:
         if self.config.workflow not in ('auto',saved_workflow):
             raise ValueError('Workflow cannot change on resume')
         self.config.workflow=saved_workflow
+        saved_dispatch = state.get('function_dispatch', False)
+        if type(saved_dispatch) is not bool or self.config.function_dispatch and not saved_dispatch:
+            raise ValueError('Function dispatch mode cannot change on resume')
+        self.config.function_dispatch = saved_dispatch
+        self.function_tasks = function_tasks.FunctionTasks(state.get('function_tasks'))
+        self._dispatch_directions = state.get('dispatch_directions', [])
+        self._function_issue_ids = state.get('function_issue_ids', [])
+        if (not isinstance(self._function_issue_ids, list) or len(self._function_issue_ids)>128
+                or any(not isinstance(x, str) or not re.fullmatch(r'AUD-[1-9][0-9]{0,11}', x) for x in self._function_issue_ids)):
+            raise ValueError('Invalid saved function audit references')
+        self._last_invocation = state.get('last_invocation') or {}
+        if not isinstance(self._dispatch_directions, list) or any(not isinstance(x, str) for x in self._dispatch_directions):
+            raise ValueError('Invalid saved function assignment directions')
         self.requirements_review=state.get('requirements_review',{})
         if not isinstance(self.requirements_review,dict):
             raise ValueError('Invalid saved requirement elaboration')
@@ -2111,6 +2315,17 @@ class Supervisor:
         )
 
     def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None) -> str:
+        if self.config.function_dispatch:
+            task = self.function_tasks.current
+            return '\n'.join([
+                'Implement one reviewer-owned function assignment in the working directory.',
+                json.dumps(task, ensure_ascii=False),
+                function_tasks.verdict_contract('worker', task),
+                'Latest review of this function:',
+                json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
+                           ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',
+                'Preserve earlier accepted functions and existing test assertions. Do not execute prose as watcher checks.',
+            ])
         snapshot = workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir)
         if (index == 1 or self.requirement_cycles) and last_worker is None and last_review is None:
             parts = [
@@ -2244,6 +2459,10 @@ class Supervisor:
                        last_review: Verdict | None = None) -> str:
         return "\n".join(
             [
+                *(["Dispatched function: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
+                   function_tasks.verdict_contract('reviewer', self.function_tasks.current),
+                   "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
+                  if self.config.function_dispatch else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",
                 "The worker alone implements fixes and runs builds or tests that write files. "
@@ -2291,7 +2510,9 @@ class Supervisor:
                 "Do not invent that next requirement, and do not treat a repair of the same defect as a new requirement.",
                 "",
                 f"Review round: {index}",
-                "Checkpoint: completion candidate" if _accepted(worker) else "Checkpoint: in-progress audit; steer unfinished work without accepting it as delivered",
+                ("Checkpoint: function review; assess the named function only, except for its explicit module/final gate."
+                 if self.config.function_dispatch else "Checkpoint: completion candidate" if _accepted(worker)
+                 else "Checkpoint: in-progress audit; steer unfinished work without accepting it as delivered"),
                 f"Workspace fingerprint: {tree}",
                 "",
                 "Requirement:",
@@ -2353,7 +2574,13 @@ class Supervisor:
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
         rejected_audit = bool(review and (review.watcher_result.get('status') == 'rejected'
                                          or review.failure or review.interruption or review.verdict.parse_error))
-        if not _accepted(worker.verdict) and not rejected_audit:
+        function_ready = bool(self.config.function_dispatch and self.function_tasks.current
+                              and self.function_tasks.current['id'] == worker.verdict.task_id
+                              and worker.verdict.task_status == 'done')
+        if self.config.function_dispatch and (not self.function_tasks.current
+                or worker.verdict.task_id != self.function_tasks.current['id']):
+            return None
+        if not _accepted(worker.verdict) and not rejected_audit and not function_ready:
             return None
         publication = getattr(self.git_history, 'last_business_commit', {})
         published = publication.get('round') == worker.index and publication.get('candidate_tree') == self.git_history.candidate.get('commit') if publication else False
@@ -2408,7 +2635,7 @@ class Supervisor:
         for attempt in range(2):
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')
-            if self.git_history and _accepted(review):
+            if self.git_history and (_accepted(review) or self.config.function_dispatch and review.task_status == 'accepted'):
                 problems = self.git_history.review_problems(review.evidence)
                 if problems:
                     review.status = 'continue'
@@ -2448,6 +2675,8 @@ class Supervisor:
                     # No proposed closure is applied until the whole payload is valid.
                     reported = self.audit.record(findings, kwargs['index'], modules, known_modules=self.modules.items)
                     if reported:
+                        if self.config.function_dispatch:
+                            self._function_issue_ids = sorted(set(self._function_issue_ids) | set(reported))
                         self._event('audit_findings_preserved', issues=reported, round=kwargs['index'])
                     review.parse_error = 'invalid audit update: ' + str(exc)
                     review.status = 'continue'
@@ -2515,14 +2744,22 @@ class Supervisor:
         state_path = self.run_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["usage"] = self._usage()
+        self._last_invocation = {'role': role, 'round': index, 'call': self._agent_calls}
+        if self.function_tasks.current:
+            self._last_invocation['task_id'] = self.function_tasks.current['id']
+        state['last_invocation'] = self._last_invocation
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
-        if self.requirements_review.get("status")=="ready":
+        if self.requirements_review.get("status")=="ready" and not (role=='worker' and self.config.function_dispatch):
             prompt += "\n\nWatcher-approved requirement elaboration (supplements, never replaces, the original request):\n"+json.dumps(self.requirements_review,ensure_ascii=False)
         if self.config.quality_policy:
             prompt += '\n\nMonitor-owned quality policy (immutable):\n' + json.dumps(self.quality.config, ensure_ascii=False)
             prompt += '\nMap each named requirement to actual file evidence and its modules. File edits alone are not verified progress. '
-            prompt += 'When blocked, continue independent modules before repeating the same dependency. Never modify existing protected test assertions.\n'
+            if role=='worker' and self.config.function_dispatch:
+                prompt += 'When blocked, report the dependency to the reviewer; do not take work outside this assignment. '
+            else:
+                prompt += 'When blocked, continue independent modules before repeating the same dependency. '
+            prompt += 'Never modify existing protected test assertions.\n'
         if role == 'worker' and self.config.workflow == 'review-first':
             prompt += ('\nWorker time management: implement one reviewer-approved item or bounded repair at a time. '
                        'Complete a coherent change with focused verification and return the required JSON conclusion. '
@@ -2535,9 +2772,17 @@ class Supervisor:
             prompt += 'Preserve time to report evidence, remaining gaps and a safe handoff before these hard limits.\n'
             prompt += ('Environment failures are not coding defects: preserve known missing-tool/platform evidence. '
                        'Do not repeat an unavailable build or create substitute platforms to claim full validation. '
-                       'Continue independent implementation and focused runnable checks; if only external validation '
+                       + ('Continue only work inside the dispatched function and focused runnable checks; ' if self.config.function_dispatch
+                          else 'Continue independent implementation and focused runnable checks; ') +
+                       'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')
         messages = self.directions.messages()
+        if role=='worker' and self.config.function_dispatch:
+            # Reviewer already received these instructions when defining the
+            # assignment. Keep the worker input limited to the approved task.
+            approved = set(self._dispatch_directions)
+            self._direction_ids[role] = [m['id'] for m in messages if m['id'] in approved]
+            messages = []
         blocked_path = self.run_dir / 'environment-blocks.json'
         if blocked_path.exists() and not blocked_path.is_symlink() and blocked_path.stat().st_size <= 65536:
             prompt += '\nKnown environment validation gaps (not proof of code defects):\n' + blocked_path.read_text()
@@ -2548,7 +2793,8 @@ class Supervisor:
                        f'Approved code destination: {destination}. Audit reference: {self.git_history.ref}. Keep edits in {self.config.cwd}. '
                        'Do not alter .auto-moniter/history, the audit branch, or previous audit records. '
                        'Report changed files, actual validation results, remaining gaps and failures precisely.\n')
-        self._direction_ids[role] = [item['id'] for item in messages]
+        if not (role=='worker' and self.config.function_dispatch):
+            self._direction_ids[role] = [item['id'] for item in messages]
         if messages:
             prompt += "\n\nLatest instructions from the human managing this task (in chronological order):\n"
             prompt += json.dumps(messages, ensure_ascii=False, indent=2)
@@ -2967,6 +3213,8 @@ def _record_from_state(item: dict) -> RoundRecord:
         interruption=str(item.get("interruption") or ""),
         git_checkpoint=dict(item.get('git_checkpoint') or {}),
         watcher_result=dict(item.get('watcher_result') or {}),
+        reported_status=str(item.get('reported_status') or ''),
+        delivery=dict(item.get('delivery') or {}),
     )
 
 
@@ -2996,6 +3244,7 @@ def _verdict_from_state(value: object) -> Verdict | None:
         module_ids=list(value.get("module_ids") or []),
         modules=value.get("modules") or [],
         issue_resolutions=value.get("issue_resolutions") or [],
+        task_id=value.get("task_id", ""), task_status=value.get("task_status", ""), next_task=value.get("next_task"),
     )
 
 

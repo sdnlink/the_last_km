@@ -3,7 +3,8 @@
 
 def present_conclusion(item: dict) -> dict:
     keys = ('index', 'role', 'status', 'summary', 'done', 'gaps', 'next_actions', 'evidence',
-            'blockers', 'exit_code', 'elapsed_s', 'git_checkpoint', 'issue_resolutions', 'watcher_result')
+            'blockers', 'exit_code', 'elapsed_s', 'git_checkpoint', 'issue_resolutions', 'watcher_result',
+            'task_id', 'task_status')
     result = {key: item.get(key) for key in keys}
     outcome = item.get('watcher_result')
     if not isinstance(outcome, dict):

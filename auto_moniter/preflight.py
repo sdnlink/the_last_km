@@ -15,6 +15,8 @@ def validate(config) -> None:
         raise ValueError('Invalid workflow')
     if config.workflow=='review-first' and config.no_review:
         raise ValueError('review-first workflow requires an independent reviewer')
+    if config.function_dispatch and (config.no_review or config.workflow not in ('review-first','auto')):
+        raise ValueError('Function dispatch requires the review-first workflow')
     if not isinstance(config.quality_policy, dict):
         raise ValueError('Quality policy must be an object')
     if config.quality_policy:

@@ -329,6 +329,12 @@ class TaskStore:
         failure = diagnose(status, state, meta, health, guardian, run, details=include_details)
         if failure:
             work['roles']['watcher']['current_work'] = failure['title'] + '：' + failure['reason']
+        acceptance_results = read_json(run/'acceptance-results.json') if include_details else {}
+        delivery_diagnosis = state.get('delivery_diagnosis') or {}
+        if (include_details and not delivery_diagnosis and status=='budget_exceeded'
+                and failure and failure['code'] in {'runtime_budget','runtime_handoff'}):
+            from auto_moniter.delivery_diagnosis import diagnose as diagnose_delivery
+            delivery_diagnosis = diagnose_delivery(rounds, acceptance=acceptance_results)
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
@@ -352,8 +358,11 @@ class TaskStore:
                                          for item in rounds if item.get('git_checkpoint')],
                      'audit_issues': state.get('audit_issues', {}), 'control': control,
                      'acceptance_plan': meta.get('acceptance_plan', {}) if include_details else {},
-                     'acceptance_results': read_json(run/'acceptance-results.json') if include_details else {},
+                     'acceptance_results': acceptance_results,
                      'verification_mode': meta.get('verification_mode', 'legacy'),
+                     'function_dispatch': state.get('function_dispatch', meta.get('function_dispatch', False)),
+                     'function_tasks': state.get('function_tasks', {}) if include_details else {},
+                     'delivery_diagnosis': delivery_diagnosis if include_details else {},
                      'workflow':state.get('workflow',meta.get('workflow','legacy')),
                      'requirements_review':state.get('requirements_review',{}) if include_details else {},
                      'quality_policy': state.get('quality_policy', meta.get('quality_policy', {})) if include_details else {},
@@ -505,6 +514,9 @@ class TaskStore:
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
+        function_dispatch = data.get('function_dispatch', False)
+        if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
+            raise TaskError('逐函数下发需要启用先审核需求的流程')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
             raise TaskError('请选择支持的执行器和审查器')
         guided = None
@@ -582,6 +594,7 @@ class TaskStore:
                     raise TaskError('最多选择或填写 20 条验收检查')
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
+                    'function_dispatch': function_dispatch,
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
@@ -678,6 +691,8 @@ class TaskStore:
         for check in meta['checks']:
             argv.append('--check=' + check)
         argv.append('--workflow='+meta.get('workflow','legacy'))
+        if meta.get('function_dispatch'):
+            argv.append('--function-dispatch')
         if meta.get('acceptance'):
             argv.append('--accept=' + meta['acceptance'])
         # Legacy metadata keeps the old provider boundary; new tasks store an

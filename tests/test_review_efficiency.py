@@ -308,7 +308,7 @@ class ScopedConclusionTests(unittest.TestCase):
 
 
 class ResumeBusinessHeadTests(unittest.TestCase):
-    def test_web_resume_refuses_external_commit_before_launch(self):
+    def test_web_resume_recognizes_external_commit_before_launch(self):
         from console.recovery import resume_arguments
         from types import SimpleNamespace
         from auto_moniter.providers import resolve_provider
@@ -330,5 +330,4 @@ class ResumeBusinessHeadTests(unittest.TestCase):
             argv = ['run', '--cwd', str(root), '--run-dir', str(run), '--provider', 'codex', '--reviewer', 'codex']
             self.assertIn('--resume', resume_arguments({'argv': argv}, run, state))
             commit('external maintenance')
-            with self.assertRaisesRegex(ValueError, '业务 HEAD 已在任务外变更'):
-                resume_arguments({'argv': argv}, run, state)
+            self.assertIn('--resume', resume_arguments({'argv': argv}, run, state))

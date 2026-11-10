@@ -59,9 +59,8 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         code='business_head_changed';role='watcher';phase='业务版本一致性检查'
         title='业务分支在任务外发生变化'
         reason='当前分支与任务绑定的审核基线不一致，watcher 为避免审核和提交错误版本而停止。worker 的完成声明尚未经过后续独立审核。'
-        actions=['保留当前工作区改动，核对任务绑定提交与 git log。',
-                 '基于当前业务分支新建后续任务，携带原需求和未完成条目，先复核已有改动。',
-                 '监督任务运行期间，将人工修改或提交放到独立 worktree；不要直接修改原检查点的版本绑定。']
+        actions=['使用恢复执行，系统会识别同一业务分支的新提交，保留现有改动和审核问题并重新验证。',
+                 '分支切换、历史重写或合并冲突需先处理，再恢复原任务。']
     elif 'ref changed' in text or 'audit branch changed' in text:
         code='history_ref_changed';title='任务 Git 引用发生外部变化';role='watcher';phase='Git 检查点校验'
         reason='保存的审计或候选引用与仓库不一致，任务需要核对版本后再继续。'

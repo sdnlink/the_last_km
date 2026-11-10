@@ -30,7 +30,7 @@ class FailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(result['role'],'watcher');self.assertEqual(result['round'],3)
         self.assertEqual(result['expected_commit'],'a'*40)
         self.assertEqual(len(result['recent_failures']),1)
-        self.assertIn('新建后续任务',''.join(result['actions']))
+        self.assertIn('恢复执行',''.join(result['actions']))
 
     def test_network_idle_budget_and_strict_failures_have_distinct_causes(self):
         cases=[('action_required','Requirement reviewer failed: 503 Service Unavailable','model_service_unavailable'),

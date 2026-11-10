@@ -56,6 +56,7 @@ from auto_moniter.audit import AuditLedger, AuditCapacityError
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
+from auto_moniter.business_recovery import BusinessHeadChanged
 from auto_moniter.locking import workspace_lease
 from auto_moniter.quality import Quality
 from auto_moniter.metering import UsageMeter
@@ -244,6 +245,8 @@ class Supervisor:
         self.meter = UsageMeter()
         self.requirements_review = {}
         self.requirement_cycles = []
+        self._business_update_count = 0
+        self._business_input = {}
 
     def request_stop(self) -> None:
         self._stop = True
@@ -295,7 +298,15 @@ class Supervisor:
         try:
             with workspace_lease(self.config.cwd), file_lock(self.config.cwd / ".auto-moniter" / "workspace.lock"), file_lock(self.run_dir / "supervisor.lock"):
                 try:
-                    return self._run_locked()
+                    while True:
+                        try:
+                            return self._run_locked()
+                        except BusinessHeadChanged:
+                            self._check_budget()
+                            if self._stop_requested or not self._sync_business_head(self._records):
+                                raise
+                            self.config.resume = True
+                            self._started = time.monotonic()
                 except Exception as exc:
                     summary = f"{type(exc).__name__}: {exc}"
                     if self._stop_reason:
@@ -403,6 +414,10 @@ class Supervisor:
                 f"reviewer_session={self.reviewer_session_id or '-'}"
             )
             self._recover_interrupted_run()
+        if self._sync_business_head(records):
+            last_worker = None
+            last_review = self._audit_feedback
+            stall, previous_gap_key, previous_tree = 0, '', ''
         (self.run_dir / "report.json").unlink(missing_ok=True)
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
@@ -425,6 +440,10 @@ class Supervisor:
             if self._stop:
                 break
             self._check_budget()
+            if self._sync_business_head(records):
+                last_worker = None
+                last_review = self._audit_feedback
+                stall, previous_gap_key, previous_tree = 0, '', ''
             if self.config.quality_policy:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
@@ -517,6 +536,11 @@ class Supervisor:
                     interruption=turn.interruption,
                 )
                 records.append(record)
+                if self._sync_business_head(records):
+                    last_worker = None
+                    last_review = self._audit_feedback
+                    stall, previous_gap_key, previous_tree = 0, '', ''
+                    continue
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed; restore original assertions before resuming. Files: '
                                         + ', '.join(protected_errors), records, verdict)
@@ -659,6 +683,11 @@ class Supervisor:
                         verdict,
                     )
 
+            if self._sync_business_head(records):
+                last_worker = None
+                last_review = self._audit_feedback
+                stall, previous_gap_key, previous_tree = 0, '', ''
+                continue
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             self._process_control()
             if self._stop:
@@ -684,7 +713,8 @@ class Supervisor:
                 )
             finally:
                 self._beat(f"round {round_index}: checking reviewer writes")
-                if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != review_tree:
+                if (workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != review_tree
+                        and not self._business_head_changed()):
                     raise RuntimeError(
                         "Workspace changed during read-only review. Stopped without accepting the review. "
                         "No review backup was created; inspect the changes before resuming."
@@ -698,6 +728,16 @@ class Supervisor:
                     raise RuntimeError("Could not close Paseo reviewer; stop before starting another worker round.")
                 self._active_reviewer_id = ""
             review = self._verdict_from_turn(review_turn, role="reviewer")
+            if self._business_head_changed():
+                records.append(RoundRecord(round_index, 'reviewer', review, review_turn.exit_code,
+                    review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
+                    str(review_turn.output_path), tree=tree,
+                    failure='Business HEAD changed during review; this conclusion requires revalidation'))
+                self._sync_business_head(records)
+                last_worker = None
+                last_review = self._audit_feedback
+                stall, previous_gap_key, previous_tree = 0, '', ''
+                continue
             if self.git_history and _accepted(review):
                 git_problems = self.git_history.review_problems(review.evidence)
                 if git_problems:
@@ -901,6 +941,64 @@ class Supervisor:
         return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(('Verified progress','Acceptance environment')) else 'stopped',
                             self._stop_reason if follow_up_stopped else f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
 
+    def _business_head_changed(self):
+        return (isinstance(self.git_history, ApprovedHistory)
+                and self.git_history.business_commits
+                and self.git_history._business_identity() != self.git_history.business_head)
+
+    def _sync_business_head(self, records):
+        history = self.git_history
+        if not isinstance(history, ApprovedHistory) or not history.business_commits:
+            return False
+        history.reconcile_business_head()
+        if history.business_update_count < self._business_update_count:
+            raise RecoveryError('Business input history is behind the monitor checkpoint')
+        if history.business_update_count == self._business_update_count:
+            return False
+        from auto_moniter.business_recovery import update_baseline
+        before = self._business_input.get('after') or history.business_updates[0]['before']
+        current = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+        baseline = update_baseline(history, self.quality, before, current)
+        self._baseline_saved &= baseline == self._baseline_files
+        self._baseline_files = baseline
+        self.quality.baseline = baseline
+        self.quality.bind_checks(self.config.cwd, [*self.config.checks, *self.modules.checks_for(set(self.modules.items))])
+        errors = self._close_delivered_sessions()
+        if errors:
+            raise RecoveryError('Business input changed, but previous sessions could not close: ' + '; '.join(errors))
+        identity = 'business:' + history.business_head['commit']
+        invalidated = self.modules.invalidate(identity)
+        reopened = self.audit.invalidate(identity)
+        self.quality.state['checks'] = {}
+        self._delivery_tree = ''
+        self.worker_session_id = self.reviewer_session_id = self._active_reviewer_id = ''
+        self._drop_worker_session = True
+        self._impact_snapshot = current
+        self._rounds_since_review = self.config.review_every or 1
+        self._worker_seconds_since_review = 0.0
+        self._business_update_count = history.business_update_count
+        self._business_input = {'before': before, 'after': dict(history.business_head), 'count': self._business_update_count}
+        self._recovery_count += 1
+        self._no_progress = 0
+        self._recovery_note = (
+            'Business HEAD advanced from ' + (before.get('commit') or '(unborn)') + ' to '
+            + history.business_head['commit'] + '. Continue the original requirement on the current source. '
+            'Preserve existing work and open AUD IDs. Prior completion, review and check results need revalidation. '
+            'Inspect the external commit delta, complete remaining modules, rerun checks and obtain a fresh read-only review. '
+            'Committed acceptance assets are the new input; do not weaken uncommitted test assertions.')
+        (self.run_dir / 'approval-ready.json').unlink(missing_ok=True)
+        for name in ('acceptance-results.json', 'requirement-coverage.json'):
+            path = self.run_dir / name
+            if path.is_file() and not path.is_symlink():
+                value = json.loads(path.read_text())
+                value.update(invalidated=True, invalidated_reason='Business HEAD changed; revalidation required', complete=False)
+                write_json(path, value, durable=True)
+        self._event('business_head_adopted', **self._business_input, modules=invalidated, reopened_issues=reopened)
+        self.log('Business HEAD advanced; automatically continuing on ' + history.business_head['commit'][:12]
+                 + ' with fresh implementation, review and acceptance checks')
+        self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, current))
+        return True
+
     def _begin_follow_up(self, records, review, review_record=None):
         """Start another reviewed requirement only when the saved request asks for one.
 
@@ -1044,6 +1142,8 @@ class Supervisor:
         return True
 
     def _commit_approved_locked(self,worker,reviewer,worker_text,review_text,tree):
+        if self._sync_business_head(self._records):
+            return False
         if not self._publication_boundary(reviewer):
             return False
         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=tree:
@@ -1073,7 +1173,11 @@ class Supervisor:
                     boundary=lambda: self._publication_boundary(reviewer))
             except PublicationRefused:
                 return False
+            except BusinessHeadChanged:
+                raise
             except (OSError, GitHistoryError) as exc:
+                if self._business_head_changed() and not (self.run_dir/'publication.json').exists():
+                    raise BusinessHeadChanged('Business HEAD advanced before publication; revalidation required') from exc
                 raise RecoveryError('Business publication incomplete; preserve staging and resume after resolving: ' + str(exc)) from exc
             for record in (worker, reviewer):
                 self._event('git_checkpoint', role=record.role, round=record.index,
@@ -1715,6 +1819,8 @@ class Supervisor:
             "no_progress_turns": self._no_progress,
             "progress_pending": self._progress_reset,
             "recovery_count": self._recovery_count,
+            "business_input": self._business_input,
+            "business_update_count": self._business_update_count,
             "provider_config": self._provider_config(),
             "role_assignment_id": getattr(self, "_role_assignment_id", ""),
             "worker_direction_ids": self._direction_ids['worker'],
@@ -1833,6 +1939,10 @@ class Supervisor:
         if type(self._progress_reset) is not bool:
             raise ValueError("invalid saved progress marker")
         self._recovery_count = int(state.get("recovery_count") or 0)
+        self._business_update_count = int(state.get('business_update_count') or 0)
+        self._business_input = state.get('business_input') or {}
+        if not isinstance(self._business_input, dict) or self._business_update_count < 0:
+            raise ValueError('Invalid business input recovery state')
         history = state.get("history") or {}
         if self.config.keep_rounds is None:
             self.config.keep_rounds = int(history.get("keep_rounds", 100))
@@ -1997,6 +2107,8 @@ class Supervisor:
                 parts.extend(["", "Acceptance checks:", self.config.acceptance.strip()])
             if self.config.checks:
                 parts.extend(["", "Monitor acceptance commands (must pass before final delivery):", json.dumps(self.config.checks, ensure_ascii=False)])
+            if self._recovery_note:
+                parts.extend(['', 'Recovery guidance:', self._recovery_note])
             parts.extend(["", "Monitor module ledger (pending modules must not be omitted):", json.dumps(self.modules.export(), ensure_ascii=False)])
             parts.extend(["", "Open audit issues (worker fixes; only reviewer closes IDs):", json.dumps(self.audit.prompt(), ensure_ascii=False)])
             parts.extend(["", "Workspace snapshot:", snapshot, "", verdict_instructions()])
@@ -2184,6 +2296,8 @@ class Supervisor:
     def _pending_review(self, records):
         """Resume an exact submitted candidate after review transport/format failure."""
         if self.config.workflow != 'review-first' or self.config.no_review or self._pending_directions():
+            return None
+        if isinstance(self.git_history, ApprovedHistory) and not self.git_history.candidate:
             return None
         worker = next((r for r in reversed(records) if r.role == 'worker'), None)
         if not worker or worker.failure or worker.interruption or not _accepted(worker.verdict):

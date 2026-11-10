@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from auto_moniter.git_history import GitHistory, GitHistoryError
+from auto_moniter.business_recovery import BusinessHeadChanged, validate_change
 
 
 class ApprovedHistory(GitHistory):
@@ -24,6 +25,8 @@ class ApprovedHistory(GitHistory):
         self.audit_initial=''
         self.work_ref=''
         self.work_head=''
+        self.business_updates=[]
+        self.business_update_count=0
         from auto_moniter.work_checkpoint import recover as recover_work
         recover_work(self)
         if self.state_path.exists():
@@ -44,7 +47,15 @@ class ApprovedHistory(GitHistory):
             self.audit_initial=saved.get('audit_initial','')
             self.work_ref=saved.get('work_ref','')
             self.work_head=saved.get('work_head','')
-            self.verify()
+            self.business_updates=saved.get('business_updates',[])
+            self.business_update_count=saved.get('business_update_count',0)
+            if (type(self.business_update_count) is not int or self.business_update_count < 0
+                    or not isinstance(self.business_updates,list) or len(self.business_updates)>20
+                    or self.business_update_count < len(self.business_updates)
+                    or any(not isinstance(change,dict) or not isinstance(change.get('before'),dict)
+                           or not isinstance(change.get('after'),dict) for change in self.business_updates)):
+                raise GitHistoryError('Invalid saved business input changes')
+            self.verify(allow_business_change=self.business_commits)
         else:
             if not self.business_head['ref'].startswith('refs/heads/') or self.business_head['ref'].startswith('refs/heads/auto-moniter/'):
                 raise GitHistoryError('Start review-first on the business branch that should receive approved code')
@@ -60,9 +71,11 @@ class ApprovedHistory(GitHistory):
             from auto_moniter.work_checkpoint import persist
             persist(self, '')
 
-    def verify(self):
+    def verify(self, *, allow_business_change=False):
         if self._business_identity()!=self.business_head:
-            raise GitHistoryError('Business HEAD changed outside watcher approval; inspect unauthorized or concurrent commits')
+            if not allow_business_change:
+                raise BusinessHeadChanged('Business HEAD changed outside watcher approval; current input must be revalidated')
+            validate_change(self.git, self.business_head, self._business_identity())
         if self.work_ref and self.git('rev-parse','--verify',self.work_ref,check=False).decode().strip()!=self.work_head:
             raise GitHistoryError('Task work ref changed outside watcher')
         if getattr(self, '_defer_refs', False):
@@ -80,6 +93,26 @@ class ApprovedHistory(GitHistory):
         if self.git('rev-parse','--verify',self.ref,check=False):
             raise GitHistoryError('Unapproved branch created outside the watcher')
         if self.initial:self.git('cat-file','-e',self.initial+'^{tree}')
+
+    def reconcile_business_head(self):
+        actual=self._business_identity()
+        if actual==self.business_head:
+            return False
+        if not self.business_commits:
+            self.verify()
+        self.verify(allow_business_change=True)
+        if any((self.run_dir/name).exists() for name in ('publication.json','work-checkpoint.json')):
+            raise GitHistoryError('Pending Git transaction must recover before adopting business HEAD')
+        from datetime import datetime,timezone
+        change={'before':dict(self.business_head),'after':actual,
+                'at':datetime.now(timezone.utc).isoformat()}
+        self.business_head=actual
+        self.candidate={}
+        self.last_reviewed={}
+        self.business_update_count+=1
+        self.business_updates=[*self.business_updates[-19:],change]
+        self._save()
+        return True
 
     def _business_identity(self):
         return {'ref':self.git('symbolic-ref','-q','HEAD',check=False).decode().strip(),
@@ -198,4 +231,5 @@ class ApprovedHistory(GitHistory):
         return {**super().export(),'approval_only':True,'candidate':self.candidate,'business_head':self.business_head,
                 'last_reviewed':self.last_reviewed, 'business_commits':self.business_commits,
                 'last_business_commit':self.last_business_commit, 'audit_initial':self.audit_initial,
-                'work_ref':self.work_ref, 'work_head':self.work_head}
+                'work_ref':self.work_ref, 'work_head':self.work_head,
+                'business_updates':self.business_updates,'business_update_count':self.business_update_count}

@@ -54,6 +54,7 @@ EVENT_LABELS = {
     'module_accepted': '模块通过验收', 'modules_invalidated': '模块需要重新验收',
     'check_finished': '验收检查结束', 'run_finished': '本次运行结束', 'paused': '任务已暂停',
     'pause_ended': '结束暂停', 'stagnation_recovery': '恢复停滞任务', 'review_rejected': '交付审查未通过',
+    'business_head_adopted': '识别业务新提交，继续开发并重新验收',
 }
 
 

@@ -247,8 +247,7 @@ class BusinessPublicationTests(unittest.TestCase):
         self.assertIn('--resume',resume_arguments({'argv':args},self.run,state))
         subprocess.run(['git','-C',str(self.root),'-c','user.name=Fixture','-c','user.email=f@local',
                         'commit','--allow-empty','-qm','external unapproved change'],check=True)
-        with self.assertRaisesRegex(ValueError,'业务 HEAD'):
-            resume_arguments({'argv':args},self.run,state)
+        self.assertIn('--resume',resume_arguments({'argv':args},self.run,state))
 
     def test_archive_removes_temporary_candidate_ref_but_preserves_business_code(self):
         from auto_moniter.git_maintenance import maintenance, restore

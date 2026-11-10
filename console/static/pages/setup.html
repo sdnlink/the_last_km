@@ -1,0 +1,8 @@
+<section class="panel setup-intro">
+  <div><span class="eyebrow">AGENT SETUP</span><h2 id="setup-title">选择你的 Agent</h2><p>勾选要使用的执行器，安装 CLI，再配置模型和认证。已安装的 CLI 和现有登录可直接复用。</p></div>
+  <div class="setup-actions"><button class="button secondary" id="setup-detect">重新检测</button><button class="button secondary" id="setup-install-selected">安装选中项</button><button class="button primary" id="setup-save">保存配置</button><button class="button primary" id="setup-complete">保存并进入控制台 →</button></div>
+</section>
+<p class="setup-notice">API Key 保存为当前用户可读的本地配置，保存后不会回显。安装会下载官方 CLI；CLI 可用性检测仅执行版本查询，账户登录与实际调用权限请以各执行器提示为准。</p>
+<div id="setup-error" class="connection-error" role="alert" hidden></div>
+<form id="agent-setup-form"><div id="setup-agents" class="setup-grid"><p>正在读取本机 Agent…</p></div></form>
+<section class="panel setup-jobs" id="setup-jobs-panel" hidden><div class="panel-heading"><div><h2>安装进度</h2><p>安装过程中可以继续填写配置，安装输出会自动更新。</p></div></div><div id="setup-jobs"></div></section>

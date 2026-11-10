@@ -12,6 +12,7 @@ PAGES = {
     'progress': ('实时进展', '选择一个具体任务，持续跟进当前轮次与最新结果。'),
     'resources': ('资源监控', '查看主机和任务的实际资源占用。'),
     'detail': ('任务工作详情', '查看角色工作、执行结论、需求与 Git 追溯记录。'),
+    'setup': ('初始化 / Agent 管理', '选择执行器、安装 CLI，并配置模型和认证。'),
 }
 DETAIL_SECTIONS = {
     'conclusions': ('交互结论', '按轮次查看 worker 执行结论与 reviewer 审查结论。'),
@@ -30,7 +31,7 @@ def page_route(path: str) -> tuple[str, str, str] | None:
     return ('detail', match[1], match[2] or 'home') if match else None
 
 
-def render_page(page: str, task_id: str, section: str, cwd: Path) -> bytes:
+def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup=False) -> bytes:
     shell = (STATIC / 'index.html').read_text()
     content = (STATIC / 'pages' / (page + '.html')).read_text()
     title, subtitle = PAGES[page]
@@ -57,6 +58,7 @@ def render_page(page: str, task_id: str, section: str, cwd: Path) -> bytes:
                     '<!-- PAGE_MENU -->': page_menu, '__PAGE_HEADING_CLASS__': heading_class,
                     '<!-- PAGE_STYLES -->': '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles),
                     '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,
+                    '__NEEDS_SETUP__': 'true' if needs_setup else 'false',
                     '__WORKSPACE__': str(cwd), '__PAGE_TITLE__': title, '__PAGE_SUBTITLE__': subtitle}
     for key, value in replacements.items():
         shell = shell.replace(key, value if key.startswith('<!--') else html.escape(value, quote=True))

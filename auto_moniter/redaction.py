@@ -3,8 +3,17 @@
 import os
 import re
 
+_configured_secrets = set()
+
+
+def register_secrets(values):
+    """Keep credentials loaded from private configuration out of diagnostic output."""
+    _configured_secrets.update(value for value in values if isinstance(value, str) and len(value) >= 8)
+
 
 def redact(text: str) -> str:
+    for value in sorted(_configured_secrets, key=len, reverse=True):
+        text = text.replace(value, "[REDACTED]")
     for name, value in os.environ.items():
         if len(value) >= 8 and re.search(r"TOKEN|PASSWORD|SECRET|API_KEY|ACCESS_KEY", name, re.I):
             text = text.replace(value, "[REDACTED]")

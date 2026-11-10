@@ -68,7 +68,10 @@ class LogReader:
                 if truncated:
                     text += ' …（本行过长，已截断）'
                 lines.append({'number': number + 1, 'text': text, 'truncated': truncated})
-            return {'content': '\n'.join(line['text'] for line in lines), 'lines': lines,
+            content = '\n'.join(line['text'] for line in lines)
+            if lines and raw.endswith(b'\n'):
+                content += '\n'
+            return {'content': content, 'lines': lines,
                     'page': page, 'page_size': page_size, 'pages': pages, 'total_lines': total,
                     'start_line': start + 1 if total else 0, 'end_line': min(total, start + page_size),
                     'limit_bytes': self.limit_bytes}

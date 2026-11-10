@@ -12,7 +12,7 @@ from auto_moniter.providers import resolve_provider
 from auto_moniter.supervisor import RunConfig, Supervisor
 
 
-def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
+def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: Path | None = None) -> list[str]:
     """Replay only the monitor CLI, checking its workspace and provider identity."""
     argv = manifest.get('argv')
     if not isinstance(argv, list) or not argv or len(argv) > 1000 or any(
@@ -81,13 +81,13 @@ def resume_arguments(manifest: dict, run: Path, state: dict) -> list[str]:
     if args.provider == 'command' or args.reviewer == 'command':
         raise ValueError('自定义命令任务请使用原 CLI 配置恢复')
     worker = resolve_provider(args.provider, paseo_backend=args.paseo_backend,
-                              paseo_mode=args.paseo_mode, mode=args.mode)
+                              paseo_mode=args.paseo_mode, mode=args.mode,settings_path=settings_path)
     reviewer = None
     if not args.no_review:
         if not args.reviewer:
             raise ValueError('原始启动配置缺少独立审查器')
         reviewer = resolve_provider(args.reviewer, paseo_backend=args.reviewer_paseo_backend or args.paseo_backend,
-                                    paseo_mode=args.reviewer_paseo_mode, mode=args.reviewer_mode, role='reviewer')
+                                    paseo_mode=args.reviewer_paseo_mode, mode=args.reviewer_mode, role='reviewer',settings_path=settings_path)
         reviewer.validate_review(args.reviewer_extra_arg)
     config = RunConfig('', args.cwd.resolve(), worker, reviewer=reviewer,
                        no_review=args.no_review, extra_args=args.extra_arg,

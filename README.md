@@ -13,9 +13,11 @@
 
 启动脚本优先使用项目 `.venv`，否则使用 `python3`；支持透传控制台参数，例如 `./start.sh --port 9000`。也可直接执行 `python3 -m console`。
 
+首次打开概览会进入 Agent 初始化页面，可选择安装并配置 Codex、Grok、Claude、Antigravity CLI、Gemini CLI、Copilot CLI、Hermes、Kimi、CodeBuddy、GLM、DeepSeek。之后从左侧“Agent 管理”调整；支持复用已安装 CLI、设置默认模型和认证。具体安装来源、密钥保存及角色支持见 [Agent 安装与配置](console/AGENT_SETUP.md)。
+
 默认会发现本机的标准运行记录和当前项目 `.auto-moniter/` 中的记录。创建任务后可立即启动，也可保存为待启动任务；实际执行复用现有 CLI 和独立审核流程。详细配置见 [console/README.md](console/README.md)。
 
-任务列表、详情和实时进展支持删除已停止/结束或待启动的任务，操作前有确认。删除只移除本控制台登记并持久化隐藏记录，项目、Git 历史和运行日志保留；刷新不会重新发现该任务。运行/暂停及进程回收未确认的任务须先停止，删除不代替存储清理。
+任务列表、详情和实时进展支持删除已停止/结束或待启动的任务，操作前有确认。删除会移除本控制台登记并清理对应运行日志、轮次输出和提示词，项目、Git 历史及任务配置/检查点保留；刷新不会重新发现该任务。运行/暂停及进程回收未确认的任务须先停止。
 
 安装后先运行两项离线检查，不调用模型：
 
@@ -113,13 +115,18 @@ worker 读取清单并修复，不能关闭编号。reviewer 独立检查后，�
 | `antigravity` | `agy --print`，提示走 stdin | `--conversation <id>` | `--mode plan` |
 | `cursor` | `cursor-agent -p`，提示走 stdin | `--resume <id>` | `--mode plan` |
 | `gemini` | `gemini --prompt` | `--resume <id> --prompt` | `--approval-mode plan` |
+| `copilot` | `copilot --prompt --silent --stream=off` | 每轮新会话 | 当前仅支持 worker |
+| `hermes` | `hermes chat --query-file` | 每轮新会话 | 当前仅支持 worker |
+| `kimi` | `kimi --prompt --auto` | 每轮新会话 | 当前仅支持 worker |
+| `codebuddy` | `codebuddy --print`，提示走 stdin | 每轮新会话 | `--permission-mode plan` |
+| `glm` / `deepseek` | Claude Code，分别使用已保存的 API 配置 | `--resume <id>` | `--permission-mode plan` |
 | `command` | 自定义 shell 模板，仅用于 worker | `{session_id}` | 不支持作为 reviewer |
 
 本机没有 `workbuddy` 命令。要用它，写成 `--provider command` 模板，或者先把它注册进 Paseo。
 
 ## 环境准备与安装
 
-需要 Python 3.11 或更高版本，项目没有第三方运行时依赖。先安装并完成所选 agent CLI 的登录或 API 配置，确保其命令在 `PATH` 中；工人和审查员都需要能独立运行。使用 Paseo 时，还需要先让 Paseo daemon 和所选后端可用。
+需要 Python 3.11 或更高版本，项目没有第三方运行时依赖。先安装并完成所选 agent CLI 的登录或 API 配置，可使用 Web 初始化页面安装并配置，或自行加入 `PATH`；工人和审查员都需要能独立运行。使用 Paseo 时，还需要先让 Paseo daemon 和所选后端可用。
 
 在本项目根目录创建虚拟环境并安装（项目在其他位置时替换首行路径）：
 

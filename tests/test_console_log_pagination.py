@@ -29,13 +29,19 @@ class LogPaginationTests(unittest.TestCase):
         self.assertEqual(self.reader.read(self.path, 1, 10)['total_lines'], 2)
         with self.path.open('a') as output:
             output.write(' extended\nthird\n')
-        self.assertEqual(self.reader.read(self.path, 1, 10)['content'], 'first\nsecond extended\nthird')
+        self.assertEqual(self.reader.read(self.path, 1, 10)['content'], 'first\nsecond extended\nthird\n')
         self.path.write_text('short\n')
         self.assertEqual(self.reader.read(self.path, 1, 10)['total_lines'], 1)
         replacement = self.path.with_suffix('.new')
         replacement.write_text('replacement')
         replacement.replace(self.path)
         self.assertEqual(self.reader.read(self.path, 1, 10)['content'], 'replacement')
+
+    def test_pages_preserve_trailing_blank_lines_and_can_be_joined(self):
+        original = 'first\nsecond\n\n\nlast\n\n'
+        self.path.write_text(original)
+        pages = [self.reader.read(self.path, page, 2)['content'] for page in (1, 2, 3)]
+        self.assertEqual(''.join(pages), original)
 
     def test_utf8_redaction_empty_and_long_lines_keep_responses_bounded(self):
         self.path.write_text('测试行\r\npassword=secret-value\n' + '界' * 90000 + '\ntail\n')

@@ -35,6 +35,7 @@ function settleTaskDialog(name,id){
 }
 function currentCreate(sequence){return sequence===createSequence&&$('#create-dialog')?.open!==false;}
 const CUSTOM_MODEL='__custom_model__';
+function providerOptions(cfg,reviewer=false){return cfg.providers.map(p=>`<option value="${escape(p.name)}" ${p.enabled===false||reviewer&&p.can_review===false?'disabled':''}>${escape(p.label||p.name)}${p.enabled===false?'（未启用）':p.available?'':'（未安装）'}${reviewer&&p.can_review===false?'（仅 worker）':''}</option>`).join('');}
 export function selectedModels(form,data){
  for(const key of ['model','reviewer_model']){
   if(data[key]===CUSTOM_MODEL){
@@ -179,8 +180,8 @@ export async function openRoles(id){
   const cfg=await config();if(!currentTaskDialog('roles',sequence))return;
   if(!task.actions.includes('roles'))throw new Error('请先停止任务并等待检查点保存，再调整角色');
   state.rolesConfig=cfg;const f=$('#roles-form');
-  const options=cfg.providers.filter(p=>p.name!=='paseo').map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
-  f.elements.provider.innerHTML=options;f.elements.reviewer.innerHTML=options;
+  const native={...cfg,providers:cfg.providers.filter(p=>p.name!=='paseo')};
+  f.elements.provider.innerHTML=providerOptions(native);f.elements.reviewer.innerHTML=providerOptions(native,true);
   for(const key of ['provider','reviewer','model','reviewer_model'])f.elements[key].value=task[key]||'';
   modelChoices(f,cfg,{preserve:true,values:task});
   if(!f.dataset.modelsBound){bindModels(f,()=>state.rolesConfig);f.dataset.modelsBound='1';}
@@ -198,20 +199,14 @@ async function ensure(name){
 }
 function configureForm() {
   const providers = state.config.providers;
-  const options = providers
-    .map(
-      (p) =>
-        `<option value="${p.name}">${p.name}${p.available ? "" : "（未安装）"}</option>`,
-    )
-    .join("");
-  $("#provider-select").innerHTML = options;
-  $("#reviewer-select").innerHTML = options;
+  $("#provider-select").innerHTML = providerOptions(state.config);
+  $("#reviewer-select").innerHTML = providerOptions(state.config,true);
   $("#provider-select").value =
-    providers.find((p) => p.available && p.name === "codex")?.name ||
-    providers.find((p) => p.available)?.name ||
+    providers.find((p) => p.available && p.enabled!==false && p.name === "codex")?.name ||
+    providers.find((p) => p.available && p.enabled!==false)?.name ||
     "codex";
   $("#reviewer-select").value =
-    providers.find((p) => p.available && p.name !== $("#provider-select").value)
+    providers.find((p) => p.available && p.enabled!==false && p.can_review!==false && p.name !== $("#provider-select").value)
       ?.name || $("#provider-select").value;
   $("#create-form").elements.cwd.value = state.config.cwd;
   backendChoices($('#create-form'),state.config);
@@ -388,8 +383,7 @@ function bind(name){
     // Read live values after the response; users may edit while discovery runs.
     const values=Object.fromEntries(['provider','reviewer','model','reviewer_model'].map(key=>[key,form.elements[key].value]));
     state.config=cfg;
-    const options=state.config.providers.map(p=>`<option value="${escape(p.name)}">${escape(p.name)}${p.available?'':'（未安装）'}</option>`).join('');
-    for(const key of ['provider','reviewer']){form.elements[key].innerHTML=options;form.elements[key].value=values[key];}
+    for(const key of ['provider','reviewer']){form.elements[key].innerHTML=providerOptions(state.config,key==='reviewer');form.elements[key].value=values[key];}
     backendChoices(form,state.config);modelChoices(form,state.config,{preserve:true,values});updateProviderHint();
     const catalog=state.config.agent_catalog||{};
     $('#agent-catalog-status').textContent=`目录已更新：${catalog.at?new Date(catalog.at).toLocaleString():'未查询'}。${catalog.note||'目录不等同于账户鉴权或功能验收通过。'}`;

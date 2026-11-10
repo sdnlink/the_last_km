@@ -22,7 +22,7 @@ class ReviewIsolation:
             raise ProviderError("Strict read-only isolation requires a native reviewer; a local wrapper cannot isolate a daemon agent")
         argv = [self.binary, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
         # Let the CLI save its own sessions, while keeping all source mounts read-only.
-        config_name = {"codex": ".codex", "claude": ".claude", "gemini": ".gemini", "grok": ".grok"}.get(provider)
+        config_name = {"codex": ".codex", "claude": ".claude", "glm": ".claude", "deepseek": ".claude", "codebuddy": ".codebuddy", "gemini": ".gemini", "grok": ".grok"}.get(provider)
         if config_name:
             config = (Path.home() / config_name).resolve()
             if config.is_dir() and not self.cwd.is_relative_to(config) and not config.is_relative_to(self.cwd):

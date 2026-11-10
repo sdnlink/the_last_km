@@ -9,7 +9,7 @@
     <!-- PAGE_STYLES -->
     <script src="/app.js" type="module"></script>
   </head>
-  <body data-page="__PAGE__" data-task-id="__TASK_ID__" data-workspace="__WORKSPACE__">
+  <body data-page="__PAGE__" data-task-id="__TASK_ID__" data-workspace="__WORKSPACE__" data-needs-setup="__NEEDS_SETUP__">
     <svg
       class="icon-sprite"
       xmlns="http://www.w3.org/2000/svg"
@@ -114,6 +114,7 @@
         >
           <svg><use href="#i-chip" /></svg>资源监控
         </a>
+        <a class="nav-item" href="/setup" data-nav="setup" aria-label="初始化 / Agent 管理" title="初始化 / Agent 管理"><svg><use href="#i-chip" /></svg>Agent 管理</a>
       </nav>
       <div class="sidebar-footer">
         <div class="engine-status">

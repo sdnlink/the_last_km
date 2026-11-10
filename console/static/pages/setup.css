@@ -1,0 +1,33 @@
+body[data-page="setup"] #new-task { display:none; }
+.setup-intro { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:20px; padding:24px; }
+.setup-intro h2 { margin:8px 0; font-size:22px; }
+.setup-intro p, .setup-notice { color:var(--muted); font-size:12px; line-height:1.9; }
+.setup-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.setup-notice { margin:18px 0; }
+.setup-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr)); gap:18px; }
+.agent-card { min-width:0; margin:0; padding:22px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.agent-card.selected { border-color:var(--accent-line); }
+.agent-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+.agent-select { display:flex; align-items:center; gap:10px; font-size:16px; font-weight:600; }
+.agent-select input { accent-color:var(--accent); }
+.agent-detected { color:var(--muted); font-size:11px; white-space:nowrap; }
+.agent-detected.installed { color:var(--accent); }
+.agent-note { font-size:11px; color:var(--muted); line-height:1.8; margin:0 0 12px; }
+.agent-card label:not(.agent-select) { display:block; margin-top:12px; }
+.agent-card label:not(.agent-select) input, .agent-card label select { width:100%; margin:6px 0 0; padding:9px 11px; min-width:0; font-size:12px; }
+.agent-card small { display:block; margin-top:7px; color:var(--muted); font-size:10px; overflow-wrap:anywhere; }
+.agent-card-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:18px; }
+.agent-card-actions a { margin-left:auto; font-size:11px; color:var(--accent); }
+.agent-message { min-height:20px; font-size:11px; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
+.agent-card [data-clear-key] { font-size:10px; margin:7px 0 0; color:var(--muted); border:0; background:none; padding:0; }
+.setup-jobs { margin-top:22px; }
+#setup-jobs { padding:0 24px 24px; }
+.setup-job { margin-top:12px; font-size:12px; overflow-wrap:anywhere; }
+.setup-job summary { cursor:pointer; }
+.setup-job pre { max-height:240px; overflow:auto; white-space:pre-wrap; background:#f4f7fa; padding:12px; font-size:11px; }
+@media(max-width:640px) {
+ .setup-intro, .agent-card { padding:18px; }
+ .setup-actions { width:100%; }
+ .setup-actions .button { flex:1; }
+ .setup-grid { grid-template-columns:minmax(0,1fr); }
+}

@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-p",
         "--provider",
         default="paseo",
-        help="Worker provider: paseo, claude, codex, grok, antigravity, cursor, gemini, command",
+        help="Worker provider: codex, claude, grok, antigravity, gemini, copilot, hermes, kimi, codebuddy, glm, deepseek, cursor, paseo, command",
     )
     run.add_argument("--model", default="", help="Worker model id")
     run.add_argument("--mode", default="", help="Worker mode; translated for the selected provider (e.g. bypass, full-access, plan)")

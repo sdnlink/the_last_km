@@ -63,11 +63,14 @@ class Handler(BaseHTTPRequestHandler):
             route = page_route(url.path)
             static = asset(url.path) if route is None else None
             if route:
-                self._send(200, render_page(*route, self.server.store.cwd), 'text/html; charset=utf-8')
+                self._send(200, render_page(*route, self.server.store.cwd,
+                           needs_setup=route[0]=='overview' and not self.server.store.agents.initialized()), 'text/html; charset=utf-8')
             elif static:
                 self._send(200, static[0].read_bytes(), static[1])
             elif url.path == '/api/config':
                 self._json({**self.server.store.config(), 'csrf_token': self.server.csrf})
+            elif url.path == '/api/agents/setup':
+                self._json(self.server.store.agents.snapshot())
             elif url.path == '/api/overview':
                 self._json(self.server.store.dashboard())
             elif url.path == '/api/tasks':
@@ -118,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.server.store.create(data), 201)
             elif path == '/api/agents/refresh':
                 self._json(self.server.store.refresh_agents())
+            elif path in ('/api/agents/save','/api/agents/install','/api/agents/probe'):
+                self._json(self.server.store.agent_settings(path.rsplit('/',1)[1],data),202 if path.endswith('/install') else 200)
             elif path in ('/api/acceptance/scan', '/api/acceptance/preflight'):
                 self._json(self.server.store.acceptance_options(data, prepare=path.endswith('/preflight')))
             else:

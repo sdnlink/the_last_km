@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -124,7 +125,15 @@ def discover_providers() -> dict[str, bool]:
         "cursor": "cursor-agent",
         "gemini": "gemini",
     }
-    return {key: _which(binary) is not None for key, binary in names.items()}
+    from auto_moniter.agent_settings import AGENTS, read_settings, executable
+    available = {key: bool(_which(binary) or executable(key, {})) for key, binary in names.items()}
+    profiles = read_settings().get('agents', {})
+    settings_path=os.environ.get('AUTO_MONITER_AGENT_SETTINGS')
+    tools=Path(settings_path).parent/'agent-tools' if settings_path else None
+    for key in AGENTS:
+        if key not in available or key in profiles:
+            available[key] = bool(executable(key, profiles.get(key, {}),tools))
+    return available
 
 
 _SESSION_KEYS = (
@@ -694,6 +703,76 @@ class GeminiProvider(Provider):
         return PreparedCommand(cmd)
 
 
+class AdditionalCLIProvider(Provider):
+    def __init__(self, name):
+        from auto_moniter.agent_settings import AGENTS, executable
+        super().__init__(name, executable(name, {}) or AGENTS[name]['binary'], False, AGENTS[name]['label'])
+
+    def validate_review(self, extra_args=()):
+        if self.name != 'codebuddy':
+            raise ProviderError(f'{self.name} currently supports worker execution; select a native read-only reviewer such as Codex or Claude.')
+        Provider.validate_review(self, extra_args)
+
+    def start_command(self, prompt_file, cwd, schema_file, *, model='', extra_args=(), read_only=False):
+        if read_only:self.validate_review(extra_args)
+        if self.mode and self.name!='codebuddy':
+            raise ProviderError(f'{self.name} does not accept a permission-mode override in this adapter.')
+        prompt=_prompt_text(prompt_file)
+        if self.name=='copilot':
+            argv=[self.binary,'--prompt',prompt,'--allow-all','--no-ask-user','--silent','--stream=off']
+        elif self.name=='kimi':
+            argv=[self.binary,'--prompt',prompt,'--auto','--output-format','text']
+        elif self.name=='hermes':
+            argv=[self.binary,'chat','--query-file',str(prompt_file),'--yolo']
+        else:
+            argv=[self.binary,'--print','--output-format','json','--permission-mode','plan' if read_only else self.mode or 'bypassPermissions']
+            if not read_only:argv.append('--dangerously-skip-permissions')
+        if model:argv+=['--model',model]
+        argv.extend(extra_args)
+        return PreparedCommand(argv,stdin_text=prompt if self.name=='codebuddy' else None)
+
+    def resume_command(self, session_id, prompt_file, cwd, schema_file, **kwargs):
+        return self.start_command(prompt_file,cwd,schema_file,**kwargs)
+
+
+class ConfiguredProvider(Provider):
+    def __init__(self, name, delegate, path, profile):
+        from auto_moniter.agent_settings import executable
+        if profile.get('auth_mode')=='api_key' and not profile.get('api_key'):
+            raise ProviderError(f'Configure the {name} API key in Agent settings before starting this provider.')
+        self.delegate=delegate;self.settings_path=path;self.profile=profile
+        tools=Path(path).parent/'agent-tools' if path else None
+        resolved=executable(name,profile,tools)
+        if resolved or profile.get('executable'):
+            delegate.binary=resolved or profile['executable']
+        super().__init__(name,delegate.binary,delegate.resume_supported,delegate.notes,
+                         delegate.separate_review_session,delegate.mode)
+
+    def __getattr__(self,name):
+        return getattr(self.delegate,name)
+
+    def validate_review(self, extra_args=()):
+        self.delegate.validate_review(extra_args)
+
+    def _prepare(self, method, *args, model='', **kwargs):
+        from auto_moniter.redaction import register_secrets
+        register_secrets([self.profile.get('api_key','')])
+        selected=model or self.profile.get('model','')
+        runtime_model=selected
+        if self.name=='kimi' and self.profile.get('auth_mode')=='api_key':
+            selected=''
+        prepared=method(*args,model=selected,**kwargs)
+        if self.settings_path:
+            prepared.argv=[sys.executable,str(Path(__file__).with_name('agent_exec.py')),str(self.settings_path),self.name,runtime_model,*prepared.argv]
+        return prepared
+
+    def start_command(self,*args,**kwargs):
+        return self._prepare(self.delegate.start_command,*args,**kwargs)
+
+    def resume_command(self,*args,**kwargs):
+        return self._prepare(self.delegate.resume_command,*args,**kwargs)
+
+
 class PaseoProvider(Provider):
     """Drive any provider Paseo can launch, keeping one agent id for follow-ups."""
 
@@ -830,6 +909,7 @@ def builtin_providers() -> dict[str, Provider]:
         "antigravity": AntigravityProvider(),
         "cursor": CursorProvider(),
         "gemini": GeminiProvider(),
+        **{name:AdditionalCLIProvider(name) for name in ('copilot','hermes','kimi','codebuddy')},
     }
 
 
@@ -842,7 +922,9 @@ def resolve_provider(
     command: str = "",
     resume_command: str = "",
     role: str = "worker",
+    settings_path: Path | None = None,
 ) -> Provider:
+    from auto_moniter.agent_settings import AGENTS, read_settings
     key = name.strip().lower()
     if key in {"workbuddy", "work-buddy"}:
         raise ProviderError(
@@ -856,6 +938,9 @@ def resolve_provider(
         provider = PaseoProvider(backend=backend, mode=mode or paseo_mode, role=role)
         if role == "reviewer":
             provider.validate_review()
+        profile=read_settings(settings_path).get('agents',{}).get(key)
+        if profile is not None:
+            provider=ConfiguredProvider(key,provider,settings_path or os.environ.get('AUTO_MONITER_AGENT_SETTINGS',''),profile)
         return provider
     if key == "command":
         if mode:
@@ -866,14 +951,25 @@ def resolve_provider(
         if role == "reviewer":
             provider.validate_review()
         return provider
+    if key in ('glm','deepseek'):
+        profile=read_settings(settings_path).get('agents',{}).get(key,{})
+        if profile.get('auth_mode')!='api_key' or not profile.get('api_key'):
+            raise ProviderError(f'Configure the {AGENTS[key]["label"]} API key in Agent settings before starting this provider.')
+        delegate=ClaudeProvider();delegate.mode=normalize_mode('claude',mode)
+        provider=ConfiguredProvider(key,delegate,settings_path or os.environ.get('AUTO_MONITER_AGENT_SETTINGS',''),profile)
+        if role=='reviewer':provider.validate_review()
+        return provider
     providers = builtin_providers()
     if key not in providers:
-        known = ", ".join([*providers, "paseo", "command"])
+        known = ", ".join([*providers, "glm", "deepseek", "paseo", "command"])
         raise ProviderError(f"Unknown provider {name!r}. Known: {known}")
     provider = providers[key]
     provider.mode = normalize_mode(key, mode)
     if role == "reviewer":
         provider.validate_review()
+    profile=read_settings(settings_path).get('agents',{}).get(key)
+    if profile is not None and key in AGENTS:
+        provider=ConfiguredProvider(key,provider,settings_path or os.environ.get('AUTO_MONITER_AGENT_SETTINGS',''),profile)
     return provider
 
 

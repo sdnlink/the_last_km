@@ -33,10 +33,12 @@ from console.workflow import work_details
 from console.git_records import read_git_record, GitRecordError
 from console.conclusions import present_conclusion
 from console.logs import LogReader
+from console.agents import AgentManager
+from auto_moniter.agent_settings import AGENTS, read_settings
 from console.diagnostics import diagnose, console_result
 
 
-PROVIDERS = ('codex', 'claude', 'grok', 'gemini', 'cursor', 'antigravity', 'paseo')
+PROVIDERS = tuple(AGENTS)
 RESUMABLE = {'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required', 'interrupted'}
 
 
@@ -106,20 +108,41 @@ class TaskStore:
         self._children = {}
         self._scan_warnings = []
         self.agent_catalog = None
+        self.agents = AgentManager(self.data_dir, self.cwd)
 
     def refresh_agents(self):
         from console.agent_catalog import discover
         self.agent_catalog = discover(self.cwd, discover_providers(), live=True)
         return self.config()
 
+    def agent_settings(self, action, data):
+        try:
+            if action=='save':
+                result=self.agents.save(data);self.agent_catalog=None;return result
+            if action=='install':return self.agents.install(data.get('id'))
+            if action=='probe':return self.agents.probe(data.get('id'))
+            raise ValueError('Agent 操作不支持')
+        except (ValueError,OSError) as exc:
+            raise TaskError(str(exc),400) from exc
+
     def config(self) -> dict:
-        available = discover_providers()
+        available = self.agents.providers(discover_providers())
         if self.agent_catalog is None:
             from console.agent_catalog import discover
             self.agent_catalog = discover(self.cwd, available)
+        profiles={row['id']:row for row in self.agents.snapshot()['agents']}
+        catalog=dict(self.agent_catalog)
+        models=dict(catalog.get('models',{}))
+        for name,row in profiles.items():
+            if row['config']['model']:
+                current=models.get(name,{}).get('models',[])
+                models[name]={'models':[{'id':row['config']['model'],'label':row['config']['model'],'source':'console_settings'},*[item for item in current if item['id']!=row['config']['model']]],'note':'控制台配置及本机模型目录'}
+        catalog['models']=models
         return {'cwd': str(self.cwd), 'data_dir': str(self.data_dir),
-                'providers': [{'name': name, 'available': bool(available.get(name))} for name in PROVIDERS],
-                'agent_catalog': self.agent_catalog,
+                'providers': [{'name': name, 'label':AGENTS[name]['label'], 'available': bool(available.get(name)),
+                               'enabled':profiles[name]['enabled'], 'can_review':profiles[name]['can_review']} for name in PROVIDERS],
+                'setup_required':not self.agents.initialized(),
+                'agent_catalog': catalog,
                 'poll_interval_ms': 3000}
 
     def _catalog(self) -> dict:
@@ -474,6 +497,9 @@ class TaskStore:
             raise TaskError('项目目录不存在或不可写')
         provider, reviewer = text('provider', 'codex'), text('reviewer', 'claude')
         models = {key: text(key, maximum=200) for key in ('model', 'reviewer_model')}
+        profiles=read_settings(self.agents.path).get('agents',{})
+        for key,name in [('model',provider),('reviewer_model',reviewer)]:
+            if not models[key]:models[key]=profiles.get(name,{}).get('model','')
         backends = {'paseo_backend': text('paseo_backend', DEFAULT_PASEO_BACKEND, 200),
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
@@ -571,7 +597,7 @@ class TaskStore:
             return self.detail(ident)
 
     def _check_start(self, meta: dict) -> None:
-        available = discover_providers()
+        available = self.agents.providers(discover_providers())
         for role in ('provider', 'reviewer'):
             if meta.get(role) and meta[role] != '—' and not available.get(meta[role]):
                 raise TaskError(f'未找到 {meta[role]} 可执行文件，请先安装并完成登录', 409)
@@ -592,7 +618,9 @@ class TaskStore:
             from auto_moniter.isolation import ReviewIsolation, WorkerIsolation
             from auto_moniter.providers import resolve_provider
             try:
+                resolve_provider(meta['provider'],settings_path=self.agents.path)
                 reviewer = resolve_provider(meta['reviewer'], role='reviewer',
+                                             settings_path=self.agents.path,
                                              paseo_backend=meta.get('reviewer_paseo_backend') or meta.get('paseo_backend', 'claude'))
                 reviewer.validate_review()
                 if meta.get('review_isolation') == 'strict':
@@ -629,7 +657,8 @@ class TaskStore:
             else:
                 raise TaskError('缺少原始启动配置 launch.json，请使用原 CLI 配置恢复', 409)
         try:
-            return resume_arguments(manifest, run, state)
+            options={'settings_path':self.agents.path} if self.agents.path.exists() else {}
+            return resume_arguments(manifest, run, state, **options)
         except (ValueError, ProviderError, TypeError, KeyError, OSError) as exc:
             raise TaskError('无法恢复：' + str(exc), 409) from exc
 
@@ -668,6 +697,7 @@ class TaskStore:
         arguments = self._resume_args(meta) if resume else self._new_args(meta)
         argv = [sys.executable, '-m', 'auto_moniter', *arguments]
         env = os.environ.copy()
+        env['AUTO_MONITER_AGENT_SETTINGS']=str(self.agents.path)
         package_root = str(Path(__file__).resolve().parent.parent)
         env['PYTHONPATH'] = package_root + os.pathsep + env.get('PYTHONPATH', '')
         env['PYTHONUNBUFFERED'] = '1'
@@ -737,11 +767,11 @@ class TaskStore:
                     with inactive_run(run):
                         state = read_json(run / 'state.json')
                         arguments = self._resume_args(meta, state) if state else self._new_args(meta)
-                        arguments, values, resolved = prepare(arguments, data or {}, Path(meta['cwd']))
+                        arguments, values, resolved = prepare(arguments, data or {}, Path(meta['cwd']),settings_path=self.agents.path)
                         policy = state.get('quality_policy', meta.get('quality_policy', {}))
                         if policy.get('review_tools') == 'files_only' and values['reviewer'] != 'claude':
                             raise ValueError('当前只读文件审核策略要求 Claude reviewer')
-                        available = discover_providers()
+                        available = self.agents.providers(discover_providers())
                         for role in ('provider', 'reviewer'):
                             if not available.get(values[role]):
                                 raise ValueError('未找到执行器：' + values[role])

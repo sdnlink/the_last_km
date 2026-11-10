@@ -22,7 +22,7 @@ export class Pager {
 }
 
 const pagers=new Map(),layouts=new Map(),listeners=new Set();
-const measuredSizes=new Map(),measurementPending=new Set();
+const adaptiveSizes=new Map(),initialized=new Set(),measurementPending=new Set();
 let bound=false;
 export function getPager(key){if(!pagers.has(key))pagers.set(key,new Pager());return pagers.get(key);}
 export function resetPage(key){getPager(key).page=1;}
@@ -45,15 +45,17 @@ function fitSize(key){
 export function pageView(key,total,options={}){
   layouts.set(key,options);
   const pager=getPager(key);
-  const view=pager.view(total,pager.mode==='auto'?fitSize(key):10);
-  if(pager.mode==='auto'&&!measurementPending.has(key)){
+  if(!adaptiveSizes.has(key))adaptiveSizes.set(key,fitSize(key));
+  const view=pager.view(total,adaptiveSizes.get(key));
+  // Measure once after the initial records render, then keep this size until reload.
+  if(total>0&&!initialized.has(key)&&!measurementPending.has(key)){
     measurementPending.add(key);
     requestAnimationFrame(()=>{
       measurementPending.delete(key);
-      if(pager.mode!=='auto')return;
-      const next=fitSize(key),previous=measuredSizes.get(key);
-      measuredSizes.set(key,next);
-      if(next!==view.size&&next!==previous)notify(key,'layout');
+      initialized.add(key);
+      const next=fitSize(key);
+      adaptiveSizes.set(key,next);
+      if(pager.mode==='auto'&&next!==view.size)notify(key,'layout');
     });
   }
   return view;
@@ -72,32 +74,6 @@ export function pagedList(key,items,render,{tag='ul',className='module-list',emp
   return `<${tag} class="${className}" data-page-list="${escape(key)}" ${tag==='ol'?`start="${page.start+1}"`:''}>${page.items.map(render).join('')||empty}</${tag}>${page.controls}`;
 }
 function notify(key,reason){for(const callback of listeners)callback(key,reason);}
-export function observeLayoutChanges(callback){
-  let timer,resolution;
-  const changed=()=>{clearTimeout(timer);timer=setTimeout(callback,150);};
-  const zoomChanged=()=>{watchZoom();changed();};
-  function watchZoom(){
-    resolution?.removeEventListener?.('change',zoomChanged);
-    resolution=window.matchMedia?.(`(resolution: ${window.devicePixelRatio||1}dppx)`);
-    resolution?.addEventListener?.('change',zoomChanged);
-  }
-  window.addEventListener('resize',changed);
-  window.visualViewport?.addEventListener('resize',changed);
-  watchZoom();
-  const main=document.querySelector('main');
-  let width=main?.getBoundingClientRect().width;
-  const observer=main&&typeof ResizeObserver!=='undefined'?new ResizeObserver(entries=>{
-    const next=entries[0]?.contentRect.width;
-    if(next!==undefined&&next!==width){width=next;changed();}
-  }):null;
-  observer?.observe(main);
-  return ()=>{
-    clearTimeout(timer);observer?.disconnect();
-    window.removeEventListener('resize',changed);
-    window.visualViewport?.removeEventListener('resize',changed);
-    resolution?.removeEventListener?.('change',zoomChanged);
-  };
-}
 export function onPaginationChange(callback){
   listeners.add(callback);
   if(bound)return;
@@ -116,5 +92,4 @@ export function onPaginationChange(callback){
     else return;
     notify(key,control.matches('[data-page-size]')?'size':'page');
   });
-  observeLayoutChanges(()=>{for(const [key,pager] of pagers)if(pager.mode==='auto')notify(key,'resize');});
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {Pager,observeLayoutChanges} from '../console/static/pagination.js';
+import {Pager,pageView,getPager,onPaginationChange} from '../console/static/pagination.js';
 
 test('adapts by default and keeps the selected page across refreshes',()=>{
   const pager=new Pager();
@@ -25,37 +25,44 @@ test('size changes keep the previous first item in view and adaptive sizes stay 
   assert.equal(pager.view(100,0).size,1);
   pager.setMode('invalid');assert.equal(pager.mode,'auto');
 });
-test('adaptive resizing keeps the previous first record on the selected page',()=>{
+test('initial size correction keeps the previous first record on the selected page',()=>{
   const pager=new Pager();pager.view(100);pager.page=3;pager.setMode('auto');
   assert.equal(pager.view(100,5).start,20);
   const resized=pager.view(100,8);
   assert.ok(resized.start<=20&&resized.end>20);
 });
-test('window, visual viewport, zoom and container resizing trigger layout updates',()=>{
-  const original=Object.fromEntries(['window','document','ResizeObserver','setTimeout','clearTimeout'].map(key=>[key,globalThis[key]]));
-  let scheduled,observer,updates=0,disconnected=false;
-  const target=()=>({handlers:new Map(),addEventListener(type,fn){this.handlers.set(type,fn);},removeEventListener(type){this.handlers.delete(type);}});
-  const viewport=target(),window=target(),queries=[];
-  window.visualViewport=viewport;window.devicePixelRatio=1;
-  window.matchMedia=query=>{const item={...target(),query};queries.push(item);return item;};
-  const main={getBoundingClientRect:()=>({width:1000})};
-  globalThis.window=window;globalThis.document={querySelector:()=>main};
-  globalThis.setTimeout=callback=>{scheduled=callback;return 1;};
-  globalThis.clearTimeout=()=>{scheduled=null;};
-  globalThis.ResizeObserver=class{constructor(callback){observer=callback;}observe(el){assert.equal(el,main);}disconnect(){disconnected=true;}};
-  const flush=()=>{const fn=scheduled;scheduled=null;fn?.();};
-  let stop;
+test('page size is measured at load and stays fixed through polling and zoom',()=>{
+  const original=Object.fromEntries(['window','document','requestAnimationFrame','getComputedStyle'].map(key=>[key,globalThis[key]]));
+  let height=800,rowHeight=40,measurements=0,rootReads=0;
+  const frames=[],handlers=[];
+  const first={matches:()=>false,getBoundingClientRect:()=>{measurements++;return {height:rowHeight};}};
+  const root={firstElementChild:first,getBoundingClientRect:()=>({top:100})};
+  globalThis.window={get innerHeight(){return height;},visualViewport:{get height(){return height;},offsetTop:0},
+    addEventListener(){assert.fail('Pagination must not watch viewport changes');},
+    matchMedia(){assert.fail('Pagination must not watch browser zoom');}};
+  globalThis.document={querySelector:()=>{rootReads++;return root;},addEventListener:(...args)=>handlers.push(args)};
+  globalThis.requestAnimationFrame=callback=>frames.push(callback);
+  globalThis.getComputedStyle=()=>({display:'block'});
   try{
-    stop=observeLayoutChanges(()=>updates++);
-    window.handlers.get('resize')();flush();assert.equal(updates,1);
-    viewport.handlers.get('resize')();flush();assert.equal(updates,2);
-    window.devicePixelRatio=2;queries[0].handlers.get('change')();flush();
-    assert.equal(updates,3);assert.match(queries[1].query,/2dppx/);
-    observer([{contentRect:{width:600}}]);flush();assert.equal(updates,4);
-    observer([{contentRect:{width:600}}]);flush();assert.equal(updates,4);
-    stop();stop=null;assert.equal(disconnected,true);assert.equal(window.handlers.size,0);assert.equal(viewport.handlers.size,0);
+    onPaginationChange(()=>{});
+    assert.deepEqual(handlers.map(([type])=>type),['click','change']);
+    const firstView=pageView('load-only',100,{rowHeight:40});
+    assert.equal(firstView.size,12);assert.equal(frames.length,1);
+    // The initial render can reveal a different row height exactly once.
+    rowHeight=50;frames.shift()();
+    const settled=pageView('load-only',100,{rowHeight:40});
+    assert.equal(settled.size,10);assert.equal(frames.length,0);
+    const reads=rootReads,measured=measurements;
+    height=1600;rowHeight=20;getPager('load-only').page=2;
+    for(let n=0;n<3;n++){
+      const view=pageView('load-only',110,{rowHeight:40});
+      assert.equal(view.size,10);assert.equal(view.page,2);
+    }
+    assert.equal(rootReads,reads);assert.equal(measurements,measured);assert.equal(frames.length,0);
+    const reloaded=pageView('fresh-document',100,{rowHeight:40});
+    assert.ok(reloaded.size>settled.size,'A newly loaded page uses its current viewport');
+    frames.shift()();
   }finally{
-    stop?.();
     for(const [key,value] of Object.entries(original)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
   }
 });

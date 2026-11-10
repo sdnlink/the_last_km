@@ -1,12 +1,13 @@
 
 .charts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 22px;
   padding: 0 23px 23px;
 }
 
 .chart-card {
+  min-width: 0;
   padding: 18px;
   border-radius: 7px;
   background: var(--surface-2);
@@ -78,12 +79,14 @@
 
 .resource-details {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 18px;
   padding: 0 23px 23px;
 }
 
 .resource-details > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 15px;
@@ -120,7 +123,7 @@
   }
 
   .resource-details {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
 }

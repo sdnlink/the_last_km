@@ -21,7 +21,7 @@ from auto_moniter.providers import discover_providers
 from auto_moniter.providers import DEFAULT_PASEO_BACKEND, ProviderError
 from auto_moniter.locking import workspaces_overlap
 from console.settings import settings, DEFAULTS
-from console.deletion import run_key, inactive_run
+from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
@@ -780,15 +780,26 @@ class TaskStore:
                 if child is not None and child.poll() is None:
                     raise TaskError('任务进程尚未退出，请稍后重试', 409)
                 try:
-                    with inactive_run(run):
-                        write_json(self.deleted_dir / (run_key(run) + '.json'),
-                                   {'id': ident, 'run_dir': str(run.resolve()), 'deleted_at': timestamp()}, durable=True)
-                        (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
+                    validate_log_location(run, Path(view['cwd']))
+                    with inactive_run(run) as directory:
+                        cleanup = purge_run_logs(directory)
+                        marker = self.deleted_dir / (run_key(run) + '.json')
+                        write_json(marker, {'id': ident, 'run_dir': str(run.resolve()),
+                                          'deleted_at': timestamp(), 'logs_cleaned': True, **cleanup}, durable=True)
+                        try:
+                            (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
+                        except OSError:
+                            marker.unlink(missing_ok=True)
+                            raise
                 except ValueError as exc:
                     raise TaskError(str(exc), 409) from exc
+                except OSError as exc:
+                    raise TaskError(f'任务日志清理或删除失败，请重试：{exc}', 500) from exc
+                if hasattr(self, '_log_reader'):
+                    self._log_reader.forget(run)
                 self._external.pop(ident, None)
                 self._catalog_at = 0
-                return {'id': ident, 'deleted': True, 'retained_run_dir': str(run)}
+                return {'id': ident, 'deleted': True, 'logs_cleaned': True, **cleanup}
             if action in {'start', 'resume'}:
                 if action == 'resume' and not meta.get('managed'):
                     # Keep the discovered task ID and its original run directory.

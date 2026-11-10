@@ -136,6 +136,7 @@ select:focus {
   display: flex;
   flex-direction: column;
   z-index: 5;
+  overflow-y: auto;
 }
 
 .brand {
@@ -293,6 +294,7 @@ nav {
 
 .shell {
   margin-left: var(--sidebar);
+  min-width: 0;
 }
 
 .topbar {
@@ -378,8 +380,8 @@ nav {
 }
 
 main {
-  max-width: 1720px;
-  margin: auto;
+  width: 100%;
+  min-width: 0;
   padding: 38px 38px 24px;
 }
 
@@ -1475,13 +1477,17 @@ body:has(dialog[open]) {
   .sidebar {
     position: relative;
     width: auto;
-    height: 64px;
+    min-height: 64px;
+    height: auto;
     padding: 14px 18px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    overflow: visible;
   }
 
   .brand {

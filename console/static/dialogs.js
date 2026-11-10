@@ -339,7 +339,7 @@ function bind(name){
      $('#delete-dialog').close();
      if(document.body.dataset.taskId===id||new URLSearchParams(location.search).get('task')===id){location.assign('/tasks');return;}
     }
-    toast(`任务 ${id} 已删除，项目与运行记录已保留`);await refresh();
+    toast(`任务 ${id} 及运行日志已删除`);await refresh();
    }catch(error){if(currentTaskDialog('delete',sequence,id)){$('#delete-error').hidden=false;$('#delete-error').textContent=error.message;}else toast(`任务 ${id} 删除失败：${error.message}`,true);}
    finally{settleTaskDialog('delete',id);}
   });return;

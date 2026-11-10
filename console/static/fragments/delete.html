@@ -1,10 +1,10 @@
 <dialog id="delete-dialog" class="confirm-dialog">
  <div class="dialog-heading"><h2>删除任务？</h2></div>
  <p id="delete-task-title"></p>
- <p>任务将从本控制台移除，刷新或重启后不会再次显示。项目文件、Git 历史及运行日志会保留；此操作不释放日志占用空间。</p>
+ <p>任务将从本控制台移除，并永久删除该任务运行目录中的执行日志、实时事件、轮次文本及提示词。项目文件、Git 历史和任务配置记录会保留；已删除日志无法恢复。</p>
  <p id="delete-error" class="form-error" role="alert" hidden></p>
  <div class="dialog-footer">
   <button type="button" class="button secondary" data-close="delete-dialog">返回</button>
-  <button type="button" class="button danger" id="confirm-delete">确认删除任务</button>
+  <button type="button" class="button danger" id="confirm-delete">删除任务及日志</button>
  </div>
 </dialog>

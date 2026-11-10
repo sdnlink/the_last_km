@@ -16,6 +16,11 @@ class LogReader:
     def __init__(self):
         self.indexes = OrderedDict()
 
+    def forget(self, run: Path) -> None:
+        for path in list(self.indexes):
+            if Path(path).parent == run:
+                self.indexes.pop(path, None)
+
     def read(self, path: Path | None, page: int, page_size: int) -> dict:
         if path is None:
             return self._empty(page_size)

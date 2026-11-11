@@ -103,6 +103,47 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('Do not repeat accepted implementation',reviewer.calls[0]['prompt'])
             self.assertIsNone(json.loads((root/'run/state.json').read_text())['planning_rejection'])
 
+    def test_replanning_preserves_canonical_criteria_without_an_extra_model_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            final=task('F2','next.py',scope='requirement',depends=['F1'])
+            final['criterion_ids']=['main:1','req:1:1','req:1:2']
+            rewritten=plan(final)
+            brief=json.loads(rewritten['text']);brief['acceptance_criteria']=['Paraphrased and reordered criteria']
+            rewritten['text']=json.dumps(brief)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'},
+                {**result('F2','done',status='done',file='next.py'),'touch':'next.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted'),
+                rewritten,result('F2','accepted',status='done',file='next.py')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(saved['requirements_review']['acceptance_criteria'],BRIEF['acceptance_criteria'])
+            self.assertIn('requirement_criteria_preserved',(root/'run/events.jsonl').read_text())
+
+    def test_failed_planning_resume_recovers_approved_criteria_before_worker_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted'),
+                {'verdict':{},'text':'invalid next planning output'}])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2)
+            self.assertEqual(report.status,'action_required',report.summary)
+            final=task('F2','next.py',scope='requirement',depends=['F1'])
+            final['criterion_ids']=['main:1','req:1:1','req:1:2']
+            rewritten=plan(final);brief=json.loads(rewritten['text'])
+            brief['acceptance_criteria']=['Cannot replace canonical criteria on resume']
+            rewritten['text']=json.dumps(brief)
+            worker=FunctionWorker('worker',[{**result('F2','done',status='done',file='next.py'),'touch':'next.py'}])
+            reviewer=ScriptedProvider('reviewer',[rewritten,result('F2','accepted',status='done',file='next.py')])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(saved['requirements_review']['acceptance_criteria'],BRIEF['acceptance_criteria'])
+
     def test_format_check_alone_cannot_accept_a_function(self):
         from auto_moniter.function_gate import validate_task
         with tempfile.TemporaryDirectory() as directory:

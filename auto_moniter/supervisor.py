@@ -1208,7 +1208,19 @@ class Supervisor:
     def _elaborate_requirement(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         previous_brief = self.requirements_review
-        self.requirements_review={'status':'reviewing','summary':'Reviewer is selecting the next function.' if next_function else 'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
+        if next_function and previous_brief.get('status') != 'ready':
+            # Failed planning must not erase the approved criteria on resume.
+            # This file is written only after a fully validated planning result.
+            saved = self.run_dir / 'reviewed-requirement.json'
+            if saved.is_file() and not saved.is_symlink():
+                approved = json.loads(saved.read_text())
+                if (isinstance(approved, dict) and approved.get('status') == 'ready'
+                        and approved.get('cycle') == len(self.requirement_cycles) + 1
+                        and approved.get('original_sha256') == requirements_review.requirement_hash(self.config.requirement)):
+                    requirements_review.parse(json.dumps({k:v for k,v in approved.items()
+                                                         if k in requirements_review.SCHEMA['required']}))
+                    previous_brief = approved
+        self.requirements_review={**(previous_brief if next_function else {}),'status':'reviewing','summary':'Reviewer is selecting the next function.' if next_function else 'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
                                   'cycle': len(self.requirement_cycles) + 1}
         before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         self._write_state(records,'running',0,'',before)
@@ -1233,7 +1245,10 @@ class Supervisor:
                 if self._function_gate:
                     prompt += self._function_planning_contract()
                 if next_function:
-                    prompt += '\nReuse the existing brief; choose only the next unaccepted function. Brief: ' + json.dumps(previous_brief, ensure_ascii=False)
+                    prompt += ('\nReuse the existing brief; choose only the next unaccepted function. '
+                               'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
+                               'The watcher retains these approved criteria and validates the new task against them. Brief: '
+                               + json.dumps(previous_brief, ensure_ascii=False))
             turn=self._invoke(self.config.reviewer,prompt,'',
                               role='reviewer',index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
@@ -1252,7 +1267,12 @@ class Supervisor:
                 if self._function_gate and next_function and previous_brief.get('status') == 'ready':
                     previous = previous_brief['acceptance_criteria']
                     if brief['acceptance_criteria'][:len(previous)] != previous:
-                        raise ValueError('Reviewer must preserve the existing requirement criterion IDs and text')
+                        # The reviewer owns the next assignment, not the existing
+                        # criterion IDs. Keep canonical text without another model
+                        # call; task references and coverage still use this list.
+                        brief['acceptance_criteria'] = list(previous)
+                        self._event('requirement_criteria_preserved',
+                                    reason='Planning response rewrote approved criteria; original IDs and text retained')
                 if brief['status']=='ready':
                     from auto_moniter.modules import definitions
                     proposed = definitions(modules)

@@ -99,9 +99,49 @@ def _declarator_name(node):
     return ()
 
 
+def _swift_conditional_tree(engine, data, tree):
+    # The bundled Swift grammar misparses conditional computed properties in
+    # enums. Retain every branch and byte offset, blanking only directives
+    # already recognized by the parser. This is structural scope discovery,
+    # not a substitute for the project's Swift compiler checks.
+    directives = []
+    stack = [tree.root_node]
+    depth = []
+    while stack:
+        node = stack.pop()
+        if node.type == 'directive':
+            keyword = node.children[0].type if node.children else ''
+            if keyword in {'#if', '#elseif', '#else', '#endif'}:
+                if node.has_error:
+                    return tree
+                if keyword == '#if':
+                    depth.append(False)
+                elif not depth:
+                    return tree
+                elif keyword == '#endif':
+                    depth.pop()
+                elif depth[-1]:
+                    return tree
+                elif keyword == '#else':
+                    depth[-1] = True
+                directives.append(node)
+        stack.extend(reversed(node.named_children))
+    if not directives or depth:
+        return tree
+    masked = bytearray(data)
+    for node in directives:
+        for index in range(node.start_byte, node.end_byte):
+            if masked[index] not in (10, 13):
+                masked[index] = 32
+    return engine.parse(bytes(masked))
+
+
 def spans(source, symbol, name):
     data = source.encode()
-    tree = parser(name).parse(data)
+    engine = parser(name)
+    tree = engine.parse(data)
+    if name == 'swift' and tree.root_node.has_error:
+        tree = _swift_conditional_tree(engine, data, tree)
     if tree.root_node.has_error:
         raise ValueError(f'Cannot parse valid {RULES[name].label} source for function scope verification')
     wanted = _names(symbol)

@@ -39,6 +39,22 @@ SAMPLES = {
 }
 
 
+SWIFT_CONDITIONAL = '''// 中文 😀
+enum Action {
+    case buy, sell
+    #if canImport(SwiftUI)
+    var color: Int {
+        switch self {
+        case .buy: return 1
+        case .sell: return 2
+        }
+    }
+    #endif
+}
+struct Service { func run() -> Int { return 123 }; func other() -> Int { return 456 } }
+'''
+
+
 @unittest.skipUnless(importlib.util.find_spec('tree_sitter_language_pack'),
                      'Install auto-moniter[languages] to verify optional grammar rules')
 class LanguageScopeTests(unittest.TestCase):
@@ -95,6 +111,56 @@ class LanguageScopeTests(unittest.TestCase):
             path.write_text('package api\nfunc Run() int {return 1}\nfunc Other( {')
             with self.assertRaisesRegex(ValueError, 'Cannot parse valid Go'):
                 target_state(path, 'Run')
+
+    def test_swift_conditional_property_preserves_exact_function_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'project'
+            root.mkdir()
+            path = root / 'Service.swift'
+            path.write_text(SWIFT_CONDITIONAL)
+            task = {'id':'swift', 'file':path.name, 'symbol':'Service.run', 'test_files':[]}
+            saved = baseline(Path(directory)/'baseline.gz', root, task, file_snapshot(root), missing_ok=True)
+            path.write_text(SWIFT_CONDITIONAL.replace('123', '12345'))
+            gaps, hashes = scope_problems(root, task, saved, file_snapshot(root))
+            self.assertEqual(gaps, [])
+            self.assertEqual(set(hashes), {path.name})
+            path.write_text(SWIFT_CONDITIONAL.replace('123', '12345').replace('SwiftUI', 'AppKit'))
+            gaps, hashes = scope_problems(root, task, saved, file_snapshot(root))
+            self.assertIn('outside the assigned function', gaps[0])
+            self.assertIsNone(hashes)
+
+    def test_swift_conditional_fallback_still_rejects_real_syntax_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'Service.swift'
+            for source in [SWIFT_CONDITIONAL + '\nfunc broken( {',
+                           SWIFT_CONDITIONAL.replace('    #endif\n', '')]:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    with self.assertRaisesRegex(ValueError, 'Cannot parse valid Swift'):
+                        target_state(path, 'Service.run')
+
+    def test_swift_conditional_branches_cannot_hide_duplicate_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'Service.swift'
+            path.write_text(SWIFT_CONDITIONAL.replace('func run() -> Int { return 123 };', '''
+                #if os(Linux)
+                func run() -> Int { return 123 }
+                #else
+                func run() -> Int { return 789 }
+                #endif
+                '''))
+            with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                target_state(path, 'Service.run')
+
+    def test_swift_string_directives_do_not_participate_in_conditional_matching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'Service.swift'
+            path.write_text(SWIFT_CONDITIONAL.replace('return 123', '''let text = """
+#endif
+#if imaginary
+"""
+return 123'''))
+            self.assertIsNotNone(target_state(path, 'Service.run')['body'])
 
     def test_unicode_offsets_and_templates_preserve_prefix_and_suffix(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -68,6 +68,37 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_pause_during_next_function_planning_prevents_another_worker_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = FunctionWorker('worker',[
+                {**result('F1','done'),'touch':'app.py'},
+                {**result('F2','done',file='next.py'),'touch':'next.py'}])
+            reviewer = ScriptedProvider('reviewer',[
+                plan(task('F1','app.py')), result('F1','accepted'), plan(task('F2','next.py'))])
+            elaborate = Supervisor._elaborate_requirement
+            beat = Supervisor._beat
+            boundaries = []
+            def pause_after_plan(monitor, records, **kwargs):
+                ok = elaborate(monitor, records, **kwargs)
+                if kwargs.get('next_function'):
+                    (root/'run/control.json').write_text(json.dumps({'action':'pause'}))
+                return ok
+            def stop_at_pause(monitor, note):
+                if 'paused at a turn boundary' in note:
+                    boundaries.append((len(worker.calls), len(reviewer.calls)))
+                    (root/'run/control.json').write_text(json.dumps({'action':'stop'}))
+                return beat(monitor, note)
+            with patch.object(Supervisor, '_elaborate_requirement', pause_after_plan), \
+                    patch.object(Supervisor, '_beat', stop_at_pause):
+                report = self.run_monitor(root,worker,reviewer,max_rounds=2)
+            self.assertEqual(report.status,'stopped',report.summary)
+            self.assertEqual(boundaries,[(1,3)])
+            self.assertFalse((root/'next.py').exists())
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['next_round'],2)
+            self.assertEqual(state['function_tasks']['current']['id'],'F2')
+
     def test_chinese_criterion_citation_passes_handoff_without_extra_model_calls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

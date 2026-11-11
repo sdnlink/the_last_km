@@ -510,6 +510,9 @@ class Supervisor:
                     if not self._elaborate_requirement(records, next_function=True):
                         return self._finish('stopped' if self._stop_requested else 'action_required',
                             self.requirements_review.get('summary', 'Reviewer did not supply a valid next function.'), records, last_worker)
+                    self._process_control()
+                    if self._stop:
+                        break
                 self._check_budget(new_call=True)
                 self._next_round = round_index + 1
                 self._beat(f"round {round_index}: starting worker")

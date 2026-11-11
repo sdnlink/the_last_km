@@ -17,6 +17,18 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 PLAN = _verdict('done')['modules']
 
 class QualityPolicyTests(unittest.TestCase):
+ def test_swift_test_directories_are_protected_case_insensitively(self):
+  from auto_moniter.quality import test_asset
+  names=['StockTianjiApp/Tests/StockTianjiTests/QuoteTests.swift',
+         'StockTianjiApp/PortableTests/QuoteObservationFieldRegression/main.swift']
+  for name in names:
+   path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('assertion')
+   self.assertTrue(test_asset(name))
+  quality=Quality({'protect_tests':True},file_snapshot(self.root))
+  for name in names:
+   (self.root/name).write_text('weakened')
+  self.assertEqual(set(quality.baseline_errors(self.root)),set(names))
+
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name)
  def tearDown(self): self.temp.cleanup()

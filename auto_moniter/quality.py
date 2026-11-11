@@ -80,7 +80,7 @@ def relative_path(value):
 
 def test_asset(relative):
     p = Path(relative)
-    return (any(part in {'tests', 'test', '__tests__', '.github'} for part in p.parts)
+    return (any(part.casefold() in {'tests', 'test', '__tests__', 'portabletests', '.github'} for part in p.parts)
             or p.name in {'conftest.py', 'pytest.ini', 'tox.ini', '.coveragerc', 'pyproject.toml', 'package.json', 'Makefile', '.gitignore'}
             or p.name.startswith('test_') or '.test.' in p.name or '.spec.' in p.name)
 

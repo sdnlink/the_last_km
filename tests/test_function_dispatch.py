@@ -393,6 +393,13 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status, 'action_required')
             self.assertIn('approved executable', report.summary)
 
+    def test_portable_swift_regression_path_is_accepted_as_a_new_test(self):
+        from auto_moniter.function_gate import validate_task
+        with tempfile.TemporaryDirectory() as directory:
+            assignment=task('F1','app.py')
+            assignment['test_files']=['StockTianjiApp/PortableTests/QuoteObservationFieldRegression/main.swift']
+            validate_task(assignment,Path(directory),{'main':{'acceptance':['works']}},[CHECK],BRIEF)
+
     def test_missing_symbol_or_outside_edit_cannot_advance(self):
         for source, reason in [('unrelated = 1\n', 'Implement or change'),
                 ('outside = 2\ndef parse_input():\n    return 42\n', 'Restore edits outside')]:

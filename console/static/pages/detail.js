@@ -36,13 +36,15 @@ function renderRequirements(t){
  const functions=t.function_tasks?.accepted||[];
  const functionHTML=t.function_dispatch?'<h3>开发任务单</h3><p>已通过 '+escape(functions.length)+' 项派单验收</p>'+
   (task?'<p><strong>'+escape(task.id)+'</strong> · '+(task.kind==='integration'?'集成任务 · '+escape(task.integration_scope):
-     escape(task.file)+' · '+escape(task.symbol))+'</p><p>'+escape(task.objective)+'</p>'+
+     (task.kind==='verification'?'纯验收 · ':'')+escape(task.file)+' · '+escape(task.symbol))+'</p><p>'+escape(task.objective)+'</p>'+
+   (task.kind==='verification'?'<p>核对已有实现，不要求新增代码改动；双方只读检查，Watcher 执行固定验收。</p>':'')+
    (task.kind==='integration'?'<p>'+escape(task.atomic_reason)+'</p><ul>'+task.targets.map(target=>'<li>'+
      escape(target.file)+' · '+escape(target.symbol)+'</li>').join('')+'</ul>':'')+
    (task.criterion_ids?'<p>关联验收条目：'+escape(task.criterion_ids.join('、'))+'；待执行检查：'+escape(task.check_ids.join('、'))+'</p>':''):
    '<p>等待 reviewer 下发或任务已结束。</p>')+
   (functions.length?pagedList('accepted-functions',functions,item=>'<li><span>'+escape(item.task.id)+
-    (item.task.kind==='integration'?' · 集成任务（'+escape(item.task.targets.length)+' 个函数）':'')+'</span><span>'+
+    (item.task.kind==='integration'?' · 集成任务（'+escape(item.task.targets.length)+' 个函数）':
+     item.task.kind==='verification'?' · 纯验收':'')+'</span><span>'+
     escape((item.task.criterion_ids||[]).join('、'))+'</span><span>'+
     escape(item.verification?Object.entries(item.verification).map(([id,log])=>id+' 通过（'+log+'）').join('、'):'历史语义审核')+'</span></li>'):''):'';
  const coverage=t.requirement_coverage;

@@ -383,8 +383,6 @@ class Supervisor:
             if not requirement_path.is_file():
                 return RunReport("invalid", 0, "Cannot resume run: requirement.md is missing.", "invalid")
             self._records = loaded[0]
-            self._resume_loaded = True
-            (self.run_dir / 'resume-error.json').unlink(missing_ok=True)
         verdict_schema = function_tasks.schema(VERDICT_SCHEMA, gate=self._function_gate,
             integration=bool(self._integration_scopes())) if self.config.function_dispatch else VERDICT_SCHEMA
         self.schema_path.write_text(json.dumps(verdict_schema, indent=2), encoding="utf-8")
@@ -445,8 +443,12 @@ class Supervisor:
             last_worker = None
             last_review = self._audit_feedback
             stall, previous_gap_key, previous_tree = 0, '', ''
-        (self.run_dir / "report.json").unlink(missing_ok=True)
+        # Git history, quality policy and process recovery belong to startup,
+        # too. Until all have succeeded, preserve the original durable state.
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
+        self._resume_loaded = True
+        (self.run_dir / 'resume-error.json').unlink(missing_ok=True)
+        (self.run_dir / "report.json").unlink(missing_ok=True)
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
             return self._finish('action_required',
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
@@ -533,7 +535,13 @@ class Supervisor:
                 if self._stop:
                     self._next_round = round_index
                     break
-                reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session
+                verification_only = self._verification_only()
+                reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session and not verification_only
+                if verification_only:
+                    try:
+                        self.config.provider.validate_review(self.config.extra_args)
+                    except ProviderError as exc:
+                        return self._finish('action_required', 'Verification-only worker requires a supported read-only provider: '+str(exc), records, last_worker)
                 turn = self._invoke(
                     self.config.provider,
                     worker_prompt,
@@ -542,9 +550,11 @@ class Supervisor:
                     index=round_index,
                     model=self.config.model,
                     extra_args=self.config.extra_args,
-                    read_only=False,
+                    read_only=verification_only,
                 )
-                if turn.session_id:
+                if verification_only:
+                    self.worker_session_id = ''
+                elif turn.session_id:
                     self.worker_session_id = turn.session_id
                 elif not self.worker_session_id:
                     self.log(f"round {round_index}: no worker session id; the next round starts a new session")
@@ -903,6 +913,28 @@ class Supervisor:
                                     + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
             next_functions = None
             if self.config.function_dispatch:
+                if (self._verification_only() and review.task_status == 'changes_required'
+                        and review.next_task is not None):
+                    try:
+                        staged = function_tasks.FunctionTasks(self.function_tasks.export())
+                        if not (review.gaps or review.blockers) or review.next_task.get('kind') == 'verification':
+                            raise ValueError('Failed verification requires concrete findings and an implementation assignment')
+                        previous_id = staged.current['id']
+                        if review.next_task.get('id') == previous_id:
+                            raise ValueError('Verification repair must use a new implementation task ID')
+                        staged.current = None
+                        staged.assign(review.next_task, self.modules.items)
+                        self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+                        self.function_tasks = staged
+                        self._dispatch_directions = list(self._direction_ids['reviewer'])
+                        self._record_assignment(staged.current)
+                        self._event('verification_repair_assigned', verification_task=previous_id,
+                                    task_id=staged.current['id'])
+                    except ValueError as exc:
+                        return self._finish('action_required', 'Verification repair assignment rejected: '+str(exc), records, review)
+                    last_worker = last_review = None
+                    self._write_state(records, 'running', 0, '', review_tree)
+                    continue
                 try:
                     next_functions, scope_gaps = self._review_function(verdict, review, round_index, review_tree)
                 except ValueError as exc:
@@ -959,12 +991,12 @@ class Supervisor:
                 baseline=self._baseline_files,
                 ignore_dir=self.run_dir,
                 git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
-            ) if _accepted(review) else []
+            ) if _accepted(review) and not self._verification_only() else []
             if _accepted(review):
-                problems.extend(f"Worker completion evidence: {problem}" for problem in acceptance_problems(
+                problems.extend(f"Worker completion evidence: {problem}" for problem in ([] if self._verification_only() else acceptance_problems(
                     self.config.cwd, verdict.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
                     git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
-                ))
+                )))
                 problems.extend(self.modules.coverage(verdict, review))
                 pending = self.audit.pending(None if verdict.scope == review.scope == "requirement"
                                              else set(verdict.module_ids) & set(review.module_ids))
@@ -1234,8 +1266,8 @@ class Supervisor:
                     dispatch.assign(assignment, staged.items)
                     if self._function_gate:
                         self._validate_function_plan(dispatch, staged.items, brief)
-                    elif dispatch.current.get('kind') == 'integration':
-                        raise ValueError('Integration requires the verified function gate')
+                    elif dispatch.current.get('kind') in ('integration','verification'):
+                        raise ValueError('Integration and verification assignments require the verified function gate')
                     self.function_tasks = dispatch
                     self.modules = staged
                     self._dispatch_directions = list(self._direction_ids['reviewer'])
@@ -1624,6 +1656,7 @@ class Supervisor:
             verdict.gaps.append('New human instructions arrived after the worker started. Implement and review them before accepting delivery.')
             return False
         before = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        original_review = verdict.to_dict()
         baseline_errors = self.quality.baseline_errors(self.config.cwd) if self.config.quality_policy else []
         if baseline_errors:
             verdict.status = 'continue'
@@ -1750,6 +1783,15 @@ class Supervisor:
             self.modules.invalidate(after)
             self.audit.invalidate(after)
             failures.append("Acceptance commands changed workspace source content. Previous review and evidence are stale; review the new content before accepting.")
+        if (check_results and check_results[-1]['status'] == 'environment_unavailable'
+                and not any(c['status'] not in ('passed', 'environment_unavailable') for c in check_results)
+                and after == before and not self._pending_directions()):
+            record = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == index), None)
+            if record is not None:
+                record.watcher_result['check_retry'] = {
+                    'tree': before, 'review': original_review, 'provider_config': self._provider_config(),
+                    'reviewer_model': self._reviewer_model(), 'task': self.function_tasks.current,
+                    'direction_ids': list(self._direction_ids['reviewer'])}
         self._write_acceptance_snapshot(index, before, final, check_results, failures, bool(self._stop or budget_stop), after != before)
         if budget_stop:
             verdict.status = "continue"
@@ -1812,9 +1854,15 @@ class Supervisor:
     def _integration_scopes(self):
         return self.config.quality_policy.get('integration_scopes', []) if self._function_gate else []
 
+    def _verification_only(self):
+        return bool(self._function_gate and self.function_tasks.current
+                    and self.function_tasks.current.get('kind') == 'verification')
+
     def _record_assignment(self, task):
         fields = ({'task_kind': 'integration', 'targets': task['targets'], 'integration_scope': task['integration_scope']}
                   if task.get('kind') == 'integration' else {'file': task['file'], 'symbol': task['symbol']})
+        if task.get('kind') == 'verification':
+            fields['task_kind'] = 'verification'
         self._event('function_assigned', task_id=task['id'], **fields)
 
     def _function_planning_contract(self):
@@ -1829,6 +1877,9 @@ class Supervisor:
             'integration. Every target must change, and each role must cite every target file. Approved integration scopes: '
             + json.dumps(scopes, ensure_ascii=False)) if scopes else ''
         return ('\nFunction gate: use a supported source language and identify one exact qualified symbol. '
+                'When implementation is already correct and only module/final acceptance remains, use kind=verification, '
+                'delivery_scope=module or requirement, test_files=[] and an existing function; no source edits are required '
+                'or allowed. The worker and reviewer inspect read-only, and the watcher runs the fixed checks. '
                 'Python, JavaScript and HTML inline JavaScript work without optional packages. '
                 'Other registered languages use the optional tree-sitter grammar pack; the monitor checks availability before dispatch. '
                 'Include criterion_ids from the assigned module (<module ID>:<one-based acceptance index>) '
@@ -1955,15 +2006,17 @@ class Supervisor:
                     staged.current = None
                     self._event('function_next_assignment_rejected', task_id=task['id'], reason=str(exc))
             else:
-                if isinstance(review.next_task, dict) and review.next_task.get('kind') == 'integration':
-                    raise ValueError('Integration requires the verified function gate')
+                if isinstance(review.next_task, dict) and review.next_task.get('kind') in ('integration','verification'):
+                    raise ValueError('Integration and verification assignments require the verified function gate')
                 staged.assign(review.next_task, self.modules.items)
         return staged, []
 
     def _function_evidence_problems(self, conclusion, role):
+        verification = self._verification_only()
         problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
-            ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
-        cited = set(evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir))
+            ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '') if not verification else []
+        cited = set(evidence_paths(self.config.cwd, conclusion.evidence,
+            baseline=None if verification else self._baseline_files, ignore_dir=self.run_dir))
         missing = [file for file, _ in function_tasks.targets(self.function_tasks.current)
                    if (self.config.cwd / file).resolve() not in cited]
         errors = [role + ': ' + problem for problem in problems]
@@ -2508,7 +2561,8 @@ class Supervisor:
         if self.config.function_dispatch:
             task = self.function_tasks.current
             return '\n'.join([
-                'Implement one reviewer-owned assignment in the working directory.',
+                'Verify one reviewer-owned assignment without editing the workspace.' if self._verification_only()
+                else 'Implement one reviewer-owned assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
                 function_tasks.verdict_contract('worker', task),
                 'Latest review of this assignment:',
@@ -2656,8 +2710,9 @@ class Supervisor:
                 *([self._function_planning_contract()] if self._function_gate else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",
-                "The worker alone implements fixes and runs builds or tests that write files. "
-                "Inspect code and existing evidence; return missing checks and fixes to the worker. "
+                ("This is verification-only work: neither model may edit files. Return a bounded implementation assignment for concrete defects. "
+                 if self._verification_only() else "The worker alone implements fixes and runs builds or tests that write files. ")+
+                "Inspect code and existing evidence; the watcher runs approved acceptance checks. "
                 "Do not run commands that generate files or alter the workspace.",
                 "Inspect the working tree yourself. Do not trust the worker's summary.",
                 "Recheck previously reported audit gaps and failed monitor checks against the current code and evidence. "
@@ -2763,10 +2818,11 @@ class Supervisor:
         if not worker or worker.failure or worker.interruption:
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
-        if review and review.watcher_result.get('function_gate') == 'repair':
+        if review and review.watcher_result.get('function_gate') == 'repair' and not self._check_retry_review(review):
             return None
         rejected_audit = bool(review and (review.watcher_result.get('status') == 'rejected'
-                                         or review.failure or review.interruption or review.verdict.parse_error))
+                                         or review.failure or review.interruption or review.verdict.parse_error
+                                         or self._check_retry_review(review)))
         function_ready = bool(self.config.function_dispatch and self.function_tasks.current
                               and self.function_tasks.current['id'] == worker.verdict.task_id
                               and worker.verdict.task_status == 'done')
@@ -2786,6 +2842,24 @@ class Supervisor:
             return None
         return worker
 
+    def _check_retry_review(self, record):
+        retry = record.watcher_result.get('check_retry')
+        if (not isinstance(retry, dict) or self._pending_directions()
+                or retry.get('tree') != record.tree
+                or retry.get('tree') != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                or retry.get('provider_config') != self._provider_config()
+                or retry.get('reviewer_model') != self._reviewer_model()
+                or retry.get('task') != self.function_tasks.current
+                or retry.get('direction_ids') != [m['id'] for m in self.directions.messages()]):
+            return None
+        value = retry.get('review')
+        if not isinstance(value, dict):
+            return None
+        review = parse_verdict(json.dumps(value), function_gate=self._function_gate)
+        if review.parse_error or not (_accepted(review) or review.task_status == 'accepted'):
+            return None
+        return review
+
     def _saved_approval(self, index, tree):
         path = self.run_dir / 'approval-ready.json'
         if (not getattr(self.git_history, 'business_commits', False) or not path.is_file()
@@ -2802,6 +2876,12 @@ class Supervisor:
         """One bounded repair belongs to the reviewer, never to the worker."""
         self._review_audit_rejection = None
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        previous = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == kwargs['index']), None)
+        retry = self._check_retry_review(previous) if previous else None
+        if retry:
+            self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
+            return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
+                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         ready = self._saved_approval(kwargs['index'], tree)
         if (ready and ready.get('provider_config') == self._provider_config()
                 and ready.get('reviewer_model') == self._reviewer_model()):
@@ -2962,7 +3042,8 @@ class Supervisor:
                 prompt += 'When blocked, continue independent modules before repeating the same dependency. '
             prompt += 'Never modify existing protected test assertions.\n'
         if role == 'worker' and self.config.workflow == 'review-first':
-            prompt += ('\nWorker time management: implement one reviewer-approved item or bounded repair at a time. '
+            prompt += (('\nVerification time management: inspect the current assignment without edits; report remaining behavior gaps. '
+                        if self._verification_only() else '\nWorker time management: implement one reviewer-approved item or bounded repair at a time. ')+
                        'Complete a coherent change with focused verification and return the required JSON conclusion. '
                        'Do not bundle all remaining items into one long coding turn or repeat equivalent full suites. '
                        'The review interval schedules an audit after you return; it does not interrupt active work. '
@@ -3025,7 +3106,7 @@ class Supervisor:
                     prompt_path, self.config.cwd, self.schema_path,
                     model=model, extra_args=extra_args, read_only=read_only,
                 )
-            if read_only and self.quality.config.get('review_tools') == 'files_only':
+            if read_only and role == 'reviewer' and self.quality.config.get('review_tools') == 'files_only':
                 prepared.argv += ['--tools', 'Read,Glob,Grep', '--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', '{}']
                 # Keep only the model's own authentication; exclude common
                 # deployment/database credentials inherited by the service.

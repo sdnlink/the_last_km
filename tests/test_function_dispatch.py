@@ -26,6 +26,11 @@ def task(ident, file, *, depends=(), scope='function'):
 CHECK = "python3 -c 'from pathlib import Path; assert any(\"def parse_input\" in p.read_text() for p in Path(\".\").glob(\"*.py\"))'"
 
 
+def verification_task(ident='VERIFY', file='app.py', *, depends=()):
+    return {**task(ident,file,scope='requirement',depends=depends),
+            'kind':'verification','criterion_ids':['main:1','req:1:1','req:1:2']}
+
+
 class FunctionWorker(ScriptedProvider):
     def _command(self, session_id, prompt_file, read_only):
         script = self.scripts[0]
@@ -58,9 +63,10 @@ def plan(first):
 class DispatchTests(unittest.TestCase):
     def run_monitor(self, root, worker, reviewer, **kwargs):
         kwargs.setdefault('checks', [CHECK])
+        kwargs.setdefault('review_every', 0)
         return Supervisor(RunConfig('ORIGINAL BACKLOG MUST NOT REACH WORKER',root,worker,reviewer=reviewer,
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
-            review_every=0,retry_delay_s=0,**kwargs),log=lambda _:None).run()
+            retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
     def test_chinese_criterion_citation_passes_handoff_without_extra_model_calls(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -132,6 +138,162 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(len(worker.calls),0)
             self.assertEqual(len(reviewer.calls),1)
             self.assertTrue((root/'run/001-check-01.log').exists())
+
+    def test_environment_repair_retries_checks_without_any_agent_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory);root=parent/'project';root.mkdir();dependency=parent/'dependency-ready'
+            check="test -f '"+str(dependency)+"' || exit 127"
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            next_task=task('F2','next.py',depends=['F1'],scope='requirement')
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),
+                result('F1','accepted',next_task=next_task)])
+            report=self.run_monitor(root,worker,reviewer,checks=[check],max_rounds=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            state=json.loads((root/'run/state.json').read_text())
+            original_calls=state['usage']['agent_calls']
+            self.assertIn('check_retry',state['rounds'][-1]['watcher_result'])
+            dependency.touch()
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=1,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'max_rounds',report.summary)
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['current']['id'],'F2')
+            self.assertEqual(state['function_tasks']['accepted'][0]['task']['id'],'F1')
+            self.assertEqual(state['usage']['agent_calls'],original_calls)
+            self.assertFalse(worker.calls or reviewer.calls)
+
+    def test_changed_source_prevents_environment_review_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted')])
+            report=self.run_monitor(root,worker,reviewer,checks=['exit 127'],max_rounds=1)
+            self.assertEqual(report.status,'action_required')
+            (root/'app.py').write_text('def parse_input(): return 0\n')
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[result('F1','accepted')])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertEqual(len(worker.calls),1)
+            self.assertEqual(len(reviewer.calls),1)
+
+    def test_verification_closes_existing_implementation_without_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            source='def parse_input():\n    return 42\n'
+            (root/'app.py').write_text(source)
+            worker=FunctionWorker('worker',[result('VERIFY','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[plan(verification_task()),result('VERIFY','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=1,
+                checks=["python3 -c 'from app import parse_input; assert parse_input() == 42'"])
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertTrue(worker.calls[0]['read_only'])
+            self.assertTrue(all(c['read_only'] for c in reviewer.calls))
+            self.assertEqual((root/'app.py').read_text(),source)
+            accepted=json.loads((root/'run/state.json').read_text())['function_tasks']['accepted']
+            self.assertEqual(accepted[0]['task']['kind'],'verification')
+            self.assertEqual(accepted[0]['verification'],{'check:1':'001-check-01.log'})
+
+    def test_verification_after_function_acceptance_does_not_require_new_diff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'},
+                result('VERIFY','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),
+                result('F1','accepted',next_task=verification_task(depends=['F1'])),
+                result('VERIFY','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual([c['read_only'] for c in worker.calls],[False,True])
+            self.assertIn('Verification-only',worker.calls[-1]['prompt'])
+
+    def test_verification_modification_or_failed_assertion_never_delivers(self):
+        for change,check in [(True,CHECK),(False,'false')]:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'app.py').write_text('def parse_input(): return 0\n')
+                worker=FunctionWorker('worker',[{**result('VERIFY','done',status='done'),
+                    **({'touch':'app.py'} if change else {})}])
+                reviewer=ScriptedProvider('reviewer',[plan(verification_task()),result('VERIFY','accepted',status='done')])
+                report=self.run_monitor(root,worker,reviewer,max_rounds=1,checks=[check])
+                self.assertNotEqual(report.status,'done')
+                state=json.loads((root/'run/state.json').read_text())
+                self.assertEqual(state['function_tasks']['accepted'],[])
+
+    def test_failed_verification_dispatches_a_bounded_implementation_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'app.py').write_text('def parse_input(): return 0\n')
+            implementation=task('REPAIR','app.py',scope='requirement')
+            implementation['criterion_ids']=['main:1','req:1:1','req:1:2']
+            worker=FunctionWorker('worker',[result('VERIFY','incomplete',gaps=['Return value is incorrect']),
+                {**result('REPAIR','done',status='done'),'touch':'app.py'}])
+            rejected=result('VERIFY','changes_required',gaps=['main/Return value must be 42'],next_task=implementation)
+            accepted=result('REPAIR','accepted',status='done')
+            accepted['verdict']['issue_resolutions']=[{'id':'AUD-1','summary':'Verified return value is 42','evidence':['app.py']}]
+            reviewer=ScriptedProvider('reviewer',[plan(verification_task()),rejected,accepted])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2,review_every=1)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual([call['read_only'] for call in worker.calls],[True,False])
+            ledger=json.loads((root/'run/state.json').read_text())['function_tasks']
+            self.assertEqual([item['task']['id'] for item in ledger['accepted']],['REPAIR'])
+
+    def test_final_verification_environment_retry_never_calls_models_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory);root=parent/'project';root.mkdir();dependency=parent/'ready'
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            worker=FunctionWorker('worker',[result('VERIFY','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[plan(verification_task()),result('VERIFY','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,checks=["test -f '"+str(dependency)+"' || exit 127"])
+            self.assertEqual(report.status,'action_required',report.summary)
+            before=json.loads((root/'run/state.json').read_text())
+            dependency.touch()
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertFalse(worker.calls or reviewer.calls)
+            after=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(after['usage']['agent_calls'],before['usage']['agent_calls'])
+
+    def test_new_human_direction_prevents_reusing_an_environment_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted')])
+            self.run_monitor(root,worker,reviewer,checks=['exit 127'],max_rounds=1)
+            state=json.loads((root/'run/state.json').read_text())
+            from auto_moniter.supervisor import _record_from_state
+            monitor=Supervisor(RunConfig('',root,FunctionWorker('worker',[]),reviewer=ScriptedProvider('reviewer',[]),
+                workflow='review-first',run_dir=root/'run',resume=True),log=lambda _:None)
+            monitor._load_resume()
+            record=_record_from_state(state['rounds'][-1])
+            self.assertIsNotNone(monitor._check_retry_review(record))
+            with patch.object(monitor,'_pending_directions',return_value=True):
+                self.assertIsNone(monitor._check_retry_review(record))
+
+    def test_verification_of_committed_code_does_not_create_a_fake_code_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            subprocess.run(['git','add','app.py'],cwd=root,check=True)
+            subprocess.run(['git','-c','user.name=Fixture','-c','user.email=fixture@local','commit','-qm','initial'],cwd=root,check=True)
+            head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
+            class Reviewer(ScriptedProvider):
+                def _command(self, session, prompt_file, read_only):
+                    match=re.search(r'Worker checkpoint: ([0-9a-f]{40,64})',prompt_file.read_text())
+                    if match:self.scripts[0]['verdict']['evidence'].append(match[1])
+                    return super()._command(session,prompt_file,read_only)
+            worker=FunctionWorker('worker',[result('VERIFY','done',status='done')])
+            reviewer=Reviewer('reviewer',[plan(verification_task()),result('VERIFY','accepted',status='done')])
+            report=Supervisor(RunConfig('Verify existing implementation',root,worker,reviewer=reviewer,
+                workflow='review-first',function_dispatch=True,git_history='required',run_dir=root/'run',
+                checks=[CHECK],retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),head)
+            publication=report.records[-1].git_checkpoint['business_commit']
+            self.assertFalse(publication['created'])
 
     def test_review_repair_stays_on_first_function_then_dispatches_next(self):
         with tempfile.TemporaryDirectory() as d:

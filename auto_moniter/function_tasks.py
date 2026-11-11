@@ -13,6 +13,7 @@ NEXT_SCHEMA={'anyOf':[{'type':'null'},TASK_SCHEMA]}
 GATE_FIELDS = {'criterion_ids', 'check_ids', 'test_files'}
 INTEGRATION_FIELDS = {'kind', 'integration_scope', 'targets', 'atomic_reason'}
 INTEGRATION_TASK_FIELDS = (FIELDS - {'file', 'symbol'}) | GATE_FIELDS | INTEGRATION_FIELDS
+VERIFICATION_TASK_FIELDS = FIELDS | GATE_FIELDS | {'kind'}
 MAX_INTEGRATION_TARGETS = 4
 
 
@@ -24,7 +25,7 @@ def targets(task):
 
 def identity(task):
     return (task['id'], task['module_id'], task['delivery_scope'], task['depends_on'],
-            task.get('integration_scope'), sorted(targets(task)),
+            task.get('kind'), task.get('integration_scope'), sorted(targets(task)),
             sorted(task['test_files']) if task.get('kind') == 'integration' else None)
 
 
@@ -57,7 +58,7 @@ def identifier(value):
 
 
 def validate(value, modules=None):
-    if not isinstance(value,dict) or set(value) not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS):
+    if not isinstance(value,dict) or set(value) not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
     for key in ['id','module_id']:
         if not identifier(value[key]):
@@ -73,6 +74,10 @@ def validate(value, modules=None):
         validate_targets(value['targets'])
     else:
         validate_target(value['file'], value['symbol'])
+        if set(value) == VERIFICATION_TASK_FIELDS and (
+                value['kind'] != 'verification' or value['delivery_scope'] not in ('module', 'requirement')
+                or value['test_files']):
+            raise ValueError('Verification-only tasks must close a module or requirement without test file writes')
     for key in ['boundaries','verification','depends_on']:
         v=value[key]
         if not isinstance(v,list) or len(v)>20 or any(not isinstance(s,str) or not s.strip() or len(s)>1500 for s in v):
@@ -165,6 +170,11 @@ def schema(base, *, planning=False, gate=False, integration=False):
         task = next_schema['anyOf'][1]
         task['properties'].update({k: {'type': 'array', 'items': {'type': 'string'}} for k in GATE_FIELDS})
         task['required'].extend(sorted(GATE_FIELDS))
+        verification = copy.deepcopy(task)
+        verification['properties']['kind'] = {'type': 'string', 'enum': ['verification']}
+        verification['properties']['delivery_scope']['enum'] = ['module', 'requirement']
+        verification['required'].append('kind')
+        next_schema['anyOf'].append(verification)
         if integration:
             grouped = copy.deepcopy(task)
             for key in ('file', 'symbol'):
@@ -198,17 +208,22 @@ def verdict_contract(role, task):
     scope = 'the dispatched integration and all of its listed functions' if group else 'the dispatched function'
     if role=='worker':
         return (
-            f'Only implement {scope} and its focused verification. Do not start other work. '
-            'Return task_id='+task['id']+' and task_status=done only when the whole assignment is implemented and checked; '
+            ('Verification-only: inspect existing code and evidence, do not edit source or tests or run commands that write files. '
+             'Report concrete defects as incomplete; the watcher executes approved checks. '
+             if task.get('kind') == 'verification' else f'Only implement {scope} and its focused verification. Do not start other work. ')+
+            'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
             'otherwise task_status=incomplete. Return next_task=null and modules=[]. '
             'For delivery_scope=function return status=continue even when task_status=done. '
             'For module or requirement delivery, return status=done with scope matching delivery_scope and '
             'module_ids=['+task['module_id']+'] only when that delivery scope is fully verified. '
-            'Give evidence for every changed target file and behavioral check results; gaps and next_actions are only for this assignment.')
+            'Give evidence for every target file and behavioral check results; gaps and next_actions are only for this assignment.')
     return (
         f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Accept only after worker task_status=done and current evidence agrees. '
         'For changes_required: status=continue, next_task=null; give only this assignment\'s actionable gaps and minimal repair. '
+        + ('For a concrete defect found in verification-only work, you may instead give next_task as one bounded '
+           'implementation task with a new ID, accurate targets and approved checks; do not mark this verification accepted. '
+           if task.get('kind') == 'verification' else '') +
         'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
         'and propose exactly one next_task that can be implemented and verified on its own. '
         'For module or requirement delivery: status=done with matching scope and module_ids containing only the '

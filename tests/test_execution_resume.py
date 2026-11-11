@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import shlex
+import subprocess
 import sys
 import tempfile
 import threading
@@ -140,6 +141,49 @@ class ExecutionResumeTests(unittest.TestCase):
             resumed.request_stop()
             self.assertEqual(resumed.run().status,'stopped')
             self.assertFalse((run/'resume-error.json').exists())
+
+    def test_git_initialization_failure_preserves_loaded_checkpoint(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            (root/'app.py').write_text('def run(): return 1\n')
+            subprocess.run(['git','add','app.py'],cwd=root,check=True)
+            subprocess.run(['git','-c','user.name=Fixture','-c','user.email=fixture@local',
+                            'commit','-qm','initial'],cwd=root,check=True)
+            def monitor(resume):
+                return Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),
+                    reviewer=ScriptedProvider('reviewer',[]),workflow='review-first',resume=resume,
+                    git_history='required',run_dir=root/'run'),log=lambda _:None)
+            original=monitor(False)
+            original.request_stop()
+            self.assertEqual(original.run().status,'stopped')
+            run=root/'run'
+            names=('state.json','report.json','handoff.json','baseline.json.gz','git-history.json')
+            before={name:(run/name).read_bytes() for name in names}
+            with patch('auto_moniter.supervisor.ApprovedHistory.open',side_effect=OSError('Temporary Git outage')):
+                report=monitor(True).run()
+            self.assertIn('Temporary Git outage',report.summary)
+            self.assertEqual({name:(run/name).read_bytes() for name in names},before)
+            self.assertTrue(json.loads((run/'state.json').read_text())['git_history']['enabled'])
+            fixed=monitor(True)
+            fixed.request_stop()
+            self.assertEqual(fixed.run().status,'stopped')
+            self.assertFalse((run/'resume-error.json').exists())
+
+    def test_process_recovery_failure_preserves_loaded_checkpoint(self):
+        from unittest.mock import patch
+        from auto_moniter.supervisor import RecoveryError
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            run=self.checkpoint(root)
+            names=('state.json','report.json','handoff.json','baseline.json.gz')
+            before={name:(run/name).read_bytes() for name in names}
+            monitor=Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),
+                no_review=True,run_dir=run,resume=True),log=lambda _:None)
+            with patch.object(monitor,'_recover_interrupted_run',side_effect=RecoveryError('Cannot reap child')):
+                self.assertEqual(monitor.run().status,'recovery_failed')
+            self.assertEqual({name:(run/name).read_bytes() for name in names},before)
 
     def test_cli_resume_distinguishes_omission_from_explicit_default(self):
         with tempfile.TemporaryDirectory() as tmp:

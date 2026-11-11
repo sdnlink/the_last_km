@@ -227,6 +227,8 @@ def validate_task(task, root, modules, checks, brief, *, approvals=()):
     if not GATE_FIELDS <= task.keys():
         raise ValueError('Function assignment requires criterion_ids, check_ids and test_files')
     paths = {_target_path(root, file) for file, _ in targets(task)}
+    if task.get('kind') == 'verification' and any(not path.is_file() for path in paths):
+        raise ValueError('Verification-only targets must already exist')
     if task.get('kind') == 'integration':
         verify_integration_approval(task, approvals)
     module_criteria = criteria(modules, task['module_id'])
@@ -258,6 +260,8 @@ def baseline(path, root, task, snapshot, *, missing_ok):
             raise ValueError('Function tasks may add focused tests; preserve existing test assets: ' + name)
     saved = {'id': task['id'], 'files': snapshot,
              'targets': {file: target_state(_path(root, file), symbol) for file, symbol in targets(task)}}
+    if task.get('kind') == 'verification' and any(t['body'] is None for t in saved['targets'].values()):
+        raise ValueError('Verification-only assignment must name an existing, unambiguous function')
     tmp = path.with_suffix('.tmp')
     with gzip.open(tmp, 'wt', encoding='utf-8') as handle:
         json.dump(saved, handle, separators=(',', ':'))
@@ -272,6 +276,14 @@ def scope_problems(root, task, saved, snapshot):
     target_paths = {file: _path(root, file) for file, _ in targets(task)}
     allowed = {str(path) for path in target_paths.values()} | {str(_path(root, name)) for name in task['test_files']}
     changed = {p for p in before.keys() | snapshot.keys() if before.get(p) != snapshot.get(p)}
+    if task.get('kind') == 'verification':
+        if changed:
+            return ['Verification-only task changed workspace files; restore the original candidate: '
+                    + ', '.join(sorted(str(Path(p).relative_to(root)) for p in changed)[:20])], None
+        hashes = {file: target_state(target_paths[file], symbol)['body'] for file, symbol in targets(task)}
+        if any(h is None for h in hashes.values()):
+            return ['Verification-only target no longer exists'], None
+        return [], hashes
     extra = sorted(str(Path(p).relative_to(root)) for p in changed - allowed)
     if extra:
         return ['Restore changes outside this assignment: ' + ', '.join(extra[:20])], None

@@ -181,7 +181,8 @@ class ActivityReader:
             elif name in {'function_assigned', 'function_accepted'}:
                 text += '：' + str(event.get('task_id') or '')
             elif name == 'acceptance_checks_added':
-                text += '：' + '\n'.join(event.get('added') or [])
+                added = event.get('added')
+                text += '：' + ('\n'.join(added) if isinstance(added, list) else str(added or ''))
             elif name == 'maintenance_started':
                 text += '：' + str(event.get('reason') or '')
             elif name == 'git_checkpoint':

@@ -14,9 +14,13 @@ class LiveActivityTests(unittest.TestCase):
             (root/'events.jsonl').write_text(json.dumps({
                 'at':'2026-11-11T04:00:00Z','event':'function_next_assignment_rejected',
                 'task_id':'F1','rejected_task_id':'F2','reason':'Missing native behavioral check'})+'\n')
+            with (root/'events.jsonl').open('a') as stream:
+                stream.write(json.dumps({'at':'2026-11-11T04:01:00Z','event':'acceptance_checks_added',
+                                         'added':str(['python verify.py'])})+'\n')
             result=ActivityReader().snapshot(root,{}, {},'stopped','command')
             self.assertTrue(any('F2' in e['text'] and 'Missing native behavioral check' in e['text']
                                 for e in result['events']))
+            self.assertTrue(any('python verify.py' in e['text'] for e in result['events']))
 
     def test_stream_decodes_split_unicode_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

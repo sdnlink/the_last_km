@@ -49,6 +49,16 @@ class FailureDiagnosticTests(unittest.TestCase):
         for status in ('running','starting','paused','queued','done'):
             self.assertIsNone(self.diagnostic(status,'old authentication failure'))
 
+    def test_program_exception_and_checkpoint_restore_error_are_actionable(self):
+        result=self.diagnostic(summary="NameError: name 're' is not defined")
+        self.assertEqual(result['code'],'supervisor_exception')
+        self.assertIn('NameError',result['reason'])
+        self.assertIn('不能修复',''.join(result['actions']))
+        result=self.diagnostic('recovery_failed','Cannot resume checkpoint: NameError: re',resume_error=True)
+        self.assertEqual(result['code'],'checkpoint_restore_failed')
+        self.assertEqual(result['source'],'resume-error.json')
+        self.assertIn('追加预算无法解决',''.join(result['actions']))
+
     def test_console_fallback_only_recognizes_monitor_result_and_redacts(self):
         log=self.run/'console.log'
         log.write_text('worker says done\n'+json.dumps({'status':'done','summary':'not a monitor result'})+'\n')

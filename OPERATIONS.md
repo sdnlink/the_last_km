@@ -16,6 +16,8 @@ python3 -m venv .venv
 
 其他语言的函数范围校验使用可选依赖：在 monitor 的 Python 环境安装 `pip install 'auto-moniter[languages]'`（源码安装用 `pip install '.[languages]'`）。`doctor` 的 `function_languages` 显示已注册语言的可用状态；Reviewer 同样会收到解析器目录。Watcher 按扩展名选择本地语法规则，不执行目标代码、不在任务运行时安装或下载解析器。函数语法错误、重名或缺少解析器会明确拒绝，不会降级为整文件修改。离线部署可事先下载带依赖的 wheel，再使用 `pip install --no-index --find-links=/path/to/wheels 'auto-moniter[languages]'`。
 
+恢复时若出现 `Cannot resume checkpoint`，检查 `resume-error.json` 和控制台的具体异常。检查点未完整载入时不会覆盖原 `state.json`、报告、交接或文件哈希基线；修复后继续使用原检查点。追加运行时间或模型调用额度只能解决预算不足，不能修复程序异常。恢复窗口中的“调用轮次”指 worker、reviewer 及需求完善的模型调度次数，不是 worker 开发轮数。
+
 `selftest` 是离线本地 fixture，不使用模型、不检查登录。实际后端的 CLI 版本、认证和模型输出质量必须在目标环境验证。不要把离线测试通过理解为所有厂商后端都完成实机认证。
 
 ## 日常运行

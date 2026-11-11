@@ -64,6 +64,20 @@ def read_run_snapshot(run_dir: Path) -> dict:
     if report and report.get("status") == "done" and (run_dir / "process.json").exists():
         warning = "outstanding_process_record"
     finished = bool(report and not warning and held is False and guardian is False)
+    resume_error = read('resume-error.json')
+    if (held is False and guardian is False and resume_error
+            and resume_error.get('status') == 'recovery_failed'
+            and isinstance(resume_error.get('summary'), str)):
+        try:
+            newer = (run_dir / 'resume-error.json').stat().st_mtime_ns >= max(
+                (run_dir / name).stat().st_mtime_ns for name in ('state.json', 'report.json')
+                if (run_dir / name).is_file())
+        except (OSError, ValueError):
+            newer = False
+        if newer:
+            return {'state': {**state, 'status': 'recovery_failed', 'summary': resume_error['summary'],
+                              'resume_error': True}, 'finished': True, 'lock_held': held,
+                    'guardian_lock_held': guardian, 'report_warning': ''}
     return {"state": report if finished else state, "finished": finished,
             "lock_held": held, "guardian_lock_held": guardian, "report_warning": warning}
 

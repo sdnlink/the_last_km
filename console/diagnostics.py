@@ -55,7 +55,16 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     text=raw.lower()
     role=last.get('role','watcher');phase='监督器结束任务';actions=[]
     code=status;title='任务未完成';reason='任务已经停止，尚未通过完整交付验收。'
-    if 'business head changed' in text:
+    if state.get('resume_error') or 'cannot resume checkpoint' in text:
+        code='checkpoint_restore_failed';title='检查点恢复失败';role='watcher';phase='加载原运行记录'
+        reason=raw
+        source='resume-error.json' if state.get('resume_error') else source
+        actions=['这是恢复程序或检查点错误，追加预算无法解决；先修复原始错误，再从保留的检查点恢复。']
+    elif re.search(r'\b(?:NameError|ImportError|AttributeError|TypeError):',raw):
+        code='supervisor_exception';title='监督器程序异常';role='watcher';phase='监督器执行'
+        reason=raw
+        actions=['先修复原始程序异常，再恢复原任务；增加运行时间或调用额度不能修复程序错误。']
+    elif 'business head changed' in text:
         code='business_head_changed';role='watcher';phase='业务版本一致性检查'
         title='业务分支在任务外发生变化'
         reason='当前分支与任务绑定的审核基线不一致，watcher 为避免审核和提交错误版本而停止。worker 的完成声明尚未经过后续独立审核。'

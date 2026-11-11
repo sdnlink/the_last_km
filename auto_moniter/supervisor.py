@@ -6,6 +6,7 @@ import codecs
 import gzip
 import json
 import os
+import re
 import signal
 import selectors
 import math
@@ -220,6 +221,7 @@ class Supervisor:
         self._next_round = 1
         self._drop_worker_session = False
         self._resume_refused = ""
+        self._resume_loaded = not config.resume
         self._stop_requested = False
         self._active_reviewer_id = ""
         self._records: list[RoundRecord] = []
@@ -325,6 +327,8 @@ class Supervisor:
                             self.config.resume = True
                             self._started = time.monotonic()
                 except Exception as exc:
+                    if self.config.resume and not self._resume_loaded:
+                        return self._resume_failure(exc)
                     summary = f"{type(exc).__name__}: {exc}"
                     if self._stop_reason:
                         summary = f"Stopped: {self._stop_reason}. {summary}"
@@ -369,14 +373,18 @@ class Supervisor:
             return RunReport("invalid", 0, "Run directory already contains a run. Use --resume or a new --run-dir.", "invalid")
         loaded = None
         if self.config.resume:
+            self._resume_loaded = False
             try:
                 loaded = self._load_resume()
-            except (OSError, ValueError, TypeError, AttributeError) as exc:
-                return RunReport("invalid", 0, f"Cannot resume run: {exc}", "invalid")
+            except Exception as exc:
+                return self._resume_failure(exc)
             if self._resume_refused:
                 return RunReport(self._resume_refused, 0, f"Run already finished with status {self._resume_refused}. Start a new --run-dir to run again.", "invalid")
             if not requirement_path.is_file():
                 return RunReport("invalid", 0, "Cannot resume run: requirement.md is missing.", "invalid")
+            self._records = loaded[0]
+            self._resume_loaded = True
+            (self.run_dir / 'resume-error.json').unlink(missing_ok=True)
         verdict_schema = function_tasks.schema(VERDICT_SCHEMA, gate=self._function_gate,
             integration=bool(self._integration_scopes())) if self.config.function_dispatch else VERDICT_SCHEMA
         self.schema_path.write_text(json.dumps(verdict_schema, indent=2), encoding="utf-8")
@@ -2252,6 +2260,26 @@ class Supervisor:
         if count == sum(record.role == role for record in records):
             count += self._pruned_failures.get(role, 0)
         return count
+
+    def _resume_failure(self, exc):
+        # Loading mutates fields in stages. Never finalize a partially restored
+        # object over the original checkpoint, report, handoff or baseline.
+        summary = redact(f"Cannot resume checkpoint: {type(exc).__name__}: {exc}")
+        self.log(summary)
+        status = 'invalid' if isinstance(exc, (OSError, ValueError, TypeError, AttributeError)) else 'recovery_failed'
+        try:
+            original = json.loads((self.run_dir / 'state.json').read_text())
+        except (OSError, ValueError):
+            original = None
+        if not isinstance(original, dict):
+            return RunReport(status, 0, summary, status)
+        try:
+            write_json(self.run_dir / 'resume-error.json', {
+                'status': 'recovery_failed', 'summary': summary,
+                'at': datetime.now(timezone.utc).isoformat()}, durable=True)
+        except OSError as error:
+            self.log('Could not save recovery diagnostic: ' + str(error))
+        return RunReport(status, 0, summary, status)
 
     def _load_resume(
         self,

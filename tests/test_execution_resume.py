@@ -99,6 +99,48 @@ class ExecutionResumeTests(unittest.TestCase):
                 self.assertEqual(resumed.run().status, "invalid")
                 self.assertEqual((run / "state.json").read_bytes(), before)
 
+    def test_nonempty_function_audit_references_survive_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = self.checkpoint(root)
+            state = json.loads((run/'state.json').read_text())
+            state['function_issue_ids'] = ['AUD-1']
+            from auto_moniter.audit import AuditLedger
+            audit = AuditLedger()
+            audit.record(['A focused regression remains'], 1)
+            state['audit_issues'] = audit.export()
+            (run/'state.json').write_text(json.dumps(state))
+            resumed = Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),
+                no_review=True,run_dir=run,resume=True),log=lambda _:None)
+            resumed.request_stop()
+            self.assertEqual(resumed.run().status,'stopped')
+            restored = json.loads((run/'state.json').read_text())
+            self.assertEqual(restored['function_issue_ids'],['AUD-1'])
+            self.assertEqual(restored['audit_issues'],state['audit_issues'])
+
+    def test_unexpected_load_error_never_overwrites_any_recovery_artifact(self):
+        from unittest.mock import patch
+        from auto_moniter.health import read_run_snapshot
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = self.checkpoint(root)
+            names = ('state.json','report.json','handoff.json','baseline.json.gz')
+            before = {name:(run/name).read_bytes() for name in names}
+            resumed = Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),
+                no_review=True,run_dir=run,resume=True),log=lambda _:None)
+            with patch.object(resumed,'_load_resume',side_effect=NameError("name 're' is not defined")):
+                self.assertEqual(resumed.run().status,'recovery_failed')
+            self.assertEqual({name:(run/name).read_bytes() for name in names},before)
+            snapshot = read_run_snapshot(run)
+            self.assertEqual(snapshot['state']['status'],'recovery_failed')
+            self.assertTrue(snapshot['state']['resume_error'])
+            self.assertIn('NameError',snapshot['state']['summary'])
+            resumed = Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),
+                no_review=True,run_dir=run,resume=True),log=lambda _:None)
+            resumed.request_stop()
+            self.assertEqual(resumed.run().status,'stopped')
+            self.assertFalse((run/'resume-error.json').exists())
+
     def test_cli_resume_distinguishes_omission_from_explicit_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

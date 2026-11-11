@@ -17,6 +17,29 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 PLAN = _verdict('done')['modules']
 
 class QualityPolicyTests(unittest.TestCase):
+ def test_changed_ignore_rule_does_not_misreport_intact_tests_as_modified(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);subprocess.run(['git','init','-q',str(root)],check=True)
+   (root/'.gitignore').write_text('')
+   tests=root/'preview/tests';tests.mkdir(parents=True)
+   test=tests/'quote.test.cjs';test.write_text('assert(realBehavior())\n')
+   quality=Quality({'protect_tests':True},file_snapshot(root))
+   (root/'.gitignore').write_text('preview\n')
+   self.assertEqual(quality.baseline_errors(root),['.gitignore'])
+   test.write_text('assert(true)\n')
+   self.assertEqual(set(quality.baseline_errors(root)),{'.gitignore','preview/tests/quote.test.cjs'})
+   test.unlink()
+   self.assertIn('preview/tests/quote.test.cjs',quality.baseline_errors(root))
+
+ def test_hidden_protected_file_cannot_be_read_through_replaced_parent_symlink(self):
+  with tempfile.TemporaryDirectory() as directory:
+   parent=Path(directory);root=parent/'project';root.mkdir();tests=root/'tests';tests.mkdir()
+   (tests/'test_api.py').write_text('assert True')
+   quality=Quality({'protect_tests':True},file_snapshot(root))
+   tests.rename(parent/'original');tests.symlink_to(parent/'original',target_is_directory=True)
+   self.assertEqual(quality.baseline_errors(root,current={}),['tests/test_api.py'])
+
  def test_swift_test_directories_are_protected_case_insensitively(self):
   from auto_moniter.quality import test_asset
   names=['StockTianjiApp/Tests/StockTianjiTests/QuoteTests.swift',

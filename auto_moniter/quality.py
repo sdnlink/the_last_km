@@ -125,8 +125,23 @@ class Quality:
 
     def baseline_errors(self, project, current=None):
         current = current if current is not None else file_snapshot(project)
-        return [str(Path(name).relative_to(project)) for name, token in self.protected(project).items()
-                if current.get(name) != token]
+        from auto_moniter.workspace import _file_token
+        errors = []
+        for name, token in self.protected(project).items():
+            observed = current.get(name)
+            if observed is None:
+                # A new ignore rule can hide an intact protected file from
+                # workspace discovery. Verify its actual bytes and mode before
+                # calling it changed; ignore configuration itself stays protected.
+                path = Path(name)
+                try:
+                    if not any(parent.is_symlink() for parent in path.parents):
+                        observed = _file_token(path)
+                except OSError:
+                    pass
+            if observed != token:
+                errors.append(str(Path(name).relative_to(project)))
+        return errors
 
     def check_result(self, command, success):
         old = self.state['checks'].get(command)

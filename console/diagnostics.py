@@ -64,6 +64,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         code='supervisor_exception';title='监督器程序异常';role='watcher';phase='监督器执行'
         reason=raw
         actions=['先修复原始程序异常，再恢复原任务；增加运行时间或调用额度不能修复程序错误。']
+    elif 'protected acceptance baseline changed' in text:
+        code='protected_baseline_changed';title='受保护的验收资产发生变化';role='watcher';phase='验收基线保护检查'
+        reason='Watcher 检测到测试、验收入口或忽略规则与任务启动时不一致，已停止验收；这不代表 Worker 进程异常退出。'
+        actions=['对照下方文件列表和原始基线核对实际差异；不要重建基线或放宽保护。',
+                 '确认变更来源后恢复受保护文件；若是有意修改验收规则，应另行安排明确范围的任务。']
     elif 'business head changed' in text:
         code='business_head_changed';role='watcher';phase='业务版本一致性检查'
         title='业务分支在任务外发生变化'

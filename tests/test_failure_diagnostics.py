@@ -13,6 +13,16 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class FailureDiagnosticTests(unittest.TestCase):
+    def test_protected_baseline_stop_is_a_watcher_gate_with_explicit_recovery(self):
+        result=self.diagnostic('action_required',
+            'Protected acceptance baseline changed; restore original assertions before resuming. Files: .gitignore',
+            rounds=[{'role':'worker','index':18,'exit_code':0,'status':'continue'}])
+        self.assertEqual(result['code'],'protected_baseline_changed')
+        self.assertEqual(result['role'],'watcher')
+        self.assertEqual(result['phase'],'验收基线保护检查')
+        self.assertIn('.gitignore',result['raw_summary'])
+        self.assertIn('不要重建基线',''.join(result['actions']))
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.run=self.root/'run';self.run.mkdir()

@@ -75,6 +75,20 @@ class ConsolePageTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE_REQUIREMENT_CONTENT', text)
                 self.assertNotIn('__PAGE__', text)
 
+    def test_sidebar_groups_match_workflow_and_task_context_routes(self):
+        from console.pages import render_page
+        home=render_page('overview','','',self.project).decode()
+        for label in ['任务管理','执行监督','系统配置','待启动','需处理','已验收','实时协作','资源与进程','Agent、模型与认证']:
+            self.assertIn(label,home)
+        self.assertNotIn('>当前任务<',home)
+        self.assertIn('href="/tasks?status=attention"',home)
+        self.assertIn('data-create-task',home)
+        for section in ['home','requirements','conclusions','git','logs']:
+            body=render_page('detail',self.task['id'],section,self.project).decode()
+            self.assertIn('>当前任务<',body)
+            for suffix in ['', '/requirements','/conclusions','/git','/logs']:
+                self.assertIn(f'href="/tasks/{self.task["id"]}{suffix}"',body)
+
     def test_summary_and_resource_apis_never_read_transcripts_or_send_task_bodies(self):
         with patch.object(self.store.activity, 'snapshot', side_effect=AssertionError('Unexpected transcript read')):
             for path in ('/api/tasks', '/api/overview', '/api/resources'):

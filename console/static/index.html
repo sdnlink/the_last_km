@@ -84,37 +84,12 @@
           >本地工作空间<small id="workspace-name">Local workspace</small></span
         ><span class="workspace-dot"></span>
       </div>
-      <div class="nav-label">工作空间</div>
-      <nav aria-label="主导航">
-        <a class="nav-item" href="/overview" data-nav="overview"
-          aria-label="工作概览"
-          title="工作概览"
-        >
-          <svg><use href="#i-grid" /></svg>工作概览
-        </a>
-        <a class="nav-item" href="/tasks" data-nav="tasks"
-          aria-label="开发任务"
-          title="开发任务"
-        >
-          <svg><use href="#i-task" /></svg>开发任务<span
-            id="nav-count" hidden
-            class="nav-count"
-            >0</span
-          >
-        </a>
-        <a class="nav-item" href="/progress" data-nav="progress"
-          aria-label="实时进展"
-          title="实时进展"
-        >
-          <svg><use href="#i-terminal" /></svg>实时进展
-        </a>
-        <a class="nav-item" href="/resources" data-nav="resources"
-          aria-label="资源监控"
-          title="资源监控"
-        >
-          <svg><use href="#i-chip" /></svg>资源监控
-        </a>
-        <a class="nav-item" href="/setup" data-nav="setup" aria-label="初始化 / Agent 管理" title="初始化 / Agent 管理"><svg><use href="#i-chip" /></svg>Agent 管理</a>
+      <button type="button" class="button primary sidebar-create" data-create-task>
+        <svg aria-hidden="true"><use href="#i-plus" /></svg><span>创建任务</span>
+      </button>
+      <button type="button" class="button secondary navigation-toggle" data-toggle-navigation aria-expanded="false" aria-controls="primary-navigation">功能菜单</button>
+      <nav id="primary-navigation" class="primary-navigation" data-expanded="false" aria-label="主导航">
+        <!-- SIDE_NAVIGATION -->
       </nav>
       <div class="sidebar-footer">
         <div class="engine-status">

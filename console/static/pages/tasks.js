@@ -1,7 +1,18 @@
 import {$,$$,escape,icon,active,attention,phases,duration,percent,bytes,badge,taskButtons} from '/ui.js';
-import {api,watch,refresh} from '/core.js';
+import {api,watch,refresh,selectNavigation} from '/core.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const state = {tasks:[],search:new URLSearchParams(location.search).get('q') || '',filter:new URLSearchParams(location.search).get('status') || 'all'};
+function syncTaskLocation() {
+  const labels={all:'全部任务',queued:'待启动',active:'运行中',paused:'已暂停',stopped:'已停止',done:'已验收',attention:'需处理'};
+  const url=new URL(location.href);
+  if(state.filter==='all')url.searchParams.delete('status');else url.searchParams.set('status',state.filter);
+  if(state.search)url.searchParams.set('q',state.search);else url.searchParams.delete('q');
+  history.replaceState(null,'',url);
+  selectNavigation('tasks',state.filter==='stopped'?'attention':state.filter);
+  $('#page-title').textContent=labels[state.filter];
+  $('#breadcrumb').textContent='任务管理 / '+labels[state.filter];
+  document.title=labels[state.filter]+' · Auto Moniter 开发控制台';
+}
 function renderTasks() {
   const search = state.search.toLowerCase();
   const tasks = state.tasks
@@ -64,8 +75,9 @@ export function mount() {
   $('#refresh').addEventListener('click',refresh);
   if(!['all','active','paused','stopped','queued','done','attention'].includes(state.filter))state.filter='all';
   $('#search').value=state.search;
+  syncTaskLocation();
   $$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));
-  $('#search').addEventListener('input',e=>{state.search=e.target.value;resetPage('tasks');renderTasks();});
-  $('#filters').addEventListener('click',e=>{const el=e.target.closest('[data-filter]');if(!el)return;state.filter=el.dataset.filter;resetPage('tasks');renderTasks();$$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));});
+  $('#search').addEventListener('input',e=>{state.search=e.target.value;syncTaskLocation();resetPage('tasks');renderTasks();});
+  $('#filters').addEventListener('click',e=>{const el=e.target.closest('[data-filter]');if(!el)return;state.filter=el.dataset.filter;syncTaskLocation();resetPage('tasks');renderTasks();$$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));});
   watch(async()=>{const data=await api('/api/tasks');state.tasks=data.tasks;$('#task-count').textContent=data.tasks.length;$('#filter-active').textContent=data.tasks.filter(t=>['running','starting'].includes(t.status)).length;renderTasks();$('#last-updated').textContent=`更新于 ${new Date(data.at).toLocaleTimeString('zh-CN',{hour12:false})}`;});
 }

@@ -22,6 +22,40 @@ DETAIL_SECTIONS = {
 }
 
 
+def navigation(page, task_id, section):
+    def link(href, label, icon, key, *, count=False):
+        badge = '<span id="nav-count" hidden class="nav-count">0</span>' if count else ''
+        return (f'<a class="nav-item" href="{href}" data-nav-key="{key}" title="{label}">'
+                f'<svg aria-hidden="true"><use href="#i-{icon}"/></svg><span>{label}</span>{badge}</a>')
+
+    def group(label, links):
+        return f'<details class="nav-group" open><summary>{label}</summary><div class="nav-children">{links}</div></details>'
+
+    tasks = ''.join(link('/tasks' + query, label, icon, 'tasks:' + key, count=key == 'all')
+                    for key, query, label, icon in [
+                        ('all', '', '全部任务', 'task'),
+                        ('queued', '?status=queued', '待启动', 'clock'),
+                        ('active', '?status=active', '运行中', 'terminal'),
+                        ('paused', '?status=paused', '已暂停', 'clock'),
+                        ('attention', '?status=attention', '需处理', 'x'),
+                        ('done', '?status=done', '已验收', 'check')])
+    current = ''
+    if page == 'detail':
+        current = group('当前任务', ''.join(
+            link(f'/tasks/{task_id}' + suffix, label, icon, 'detail:' + key)
+            for key, suffix, label, icon in [
+                ('home', '', '执行与协作', 'terminal'),
+                ('requirements', '/requirements', '需求与验收', 'task'),
+                ('conclusions', '/conclusions', '实现与审核结论', 'check'),
+                ('git', '/git', '交付与 Git 记录', 'folder'),
+                ('logs', '/logs', '执行日志', 'server')]))
+    return (link('/overview', '工作概览', 'grid', 'overview')
+            + group('任务管理', tasks) + current
+            + group('执行监督', link('/progress', '实时协作', 'terminal', 'progress')
+                    + link('/resources', '资源与进程', 'server', 'resources'))
+            + group('系统配置', link('/setup', 'Agent、模型与认证', 'chip', 'setup')))
+
+
 def page_route(path: str) -> tuple[str, str, str] | None:
     if path == '/':
         return 'overview', '', ''
@@ -55,6 +89,7 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
     if page in {'detail', 'progress'}:
         styles.insert(0, 'work')
     replacements = {'<!-- PAGE_CONTENT -->': content,
+                    '<!-- SIDE_NAVIGATION -->': navigation(page, task_id, section),
                     '<!-- PAGE_MENU -->': page_menu, '__PAGE_HEADING_CLASS__': heading_class,
                     '<!-- PAGE_STYLES -->': '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles),
                     '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,

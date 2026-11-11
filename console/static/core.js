@@ -66,10 +66,19 @@ export async function runAction(id, action) {
   catch(error){toast(error.message,true);}
   finally{pending.delete(id);$$(`[data-action][data-id="${id}"]`).forEach(el=>el.disabled=false);}
 }
+export function selectNavigation(page, filter='all', section='home') {
+  const selected=page==='detail'?`detail:${section}`:page==='tasks'?`tasks:${filter}`:page;
+  $$('[data-nav-key]').forEach(el=>{
+    const current=el.dataset.navKey===selected;
+    el.classList.toggle('active',current);
+    if(current){el.setAttribute('aria-current','page');const group=el.closest('.nav-group');if(group)group.open=true;}
+    else el.removeAttribute('aria-current');
+  });
+}
 export function initialize() {
   $('#workspace-name').textContent=document.body.dataset.workspace.split('/').filter(Boolean).at(-1)||'/';
-  const nav=document.body.dataset.page==='detail'?'tasks':document.body.dataset.page;
-  $$('[data-nav]').forEach(el=>{el.classList.toggle('active',el.dataset.nav===nav);if(el.dataset.nav===nav)el.setAttribute('aria-current','page');});
+  const filter=new URLSearchParams(globalThis.location?.search||'').get('status')||'all';
+  selectNavigation(document.body.dataset.page,filter,document.querySelector('[data-section]')?.dataset?.section||'home');
   let backdropStart=null;
   const outside=(dialog,event)=>{
     const rect=dialog.getBoundingClientRect();
@@ -83,10 +92,11 @@ export function initialize() {
     const backdrop=backdropStart;backdropStart=null;
     if(backdrop?.open&&outside(backdrop,e)){backdrop.close();return;}
     const close=e.target.closest('[data-close]');if(close){$(`#${close.dataset.close}`)?.close();return;}
+    const toggle=e.target.closest('[data-toggle-navigation]');if(toggle){const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));$('#primary-navigation').dataset.expanded=String(open);return;}
     const gitRecord=e.target.closest('[data-git-record]');if(gitRecord){(await import('./dialogs.js')).openGitRecord(gitRecord.dataset.id,gitRecord.dataset.gitRecord);return;}
     const action=e.target.closest('[data-action]');if(action){if(action.dataset.action==='roles'){(await import('./dialogs.js')).openRoles(action.dataset.id);}else if(action.dataset.action==='delete'){(await import('./dialogs.js')).confirmDelete(action.dataset.id);}else if(action.dataset.action==='stop'){(await import('./dialogs.js')).confirmStop(action.dataset.id);}else if(['resume','checks'].includes(action.dataset.action)){(await import('./dialogs.js')).openResume(action.dataset.id);}else runAction(action.dataset.id,action.dataset.action);return;}
     const direction=e.target.closest('[data-direction]');if(direction){(await import('./dialogs.js')).openDirection(direction.dataset.direction);return;}
-    if(e.target.closest('#new-task,#empty-create')){(await import('./dialogs.js')).openCreate();return;}
+    if(e.target.closest('#new-task,#empty-create,[data-create-task]')){(await import('./dialogs.js')).openCreate();return;}
     const page=e.target.closest('[data-page]');if(page&&page!==document.body){location.assign('/'+page.dataset.page);return;}
     const row=e.target.closest('[data-task-url]');if(row&&!e.target.closest('a,button,input,select'))location.assign(row.dataset.taskUrl);
   });

@@ -41,6 +41,17 @@ class AcceptanceGuideTests(unittest.TestCase):
   self.assertTrue(found['unverified']);self.assertIn('语义',found['semantic_review']['title'])
  def test_empty_project_has_no_fake_tests_or_claims(self):
   self.assertEqual(scan(self.project)['checks'],[])
+ def test_nested_swift_packages_are_discovered_without_execution(self):
+  package=self.project/'Native App';package.mkdir()
+  (package/'Package.swift').write_text('// swift-tools-version: 5.10\nimport PackageDescription\n')
+  with patch('subprocess.Popen',side_effect=AssertionError('scan must not execute')):
+   found=scan(self.project)
+  check=next(c for c in found['checks'] if c['id']=='swift-test-1')
+  self.assertEqual(__import__('shlex').split(check['command']),['swift','test','--package-path','Native App'])
+  self.assertFalse(check['recommended']);self.assertIn('Apple',check['effects'])
+  plan=select(self.project,{**self.plan(['swift-test-1']),'signature':found['signature']})
+  with patch('shutil.which',return_value=None):result=preflight(plan)
+  self.assertEqual(result['checks'][0]['status'],'environment_unavailable')
  def test_python_dependency_preflight_is_not_a_test_run(self):
   self.fixture();plan=select(self.project,self.plan(['python-unittest']))
   result=preflight(plan)

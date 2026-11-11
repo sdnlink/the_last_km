@@ -161,6 +161,9 @@ class TaskStore:
                     visited += 1
                     path = Path(current)
                     depth = len(path.relative_to(root).parts)
+                    if '.catalog-ignore' in files:
+                        dirs[:] = []
+                        continue
                     dirs[:] = [name for name in dirs if not name.startswith('.') and name not in
                                {'node_modules', 'site-packages', 'validation-env', 'venv', '__pycache__'}]
                     if visited > 2000:
@@ -281,6 +284,8 @@ class TaskStore:
             actions.append('delete')
         if meta.get('managed') and (status == 'queued' or 'resume' in actions):
             actions.append('roles')
+        if 'resume' in actions:
+            actions.append('checks')
         control_message = ''
         if meta.get('error') and not live:
             control_message = '上次启动失败：' + str(meta['error'])
@@ -787,6 +792,44 @@ class TaskStore:
             if action not in view['actions']:
                 raise TaskError('当前状态不支持此操作，请刷新后重试', 409)
             run = Path(meta['run_dir'])
+            if action == 'checks':
+                additions = (data or {}).get('additional_checks')
+                if (not isinstance(additions, list) or not additions or len(additions) > 20
+                        or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\0' in c for c in additions)):
+                    raise TaskError('请填写要追加的验收命令，每条最多 2000 字')
+                try:
+                    with inactive_run(run):
+                        state = read_json(run / 'state.json')
+                        arguments = self._resume_args(meta, state)
+                        old = list(state.get('checks') or [])
+                        combined = list(old)
+                        for command in additions:
+                            if command.strip() not in combined:
+                                combined.append(command.strip())
+                        if len(combined) > 20:
+                            raise ValueError('最多保留 20 条验收命令')
+                        if combined == old:
+                            return self.detail(ident)
+                        original = (run / 'state.json').read_bytes()
+                        changes = state.get('check_changes', [])
+                        if not isinstance(changes, list) or len(changes) >= 20:
+                            raise ValueError('验收检查追加记录无效或已达到上限')
+                        changes = list(changes)
+                        changes.append({'at': timestamp(), 'added': combined[len(old):]})
+                        state.update(checks=combined, check_changes=changes)
+                        try:
+                            write_json(run / 'state.json', state, durable=True)
+                            self._save({**meta, 'checks': combined, 'resume_argv': arguments})
+                        except OSError:
+                            temporary = run / 'state.json.rollback'
+                            temporary.write_bytes(original)
+                            temporary.replace(run / 'state.json')
+                            raise
+                    from auto_moniter.events import record
+                    record(run, 'acceptance_checks_added', added=combined[len(old):])
+                except (OSError, ValueError) as exc:
+                    raise TaskError('追加验收检查失败：' + str(exc), 409) from exc
+                return self.detail(ident)
             if action == 'roles':
                 from console.roles import prepare
                 from auto_moniter.role_changes import normalize_provider_config
@@ -900,7 +943,10 @@ class TaskStore:
             elif action == 'continue':
                 (run / 'control.json').unlink(missing_ok=True)
             else:
-                write_json(run / 'control.json', {'action': action}, durable=True)
+                reason = (data or {}).get('reason', '')
+                if not isinstance(reason, str) or len(reason) > 500 or '\0' in reason:
+                    raise TaskError('停止或暂停原因必须为 500 字以内的文字')
+                write_json(run / 'control.json', {'action': action, **({'reason': reason.strip()} if reason.strip() else {})}, durable=True)
             return self.detail(ident)
 
     def logs(self, ident: str, name: str = '', page: int = 1, page_size: int = 10) -> dict:

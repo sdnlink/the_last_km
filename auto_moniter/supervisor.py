@@ -240,6 +240,8 @@ class Supervisor:
         self._passed_function_checks = {}
         self._dispatch_directions = []
         self._function_issue_ids = []
+        self._planning_rejection = None
+        self._check_changes = []
         self._last_invocation = {}
         self._delivery_diagnosis = {}
         self._started = time.monotonic()
@@ -1272,6 +1274,7 @@ class Supervisor:
                     elif dispatch.current.get('kind') in ('integration','verification'):
                         raise ValueError('Integration and verification assignments require the verified function gate')
                     self.function_tasks = dispatch
+                    self._planning_rejection = None
                     self.modules = staged
                     self._dispatch_directions = list(self._direction_ids['reviewer'])
                     self._record_assignment(dispatch.current)
@@ -1448,6 +1451,9 @@ class Supervisor:
         if action == "stop":
             self._stop = self._stop_requested = True
             self._stop_reason = "stop command"
+            reason = value.get('reason')
+            if isinstance(reason, str) and reason.strip():
+                self._stop_reason += ': ' + reason.strip()[:500]
             self._stop_event.set()
         elif action == "pause" and not active:
             self._event("paused")
@@ -1890,12 +1896,19 @@ class Supervisor:
                 'Use the same indices for new module definitions or a new brief returned in this response. Select check_ids from the '
                 'approved catalog; never write an executable command in a task. Include test_files=[] or exact paths '
                 'for new focused test files. Preserve existing tests and all code outside the assigned targets. '
+                'Select behavioral checks relevant to the target; git diff --check alone is insufficient. '
+                'If the catalog lacks the required platform or language check, request operator input to append it; '
+                'do not substitute unrelated checks or generate executable commands. '
                 'Only declare module or requirement delivery once accepted tasks plus the current task map to every '
                 'criterion in the delivery scope. Approved check IDs: '
                 + json.dumps(function_gate.catalog(self.config.checks, modules), ensure_ascii=False)
                 + '\nCriteria by ID: ' + json.dumps({**function_gate.requirement_criteria(self.requirements_review),
                     **{k: v for ident in modules for k, v in function_gate.criteria(modules, ident).items()}}, ensure_ascii=False)
                 + '\nOptional language parser availability: ' + json.dumps(language_availability(), ensure_ascii=False)
+                + ('\nThe previous next assignment was rejected by the watcher: '
+                   + json.dumps(self._planning_rejection, ensure_ascii=False)
+                   + '. Correct this specific dispatch problem. Do not repeat accepted implementation or replace approved checks.'
+                   if self._planning_rejection else '')
                 + integration)
 
     def _prepare_function_baseline(self, snapshot=None):
@@ -2007,7 +2020,12 @@ class Supervisor:
                                                  provisional=task)
                 except ValueError as exc:
                     staged.current = None
-                    self._event('function_next_assignment_rejected', task_id=task['id'], reason=str(exc))
+                    rejected_id = review.next_task.get('id', '') if isinstance(review.next_task, dict) else ''
+                    self._planning_rejection = {'task_id': str(rejected_id)[:120], 'reason': str(exc)[:2000]}
+                    self._event('function_next_assignment_rejected', task_id=task['id'],
+                                rejected_task_id=self._planning_rejection['task_id'], reason=str(exc))
+                else:
+                    self._planning_rejection = None
             else:
                 if isinstance(review.next_task, dict) and review.next_task.get('kind') in ('integration','verification'):
                     raise ValueError('Integration and verification assignments require the verified function gate')
@@ -2245,6 +2263,7 @@ class Supervisor:
             "function_tasks": self.function_tasks.export(),
             "dispatch_directions": self._dispatch_directions,
             "function_issue_ids": self._function_issue_ids,
+            "planning_rejection": self._planning_rejection,
             "last_invocation": self._last_invocation,
             "delivery_diagnosis": self._delivery_diagnosis,
             "requirements_review": self.requirements_review,
@@ -2258,6 +2277,7 @@ class Supervisor:
             "baseline_count": len(getattr(self, "_baseline_files", {})),
             "acceptance": self.config.acceptance,
             "checks": self.config.checks,
+            "check_changes": self._check_changes,
             "execution_settings": {key: getattr(self.config, key) for key in _EXECUTION_DEFAULTS},
             "protect_paths": self.config.protect_paths,
             "recovery_note": self._recovery_note,
@@ -2362,6 +2382,12 @@ class Supervisor:
         self.function_tasks = function_tasks.FunctionTasks(state.get('function_tasks'))
         self._dispatch_directions = state.get('dispatch_directions', [])
         self._function_issue_ids = state.get('function_issue_ids', [])
+        self._planning_rejection = state.get('planning_rejection')
+        if self._planning_rejection is not None and (
+                not isinstance(self._planning_rejection, dict)
+                or set(self._planning_rejection) != {'task_id', 'reason'}
+                or any(not isinstance(v, str) or len(v) > 2000 for v in self._planning_rejection.values())):
+            raise ValueError('Invalid saved function planning rejection')
         if (not isinstance(self._function_issue_ids, list) or len(self._function_issue_ids)>128
                 or any(not isinstance(x, str) or not re.fullmatch(r'AUD-[1-9][0-9]{0,11}', x) for x in self._function_issue_ids)):
             raise ValueError('Invalid saved function audit references')
@@ -2457,6 +2483,16 @@ class Supervisor:
                 or not isinstance(self._rounds_since_review, int) or self._rounds_since_review < 0):
             raise ValueError("invalid saved review schedule")
         saved_checks = state.get("checks") or []
+        self._check_changes = state.get('check_changes', [])
+        if (not isinstance(self._check_changes, list) or len(self._check_changes) > 20
+                or any(not isinstance(change, dict) or set(change) != {'at', 'added'}
+                       or not isinstance(change['at'], str) or len(change['at']) > 100
+                       or not isinstance(change['added'], list) or not change['added']
+                       or len(change['added']) > 20
+                       or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\0' in c
+                              or c not in saved_checks for c in change['added'])
+                       for change in self._check_changes)):
+            raise ValueError('Invalid saved acceptance check additions')
         settings = state.get("execution_settings", {})
         if not isinstance(settings, dict) or set(settings) - _EXECUTION_DEFAULTS.keys():
             raise ValueError("invalid saved execution settings")

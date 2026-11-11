@@ -235,8 +235,12 @@ def validate_task(task, root, modules, checks, brief, *, approvals=()):
     ids = set(task['criterion_ids'])
     if not ids & module_criteria.keys() or not ids <= module_criteria.keys() | requirement_criteria(brief).keys():
         raise ValueError('Function assignment must reference its module criteria and only known requirement criteria')
-    if not set(task['check_ids']) <= catalog(checks, modules, task['module_id']).keys():
+    approved = catalog(checks, modules, task['module_id'])
+    if not set(task['check_ids']) <= approved.keys():
         raise ValueError('Function assignment must select approved check IDs for its module; no agent commands')
+    if all(re.fullmatch(r'\s*git\s+diff\s+--check\s*', approved[ident]) for ident in task['check_ids']):
+        raise ValueError('Function acceptance requires a behavioral check; git diff --check alone cannot verify functionality. '
+                         'Ask the operator to append the missing approved check before dispatch.')
     for name in task['test_files']:
         test = _path(root, name).relative_to(root)
         if (root / test in paths or test.suffix.lower() not in SUFFIXES - {'.html', '.htm'}

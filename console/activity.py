@@ -55,6 +55,12 @@ EVENT_LABELS = {
     'check_finished': '验收检查结束', 'run_finished': '本次运行结束', 'paused': '任务已暂停',
     'pause_ended': '结束暂停', 'stagnation_recovery': '恢复停滞任务', 'review_rejected': '交付审查未通过',
     'business_head_adopted': '识别业务新提交，继续开发并重新验收',
+    'function_next_assignment_rejected': '下一函数派单被拒绝',
+    'function_gate_rejected': '函数验收门禁未通过',
+    'function_assigned': '已下发函数任务',
+    'function_accepted': '函数通过验收',
+    'acceptance_checks_added': '已追加验收检查',
+    'maintenance_started': '部署维护，保存检查点后恢复',
 }
 
 
@@ -168,6 +174,16 @@ class ActivityReader:
                 text += f"（退出码 {event.get('exit', '?')}）：{event.get('command', '')}"
             elif name == 'run_finished':
                 text += '：' + str(event.get('summary') or event.get('status') or '')
+            elif name == 'function_next_assignment_rejected':
+                text += '：' + str(event.get('rejected_task_id') or '') + '\n' + str(event.get('reason') or '')
+            elif name == 'function_gate_rejected':
+                text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('reasons') or '')
+            elif name in {'function_assigned', 'function_accepted'}:
+                text += '：' + str(event.get('task_id') or '')
+            elif name == 'acceptance_checks_added':
+                text += '：' + '\n'.join(event.get('added') or [])
+            elif name == 'maintenance_started':
+                text += '：' + str(event.get('reason') or '')
             elif name == 'git_checkpoint':
                 text += f"：第 {event.get('round', '?')} 轮 " + ('reviewer' if event.get('role') == 'reviewer' else 'worker')
                 text += '\n' + str(event.get('commit', '')) + '\n' + str(event.get('ref', ''))

@@ -89,6 +89,18 @@ const cases = [
   {name: 'resume', open: 'openResume', submit: 'resume-form', event: 'submit', button: 'resume-submit', error: 'resume-error'},
   {name: 'delete', open: 'confirmDelete', submit: 'confirm-delete', event: 'click', button: 'confirm-delete', error: 'delete-error'},
 ];
+test('resume appends approved checks before starting and leaves numeric budgets separate', async () => {
+  const h = await harness();
+  await h.dialogs.openResume('A');
+  h.nodes['resume-form'].elements.additional_checks = element('python verify.py\n git diff --check\n');
+  h.nodes['resume-form'].elements.additional_runtime_minutes.value = '5';
+  await h.nodes['resume-form'].emit('submit');
+  const posts = h.requests.filter(r => r.options.method === 'POST');
+  assert.deepEqual(posts.map(r => r.url), ['/api/tasks/A/checks','/api/tasks/A/resume']);
+  assert.deepEqual(JSON.parse(posts[0].options.body), {additional_checks:['python verify.py','git diff --check']});
+  assert.deepEqual(JSON.parse(posts[1].options.body), {additional_runtime_minutes:5,additional_agent_calls:0});
+});
+
 function edit(h, entry, marker) {
   if (entry.name === 'roles') h.nodes['roles-form'].elements.model.value = marker;
   if (entry.name === 'resume') h.nodes['resume-form'].elements.additional_agent_calls.value = marker;

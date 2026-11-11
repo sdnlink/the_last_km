@@ -5,6 +5,8 @@
   <p>保留累计用量。预算已耗尽时需要明确追加；填写 0 表示不追加。</p>
   <label>追加运行时间（分钟）<input name="additional_runtime_minutes" type="number" min="0" max="100000" value="0" required></label>
   <label>追加 worker/reviewer 调用轮次<input name="additional_agent_calls" type="number" min="0" max="100000" value="0" required></label>
+  <label>追加验收命令（可选，每行一条）<textarea name="additional_checks" rows="4" placeholder="只填写本轮缺少的行为检查命令"></textarea></label>
+  <p>保留已有检查及其编号，只追加新检查。命令将在目标项目目录执行；新增检查会先保存，恢复失败后也会保留。</p>
   <p id="resume-error" role="alert" hidden></p>
   <div class="dialog-footer"><button type="button" class="button secondary" data-close="resume-dialog">返回</button><button class="button primary" id="resume-submit">确认恢复</button></div>
  </form>

@@ -8,6 +8,16 @@ from console.activity import ActivityReader
 
 
 class LiveActivityTests(unittest.TestCase):
+    def test_assignment_rejection_reason_is_visible_in_console_activity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'events.jsonl').write_text(json.dumps({
+                'at':'2026-11-11T04:00:00Z','event':'function_next_assignment_rejected',
+                'task_id':'F1','rejected_task_id':'F2','reason':'Missing native behavioral check'})+'\n')
+            result=ActivityReader().snapshot(root,{}, {},'stopped','command')
+            self.assertTrue(any('F2' in e['text'] and 'Missing native behavioral check' in e['text']
+                                for e in result['events']))
+
     def test_stream_decodes_split_unicode_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

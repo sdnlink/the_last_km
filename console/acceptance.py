@@ -45,7 +45,7 @@ def scan(cwd, kind='code', python=''):
                        'effects': effects or '执行项目中的代码，可能生成缓存或测试输出；扫描不会执行。',
                        'estimate': estimate, 'recommended': recommended})
     # Bounded file inspection; never execute discovery hooks or import project code.
-    test_paths, node_paths = [], []
+    test_paths, node_paths, swift_packages = [], [], []
     visited = 0
     for directory, dirs, files in os.walk(root, followlinks=False):
         visited += 1
@@ -55,6 +55,10 @@ def scan(cwd, kind='code', python=''):
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in {'node_modules','build','dist','target','site-packages','__pycache__'}) if len(relative.parts) < 4 else []
         for name in sorted(files):
             path = Path(directory) / name
+            if name == 'Package.swift' and len(swift_packages) < 20:
+                manifest = str(path.relative_to(root))
+                if source(manifest):
+                    swift_packages.append(manifest)
             if re.match(r'(test_.*|.*_test)\.py$', name) and len(test_paths) < 80:
                 test_paths.append(str(path.relative_to(root)))
             if (re.fullmatch(r'(?:test(?:[_.-].*)?|.*[_.-]test)\.(?:mjs|cjs|js)', name)
@@ -123,6 +127,13 @@ def scan(cwd, kind='code', python=''):
     if source('Cargo.toml'):
         add('cargo-test', 'Rust 自动化测试', '编译并执行项目 Rust 测试', ['cargo','test','--workspace'], artifacts=['Cargo.toml'],
             effects='可能下载依赖、执行 build.rs 并生成 target 目录。', estimate='数分钟或更久')
+    for index, manifest in enumerate(swift_packages, 1):
+        package_dir = str(Path(manifest).parent)
+        add('swift-test-' + str(index), 'Swift 包测试：' + package_dir,
+            '编译并执行该 Swift Package 声明的测试；不等同于 Apple 应用完整验收',
+            ['swift', 'test', '--package-path', package_dir], artifacts=[manifest],
+            effects='可能解析包清单、下载依赖和生成 .build；Apple 框架需要对应 SDK。扫描不执行 Swift 或安装工具链。',
+            estimate='数分钟或更久')
     ci = []
     workflows = root / '.github/workflows'
     if workflows.is_dir() and workflows.resolve().is_relative_to(root):

@@ -43,6 +43,7 @@ const actionLabels = {
   stop: "停止任务",
   resume: "恢复执行",
   roles: "临时调整角色",
+  checks: "补充验收并恢复",
   delete: "删除任务",
 };
 const active = (t) => ["running", "starting", "paused"].includes(t.status);

@@ -116,6 +116,46 @@ class ConsoleTests(unittest.TestCase):
         write_json(run / 'report.json', {'status': 'done', 'rounds': 0, 'summary': '完成', 'stop_reason': 'done'})
         self.assertEqual(self.store.detail(task['id'])['status'], 'done')
 
+    def test_discovery_does_not_present_archived_checkpoints_as_tasks(self):
+        archive = self.project / '.auto-moniter/diagnostics'
+        run = archive / 'recovered-copy'
+        run.mkdir(parents=True)
+        (archive/'.catalog-ignore').touch()
+        write_json(run/'state.json',{'cwd':str(self.project),'status':'failed'})
+        write_json(run/'report.json',{'status':'failed','summary':'Historical copy'})
+        self.assertEqual(self.store.overview()['tasks'],[])
+        self.assertTrue((run/'state.json').exists())
+
+    def test_append_checks_preserves_ids_budget_and_checkpoint_and_is_idempotent(self):
+        task = self.create(checks=['git diff --check'])
+        run = Path(task['run_dir']);run.mkdir()
+        (run/'requirement.md').write_text('saved original requirement')
+        saved = {'cwd':str(self.project),'status':'stopped','checks':['git diff --check'],
+                 'usage':{'elapsed_s':42,'agent_calls':3},'function_tasks':{'current':None,'accepted':[]}}
+        write_json(run/'state.json',saved)
+        with patch.object(self.store,'_resume_args',return_value=['run','--resume']):
+            self.assertIn('checks',self.store.detail(task['id'])['actions'])
+            self.store.action(task['id'],'checks',{'additional_checks':['python verify.py']})
+            self.store.action(task['id'],'checks',{'additional_checks':['python verify.py']})
+        state=json.loads((run/'state.json').read_text())
+        self.assertEqual(state['checks'],['git diff --check','python verify.py'])
+        self.assertEqual(state['usage'],saved['usage'])
+        self.assertEqual(state['function_tasks'],saved['function_tasks'])
+        self.assertEqual(state['check_changes'][0]['added'],['python verify.py'])
+        self.assertEqual(len(state['check_changes']),1)
+        self.assertEqual(self.store._get(task['id'])['resume_argv'],['run','--resume'])
+
+    def test_append_checks_restores_checkpoint_if_metadata_save_fails(self):
+        task=self.create();run=Path(task['run_dir']);run.mkdir()
+        (run/'requirement.md').write_text('saved requirement')
+        write_json(run/'state.json',{'cwd':str(self.project),'status':'stopped','checks':[]})
+        before=(run/'state.json').read_bytes()
+        with patch.object(self.store,'_resume_args',return_value=['run','--resume']), \
+                patch.object(self.store,'_save',side_effect=OSError('disk failure')):
+            with self.assertRaises(TaskError):
+                self.store.action(task['id'],'checks',{'additional_checks':['python verify.py']})
+        self.assertEqual((run/'state.json').read_bytes(),before)
+
     def test_logs_are_bounded_redacted_and_reject_paths_and_symlinks(self):
         task = self.create()
         run = Path(task['run_dir'])

@@ -343,10 +343,12 @@ function bind(name){
   $('#resume-form').addEventListener('submit',async e=>{
    e.preventDefault();const view=taskDialogs.resume,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
    const data=Object.fromEntries(new FormData(e.target));
+   const additionalChecks=String(data.additional_checks||'').split(/\r?\n/).map(c=>c.trim()).filter(Boolean);
+   delete data.additional_checks;
    for(const key of Object.keys(data))data[key]=Number(data[key]);
    view.pending.add(id);
    $('#resume-submit').disabled=true;$('#resume-error').hidden=true;
-   try{await api(`/api/tasks/${id}/resume`,data);if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();toast(`任务 ${id} 已请求恢复`);await refresh();}
+   try{if(additionalChecks.length)await api(`/api/tasks/${id}/checks`,{additional_checks:additionalChecks});await api(`/api/tasks/${id}/resume`,data);if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();toast(`任务 ${id} 已请求恢复`);await refresh();}
    catch(error){if(currentTaskDialog('resume',sequence,id)){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;}else toast(`任务 ${id} 恢复失败：${error.message}`,true);}
    finally{settleTaskDialog('resume',id);}
   });return;

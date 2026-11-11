@@ -20,6 +20,15 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class ControlsTests(unittest.TestCase):
+    def test_explicit_maintenance_stop_reason_is_saved_in_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);run=root/'run';run.mkdir()
+            (run/'control.json').write_text(json.dumps({'action':'stop','reason':'部署维护，保留候选后恢复'}))
+            result=Supervisor(RunConfig('task',root,ScriptedProvider('worker',[]),no_review=True,
+                git_history='off',run_dir=run),log=lambda _:None).run()
+            self.assertEqual(result.status,'stopped')
+            self.assertIn('部署维护',json.loads((run/'report.json').read_text())['summary'])
+
     def _wait(self, predicate, process):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:

@@ -68,6 +68,77 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_next_assignment_rejection_survives_resume_without_repeating_accepted_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid = task('F2','next.py')
+            invalid['test_files'] = ['docs/not_a_test.py']
+            worker = FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer = ScriptedProvider('reviewer',[plan(task('F1','app.py')),
+                result('F1','accepted',next_task=invalid)])
+            control = Supervisor._process_control
+            def stop_after_acceptance(monitor, active=False):
+                if not active and monitor.function_tasks.accepted:
+                    (root/'run/control.json').write_text(json.dumps({'action':'stop'}))
+                return control(monitor,active)
+            with patch.object(Supervisor,'_process_control',stop_after_acceptance):
+                report = self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'stopped',report.summary)
+            saved = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(saved['planning_rejection']['task_id'],'F2')
+            self.assertIn('docs/not_a_test.py',saved['planning_rejection']['reason'])
+            self.assertEqual(len(saved['function_tasks']['accepted']),1)
+            (root/'run/control.json').unlink()
+            worker = FunctionWorker('worker',[
+                {**result('F2','done',status='done',file='next.py'),'touch':'next.py'}])
+            assignment = task('F2','next.py',scope='requirement',depends=['F1'])
+            assignment['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+            reviewer = ScriptedProvider('reviewer',[
+                plan(assignment),result('F2','accepted',status='done',file='next.py')])
+            report = Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',
+                resume=True,git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual(len(worker.calls),1)
+            self.assertIn('docs/not_a_test.py',reviewer.calls[0]['prompt'])
+            self.assertIn('Do not repeat accepted implementation',reviewer.calls[0]['prompt'])
+            self.assertIsNone(json.loads((root/'run/state.json').read_text())['planning_rejection'])
+
+    def test_format_check_alone_cannot_accept_a_function(self):
+        from auto_moniter.function_gate import validate_task
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError,'requires a behavioral check'):
+                validate_task(task('F1','app.py'),Path(directory),
+                    {'main':{'acceptance':['Correct behavior']}},['git diff --check'],BRIEF)
+
+    def test_operator_appended_check_runs_on_saved_candidate_without_agent_calls(self):
+        from console.tasks import TaskStore
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory);root=parent/'project';root.mkdir()
+            ready=parent/'dependency';checked=parent/'new-check-ran'
+            original="test -f '"+str(ready)+"' || exit 127"
+            assignment=task('F1','app.py',scope='requirement')
+            assignment['criterion_ids']=['main:1','req:1:1','req:1:2']
+            worker=FunctionWorker('worker',[{**result('F1','done',status='done'),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,checks=[original],max_rounds=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            store=TaskStore(parent/'console',root)
+            queued=store.create({'title':'Resume candidate','requirement':'saved','workflow':'legacy'})
+            meta=store._get(queued['id']);meta['run_dir']=str(root/'run');store._save(meta)
+            added="python3 -c \"from pathlib import Path; Path('"+str(checked)+"').write_text('verified')\""
+            with patch.object(store,'_resume_args',return_value=['run','--resume']):
+                store.action(queued['id'],'checks',{'additional_checks':[added]})
+            ready.touch()
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=1,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual(checked.read_text(),'verified')
+            self.assertFalse(worker.calls or reviewer.calls)
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(saved['check_changes'][0]['added'],[added])
+            self.assertEqual(saved['usage']['agent_calls'],3)
+
     def test_pause_during_next_function_planning_prevents_another_worker_call(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

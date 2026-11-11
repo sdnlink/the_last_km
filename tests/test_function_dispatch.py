@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from auto_moniter.delivery_diagnosis import diagnose
 from auto_moniter.supervisor import RunConfig, Supervisor
@@ -60,6 +61,77 @@ class DispatchTests(unittest.TestCase):
         return Supervisor(RunConfig('ORIGINAL BACKLOG MUST NOT REACH WORKER',root,worker,reviewer=reviewer,
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             review_every=0,retry_delay_s=0,**kwargs),log=lambda _:None).run()
+
+    def test_chinese_criterion_citation_passes_handoff_without_extra_model_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assignment = task('F1','app.py',scope='requirement')
+            assignment['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+            implementation = result('F1','done',status='done')
+            implementation['verdict']['evidence'] = [
+                'QUOTES / main:1、req:1:3：app.py:86 在证券校验后恢复合法失败文字；报价校验保持不变。']
+            worker = FunctionWorker('worker',[{**implementation,'touch':'app.py'}])
+            reviewer = ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            report = self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            self.assertTrue((root/'run/001-check-01.log').exists())
+            self.assertEqual(report.records[-1].watcher_result['function']['status'],'accepted')
+
+    def test_reviewer_corrects_missing_function_citation_without_reimplementing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assignment = task('F1','app.py',scope='requirement')
+            assignment['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+            worker = FunctionWorker('worker',[{**result('F1','done',status='done'),'touch':'app.py'}])
+            reviewer = ScriptedProvider('reviewer',[plan(assignment),
+                result('F1','accepted',status='done',file='not-the-target.py'),
+                result('F1','accepted',status='done')])
+            report = self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
+            self.assertIn('Reviewer-only repair of the SAME candidate',reviewer.calls[-1]['prompt'])
+            self.assertIn('missing: app.py',reviewer.calls[-1]['prompt'])
+            self.assertTrue(all(call['read_only'] for call in reviewer.calls))
+
+    def test_missing_reviewer_citation_has_only_one_bounded_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
+            reviewer = ScriptedProvider('reviewer',[plan(task('F1','app.py')),
+                result('F1','accepted',file='missing.py'),result('F1','accepted',file='missing.py')])
+            report = self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
+            self.assertIn('missing: app.py',report.summary)
+            self.assertFalse((root/'run/001-check-01.log').exists())
+
+    def test_resume_after_evidence_rejection_preserves_the_worker_candidate(self):
+        from auto_moniter.workspace import evidence_paths
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assignment = task('F1','app.py',scope='requirement')
+            assignment['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+            implementation = result('F1','done',status='done')
+            implementation['verdict']['evidence'] = ['main:1、req:1:3：app.py:86 已修复']
+            worker = FunctionWorker('worker',[{**implementation,'touch':'app.py'}])
+            reviewer = ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            def old_parser(cwd, entries, **kwargs):
+                if entries == implementation['verdict']['evidence']:
+                    return []
+                return evidence_paths(cwd, entries, **kwargs)
+            with patch('auto_moniter.supervisor.evidence_paths',side_effect=old_parser):
+                report = self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertEqual(len(worker.calls),1)
+            worker = FunctionWorker('worker',[])
+            reviewer = ScriptedProvider('reviewer',[result('F1','accepted',status='done')])
+            report = Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',
+                resume=True,git_history='off',run_dir=root/'run',retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual(len(worker.calls),0)
+            self.assertEqual(len(reviewer.calls),1)
+            self.assertTrue((root/'run/001-check-01.log').exists())
 
     def test_review_repair_stays_on_first_function_then_dispatches_next(self):
         with tempfile.TemporaryDirectory() as d:

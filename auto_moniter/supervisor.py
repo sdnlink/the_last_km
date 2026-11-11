@@ -1929,16 +1929,10 @@ class Supervisor:
             gaps = self._function_scope_problems()
             if gaps:
                 return None, gaps
-        targets = {file: (self.config.cwd / file).resolve() for file, _ in function_tasks.targets(task)}
         for role, conclusion in [('worker', worker), ('reviewer', review)]:
-            problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
-                ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
+            problems = self._function_evidence_problems(conclusion, role)
             if problems:
-                raise ValueError(role + ': ' + '; '.join(problems))
-            cited = evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir)
-            missing = [file for file, path in targets.items() if path not in cited]
-            if missing:
-                raise ValueError(role + ' must cite every changed assignment file; missing: ' + ', '.join(missing))
+                raise ValueError('; '.join(problems))
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
         staged.accept(worker, review, index, tree)
         if expected == 'requirement' and review.next_task is not None:
@@ -1957,6 +1951,17 @@ class Supervisor:
                     raise ValueError('Integration requires the verified function gate')
                 staged.assign(review.next_task, self.modules.items)
         return staged, []
+
+    def _function_evidence_problems(self, conclusion, role):
+        problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
+            ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
+        cited = set(evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir))
+        missing = [file for file, _ in function_tasks.targets(self.function_tasks.current)
+                   if (self.config.cwd / file).resolve() not in cited]
+        errors = [role + ': ' + problem for problem in problems]
+        if missing:
+            errors.append(role + ' must cite every changed assignment file; missing: ' + ', '.join(missing))
+        return errors
 
     def _advance_function(self, staged, review_record):
         task = self.function_tasks.current
@@ -2844,6 +2849,14 @@ class Supervisor:
                     if attempt:
                         self._review_audit_retry_exhausted = kwargs['index']
                         self._review_audit_rejection = {'round': kwargs['index'], 'reason': str(exc)}
+                if (self.config.function_dispatch and self.function_tasks.current
+                        and review.task_status == 'accepted' and not review.parse_error
+                        and (not self._function_gate or not self._function_scope_problems())):
+                    problems = self._function_evidence_problems(review, 'reviewer')
+                    if problems:
+                        review.parse_error = 'invalid function evidence'
+                        review.status = 'continue'
+                        review.gaps.extend(problems)
             invalid = failure or review.parse_error or turn.interruption
             if not invalid or self._stop or self.config.workflow != 'review-first':
                 return turn

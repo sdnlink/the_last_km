@@ -113,6 +113,12 @@ def evidence_paths(
     for item in evidence:
         candidates = [item, *item.replace(",", " ").replace("`", " ").split()]
         candidates.extend(part for token in re.findall(r"`([^`]+)`|\]\(([^)]+)\)", item) for part in token if part)
+        # Criteria labels and Chinese prose can be attached to a citation:
+        # QUOTES:3、req:1:3：preview/input-state.js:86 or app.py、新增测试。
+        # Keep the literal candidates above for paths containing punctuation
+        # or spaces. Only prose separators are split, never path separators;
+        # resolved candidates still pass the workspace/baseline checks below.
+        candidates.extend(re.split(r'[\s`，,；;。！？、：:]+', item))
         # A line reference may be followed immediately by Chinese prose, e.g.
         # docs/说明.md:694：已核对。 Keep literal candidates as well.
         references = []
@@ -122,6 +128,8 @@ def evidence_paths(
                 references.append(match[1])
         candidates.extend(references)
         for token in candidates:
+            if not token.strip():
+                continue
             candidate = re.sub(r":\d+(?::\d+|[-–]\d+)?$", "", token.strip("\"'()[]{}"))
             path = Path(candidate)
             if not path.is_absolute():

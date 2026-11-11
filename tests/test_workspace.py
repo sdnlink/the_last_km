@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from auto_moniter.workspace import acceptance_problems, file_snapshot, preserve_tree, restore_reviewer_writes
+from auto_moniter.workspace import acceptance_problems, evidence_paths, file_snapshot, preserve_tree, restore_reviewer_writes
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -59,6 +59,41 @@ class AcceptanceTests(unittest.TestCase):
                              'missing.md:12：已修复', '.auto-moniter/history/record.json:1：结论']:
                 with self.subTest(evidence=evidence):
                     self.assertTrue(acceptance_problems(project, [evidence], baseline=baseline))
+
+    def test_criterion_prefix_and_chinese_punctuation_preserve_file_citations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'preview' / 'input-state.js'
+            target.parent.mkdir()
+            target.write_text('before')
+            baseline = file_snapshot(root)
+            target.write_text('after')
+            for text in [
+                'QUOTES / QUOTES:3、req:1:3：preview/input-state.js:86 在证券校验后恢复合法失败文字；报价校验保持不变。',
+                '开始与结束文件哈希对照确认：仅修改 preview/input-state.js、新增指定测试；restore 外代码一致。',
+                'QUOTES:3、req:1:3：`preview/input-state.js:86–90`：已复核',
+                '标准：' + str(target) + ':86:2；已修复',
+            ]:
+                with self.subTest(text=text):
+                    self.assertIn(target, evidence_paths(root, [text], baseline=baseline))
+                    self.assertEqual(acceptance_problems(root, [text], baseline=baseline), [])
+
+    def test_prefixed_citations_still_require_changed_project_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / 'project'
+            project.mkdir()
+            (project / 'unchanged.js').write_text('same')
+            (root / 'outside.js').write_text('outside')
+            baseline = file_snapshot(project)
+            texts = ['M:1、req:1:3：unchanged.js:86；已复核',
+                     'M:1、req:1:3：../outside.js:86；已复核',
+                     'M:1、req:1:3：missing.js:86；已复核']
+            (project / 'link.js').symlink_to(root / 'outside.js')
+            texts.append('M:1：link.js:86，已修复')
+            for text in texts:
+                with self.subTest(text=text):
+                    self.assertEqual(evidence_paths(project, [text], baseline=baseline), [])
 
     def test_reviewer_writes_are_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

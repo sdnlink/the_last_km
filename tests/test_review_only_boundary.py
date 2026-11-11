@@ -130,19 +130,23 @@ class ReviewOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(task['acceptance_plan']['selected_ids'], [])
         self.assertIn('仅制定可执行的验收方案', task['requirement'])
 
-    def test_legacy_api_without_verification_mode_keeps_checks(self):
-        """Omit verification_mode: default label review_only but preserve prior merge semantics."""
+    def test_api_without_verification_mode_defaults_to_function_dispatch_and_keeps_checks(self):
         payload = {
-            'title': 'legacy client',
+            'title': 'default implementation',
             'requirement': 'implement',
             'checks': ['true'],
             'acceptance_plan': self.plan(['python-unittest']),
         }
         self.assertNotIn('verification_mode', payload)
         task = self.store.create(payload)
-        self.assertEqual(task['verification_mode'], 'review_only')
+        self.assertEqual(task['verification_mode'], 'executable')
+        self.assertTrue(task['function_dispatch'])
         self.assertTrue(any('unittest' in c or c == 'true' for c in task['checks']))
         self.assertGreaterEqual(len(task['checks']), 1)
+        legacy = self.store.create({**payload, 'title':'legacy client', 'function_dispatch':False})
+        self.assertEqual(legacy['verification_mode'], 'review_only')
+        self.assertFalse(legacy['function_dispatch'])
+        self.assertEqual(legacy['checks'], task['checks'])
 
     def _module(self, checks=('echo marker',)):
         return [{'id': 'M', 'title': '检查', 'acceptance': ['完成'], 'depends_on': [], 'checks': list(checks)}]

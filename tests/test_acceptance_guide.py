@@ -77,6 +77,16 @@ class AcceptanceGuideTests(unittest.TestCase):
   with self.assertRaises(TaskError):self.store.create({'title':'task','requirement':'implement','acceptance_plan':p,'verification_mode':'executable'})
   task=self.store.create({'title':'task','requirement':'review','acceptance_plan':p,'verification_mode':'review_only'})
   self.assertEqual(task['checks'],[])
+ def test_integration_scope_requires_a_real_check_in_the_configured_module(self):
+  payload={'title':'joint delivery','requirement':'change both ends','verification_mode':'executable',
+           'modules':[{'id':'API','title':'Contract','acceptance':['Both ends agree'],'checks':['python verify_contract.py']}]}
+  scope={'id':'contract','module_id':'API','check_ids':['API:check:1'],
+         'targets':[{'file':'server.py','symbol':'send'},{'file':'client.py','symbol':'receive'}]}
+  task=self.store.create({**payload,'quality_policy':{'integration_scopes':[scope]}})
+  self.assertTrue(task['function_dispatch'])
+  self.assertEqual(task['quality_policy']['integration_scopes'],[scope])
+  with self.assertRaisesRegex(TaskError,'configured checks'):
+   self.store.create({**payload,'quality_policy':{'integration_scopes':[{**scope,'check_ids':['API:check:2']}]}})
  def test_planning_task_does_not_claim_original_functionality(self):
   task=self.store.create({'title':'方案','requirement':'实现接口','acceptance_plan':self.plan(),'verification_mode':'planning'})
   self.assertIn('仅制定可执行的验收方案',task['requirement']);self.assertEqual(task['checks'],[])
@@ -133,8 +143,15 @@ class AcceptanceGuideTests(unittest.TestCase):
   self.fixture();subprocess.run(['git','init','-q',str(self.project)],check=True)
   binaries=self.project/'bin';binaries.mkdir();agent=binaries/'codex'
   verdict=_verdict('done',evidence=['app.py'])
+  modules=verdict['modules']
+  verdict.update(modules=[],task_id='fixture-function',next_task=None)
   from tests.test_review_first import BRIEF
-  agent.write_text('#!'+sys.executable+'\nimport sys,json,re\nfrom pathlib import Path\nprompt=sys.stdin.read()\nif any("requirements.schema.json" in a for a in sys.argv):\n print(json.dumps('+repr(BRIEF)+'));sys.exit(0)\nv='+repr(verdict)+'\nif "read-only" not in sys.argv:Path("app.py").write_text("implemented")\nelse:\n m=re.search(r"Worker checkpoint: ([0-9a-f]{40,64})",prompt)\n if m:v["evidence"].append(m[1])\nprint(json.dumps(v))\n')
+  brief={**BRIEF,'modules':modules,'next_task':{
+      'id':'fixture-function','module_id':'main','file':'app.py','symbol':'parse_input',
+      'objective':'Handle input','inputs':'value','outputs':'value','boundaries':['Only app.py'],
+      'verification':['The selected unittest passes'],'depends_on':[],'delivery_scope':'requirement',
+      'criterion_ids':['main:1','req:1:1','req:1:2'],'check_ids':['check:1'],'test_files':[]}}
+  agent.write_text('#!'+sys.executable+'\nimport sys,json,re\nfrom pathlib import Path\nprompt=sys.stdin.read()\nif any("requirements.schema.json" in a for a in sys.argv):\n print(json.dumps('+repr(brief)+'));sys.exit(0)\nv='+repr(verdict)+'\nif "read-only" not in sys.argv:\n Path("app.py").write_text("def parse_input(value):\\n    return value\\n")\n v["task_status"]="done"\nelse:\n v["task_status"]="accepted"\n m=re.search(r"Worker checkpoint: ([0-9a-f]{40,64})",prompt)\n if m:v["evidence"].append(m[1])\nprint(json.dumps(v))\n')
   agent.chmod(0o700)
   with patch.dict(os.environ,{'PATH':str(binaries)+os.pathsep+os.environ['PATH']}):
    task=self.store.create({'title':'guided real CLI','requirement':'implement fixture','provider':'codex','reviewer':'codex',
@@ -147,6 +164,7 @@ class AcceptanceGuideTests(unittest.TestCase):
     time.sleep(.05)
    self.assertEqual(detail['status'],'done',detail.get('summary'))
    self.assertTrue(detail['acceptance_results']['complete'])
+   self.assertEqual(detail['function_tasks']['accepted'][0]['verification'], {'check:1':'001-check-01.log'})
    self.assertEqual(detail['acceptance_results']['checks'][0]['status'],'passed')
    run=Path(task['run_dir']);self.assertTrue((run/'acceptance-plan.json').exists())
    self.assertEqual(json.loads((run/'state.json').read_text())['acceptance'],'合法与非法输入有清晰结果')

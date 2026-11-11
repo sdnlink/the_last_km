@@ -84,7 +84,7 @@
           <details class="advanced">
             <summary>高级执行配置<span>可选</span></summary>
             <div class="advanced-body">
-                <label>质量策略（JSON）<textarea name="quality_policy" rows="5">{"protect_tests":true,"verified_progress":true,"no_progress_limit":12,"review_interval_s":600,"review_changed_files":20,"blocked_review_limit":3,"requirements":[],"validation_paths":[],"review_tools":"provider","max_tokens":0,"max_cost_usd":0}</textarea><small>需求条目：id、text、module_ids、evidence_paths。已存在的测试/验收配置自动保护；新测试可新增。没有验证进展会停止；files_only 审核工具仅支持原生 Claude。调用轮次不等于模型请求数，token/费用预算仅依据后端实际报告。</small></label>
+                <label>质量策略（JSON）<textarea name="quality_policy" rows="5">{"protect_tests":true,"verified_progress":true,"no_progress_limit":12,"review_interval_s":600,"review_changed_files":20,"blocked_review_limit":3,"requirements":[],"validation_paths":[],"review_tools":"provider","max_tokens":0,"max_cost_usd":0}</textarea><small>跨文件联动须通过 integration_scopes 预先批准目标函数和回归检查。需求条目：id、text、module_ids、evidence_paths。已存在的测试/验收配置自动保护；新测试可新增。没有验证进展会停止；files_only 审核工具仅支持原生 Claude。调用轮次不等于模型请求数，token/费用预算仅依据后端实际报告。</small></label>
               <div class="form-grid thirds">
                 <label
                   >运行预算（分钟）<input
@@ -113,7 +113,7 @@
                 /></label>
               </div>
               <label><input type="checkbox" name="function_dispatch" checked /> 由 reviewer 逐函数下发任务
-                <small>每次只下发一个可实现、可验证的函数条目。审核通过后再推进下一项。</small>
+                <small>用于执行验收模式。每次只下发一个函数；独立审核和已批准的回归通过后再推进。</small>
               </label>
               <label>审核频率（worker 轮次）
                 <input name="review_every" type="number" min="0" max="100000" value="5" required />

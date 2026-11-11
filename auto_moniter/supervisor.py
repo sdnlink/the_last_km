@@ -54,7 +54,7 @@ from auto_moniter.history import prune_files
 from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
-from auto_moniter import function_tasks
+from auto_moniter import function_gate, function_tasks
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
@@ -233,6 +233,9 @@ class Supervisor:
         self.modules = ModuleLedger(config.modules)
         self.audit = AuditLedger()
         self.function_tasks = function_tasks.FunctionTasks()
+        self._function_gate = self.config.function_dispatch
+        self._function_baseline = None
+        self._passed_function_checks = {}
         self._dispatch_directions = []
         self._function_issue_ids = []
         self._last_invocation = {}
@@ -374,7 +377,8 @@ class Supervisor:
                 return RunReport(self._resume_refused, 0, f"Run already finished with status {self._resume_refused}. Start a new --run-dir to run again.", "invalid")
             if not requirement_path.is_file():
                 return RunReport("invalid", 0, "Cannot resume run: requirement.md is missing.", "invalid")
-        verdict_schema = function_tasks.schema(VERDICT_SCHEMA) if self.config.function_dispatch else VERDICT_SCHEMA
+        verdict_schema = function_tasks.schema(VERDICT_SCHEMA, gate=self._function_gate,
+            integration=bool(self._integration_scopes())) if self.config.function_dispatch else VERDICT_SCHEMA
         self.schema_path.write_text(json.dumps(verdict_schema, indent=2), encoding="utf-8")
         if self.config.keep_rounds is None:
             self.config.keep_rounds = 100
@@ -438,6 +442,8 @@ class Supervisor:
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
             return self._finish('action_required',
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
+        if self._function_gate and not function_gate.catalog(self.config.checks, self.modules.items):
+            return self._finish('action_required', 'Function dispatch requires an approved executable acceptance check. Configure checks and start a new run.', records, None)
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
                 or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
@@ -500,8 +506,13 @@ class Supervisor:
                 if self.git_history:
                     self._git_before = self.git_history.begin_round(round_index)
 
-                track_files = bool(self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
+                track_files = bool(self._function_gate or self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
                 before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                if self._function_gate:
+                    try:
+                        self._prepare_function_baseline(before_files)
+                    except (OSError, ValueError) as exc:
+                        return self._finish('action_required', 'Function scope could not be initialized: ' + str(exc), records, last_worker)
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
                                      workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
@@ -885,11 +896,33 @@ class Supervisor:
             next_functions = None
             if self.config.function_dispatch:
                 try:
-                    next_functions = self._review_function(verdict, review, round_index, review_tree)
+                    next_functions, scope_gaps = self._review_function(verdict, review, round_index, review_tree)
                 except ValueError as exc:
                     review.status = 'continue'
                     review_record.watcher_result.update(status='rejected', reasons=[str(exc)])
                     return self._finish('action_required', 'Function handoff rejected: ' + str(exc), records, review)
+                if scope_gaps:
+                    self._reject_function_candidate(review_record, scope_gaps)
+                if next_functions is not None and self._function_gate:
+                    task = self.function_tasks.current
+                    self._passed_function_checks = {}
+                    gaps = []
+                    if task['delivery_scope'] != 'function':
+                        missing = function_gate.coverage(self.function_tasks, self.modules.items, task,
+                            self.requirements_review, self.config.cwd)
+                        if missing:
+                            review_record.watcher_result.update(status='rejected', reasons=['Missing criteria: ' + ', '.join(missing)])
+                            return self._finish('action_required',
+                                'Reviewer must dispatch implementation tasks for uncovered criteria before declaring delivery: ' + ', '.join(missing),
+                                records, review)
+                    else:
+                        selected = function_gate.catalog(self.config.checks, self.modules.items, task['module_id'])
+                        if not self._delivery_checks(round_index, review, final=False, expected_tree=review_tree,
+                                function_commands=[selected[key] for key in task['check_ids']]):
+                            gaps = review.gaps or ['Function regression checks did not complete']
+                    if gaps:
+                        self._reject_function_candidate(review_record, gaps)
+                        next_functions = None
                 if next_functions is not None and self.function_tasks.current['delivery_scope'] == 'function':
                     self._check_budget()
                     self._advance_function(next_functions, review_record)
@@ -1136,7 +1169,8 @@ class Supervisor:
         self._write_state(records,'running',0,'',before)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
-        plan_schema = function_tasks.schema(requirements_review.SCHEMA, planning=True) if self.config.function_dispatch else requirements_review.SCHEMA
+        plan_schema = function_tasks.schema(requirements_review.SCHEMA, planning=True, gate=self._function_gate,
+            integration=bool(self._integration_scopes())) if self.config.function_dispatch else requirements_review.SCHEMA
         schema.write_text(json.dumps(plan_schema))
         self.schema_path=schema
         self.log('requirements: reviewer elaborating next requirement; worker has not started' if follow_up else 'requirements: reviewer elaborating original request; worker has not started')
@@ -1145,12 +1179,14 @@ class Supervisor:
                 return False
             prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None)
             if self.config.function_dispatch:
-                prompt += ('\n\nYou own function decomposition. Propose exactly one next_task for a single named function, '
-                           'with file, objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
+                prompt += ('\n\nYou own function decomposition. Propose exactly one next_task, normally for a single named function, '
+                           'with objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
                            'Use delivery_scope=function for intermediate work; module or requirement only for a final function plus the corresponding verification. '
                            'Declare original modules once in modules (files=[]; no commands); use modules=[] when the ledger is already populated. '
                            'For needs_input use next_task=null. Do not assign the full backlog. '
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
+                if self._function_gate:
+                    prompt += self._function_planning_contract()
                 if next_function:
                     prompt += '\nReuse the existing brief; choose only the next unaccepted function. Brief: ' + json.dumps(previous_brief, ensure_ascii=False)
             turn=self._invoke(self.config.reviewer,prompt,'',
@@ -1167,6 +1203,11 @@ class Supervisor:
                     raise ValueError('Reviewer must supply a structured function assignment and module plan')
                 assignment, modules = plan.pop('next_task'), plan.pop('modules')
                 brief = requirements_review.parse(json.dumps(plan))
+                brief['cycle'] = len(self.requirement_cycles) + 1
+                if self._function_gate and next_function and previous_brief.get('status') == 'ready':
+                    previous = previous_brief['acceptance_criteria']
+                    if brief['acceptance_criteria'][:len(previous)] != previous:
+                        raise ValueError('Reviewer must preserve the existing requirement criterion IDs and text')
                 if brief['status']=='ready':
                     from auto_moniter.modules import definitions
                     proposed = definitions(modules)
@@ -1179,14 +1220,18 @@ class Supervisor:
                     dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
                     if next_function and dispatch.current:
                         revised = function_tasks.validate(assignment, staged.items)
-                        if any(revised[k] != dispatch.current[k] for k in ('id','file','symbol','module_id','delivery_scope','depends_on')):
-                            raise ValueError('Updated instructions must refine the current function without replacing its identity or delivery scope')
+                        if function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
+                            raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
                         dispatch.current = None
                     dispatch.assign(assignment, staged.items)
+                    if self._function_gate:
+                        self._validate_function_plan(dispatch, staged.items, brief)
+                    elif dispatch.current.get('kind') == 'integration':
+                        raise ValueError('Integration requires the verified function gate')
                     self.function_tasks = dispatch
                     self.modules = staged
                     self._dispatch_directions = list(self._direction_ids['reviewer'])
-                    self._event('function_assigned', task_id=assignment['id'], file=assignment['file'], symbol=assignment['symbol'])
+                    self._record_assignment(dispatch.current)
                 elif assignment is not None:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
@@ -1564,7 +1609,7 @@ class Supervisor:
         return count, key, tree
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
-                         module_ids: set[str] | None = None) -> bool:
+                         module_ids: set[str] | None = None, function_commands: list[str] | None = None) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
         if self._pending_directions():
             verdict.status = 'continue'
@@ -1621,6 +1666,8 @@ class Supervisor:
         if final:
             ids.update(key for key, item in self.modules.items.items() if item["status"] == "accepted")
         commands.extend(self.modules.checks_for(ids))
+        if function_commands is not None:
+            commands = function_commands
         failures = []
         check_results = []
         budget_stop = None
@@ -1681,6 +1728,8 @@ class Supervisor:
                 self._stop_reason = 'Acceptance environment unavailable; prepare dependencies before resuming. See ' + path.name
                 failures.append(self._stop_reason)
                 break
+            if check_results[-1]['status'] == 'passed' and self._function_gate:
+                self._passed_function_checks[command] = path.name
             self._progress_reset |= self.quality.check_result(command, not (result.exit_code or result.timed_out or result.interruption))
         after = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         published_source_changed = after == before and self._checks_changed_published_source(before)
@@ -1752,6 +1801,81 @@ class Supervisor:
     def _pending_directions(self) -> bool:
         return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
 
+    def _integration_scopes(self):
+        return self.config.quality_policy.get('integration_scopes', []) if self._function_gate else []
+
+    def _record_assignment(self, task):
+        fields = ({'task_kind': 'integration', 'targets': task['targets'], 'integration_scope': task['integration_scope']}
+                  if task.get('kind') == 'integration' else {'file': task['file'], 'symbol': task['symbol']})
+        self._event('function_assigned', task_id=task['id'], **fields)
+
+    def _function_planning_contract(self):
+        from auto_moniter.function_languages import availability as language_availability
+        modules = self.modules.items
+        cycle = len(self.requirement_cycles) + 1
+        scopes = self._integration_scopes()
+        integration = (
+            '\nUse kind=integration only when the targets must change together to preserve working behavior. '
+            'Use integration_scope, the exact targets (file and symbol), and exactly the check_ids from one approved scope; '
+            'give an atomic_reason explaining why separate function tasks cannot work. Omit top-level file and symbol for '
+            'integration. Every target must change, and each role must cite every target file. Approved integration scopes: '
+            + json.dumps(scopes, ensure_ascii=False)) if scopes else ''
+        return ('\nFunction gate: use a supported source language and identify one exact qualified symbol. '
+                'Python, JavaScript and HTML inline JavaScript work without optional packages. '
+                'Other registered languages use the optional tree-sitter grammar pack; the monitor checks availability before dispatch. '
+                'Include criterion_ids from the assigned module (<module ID>:<one-based acceptance index>) '
+                f'and applicable requirement criteria (req:{cycle}:<one-based acceptance_criteria index>). '
+                'Use the same indices for new module definitions or a new brief returned in this response. Select check_ids from the '
+                'approved catalog; never write an executable command in a task. Include test_files=[] or exact paths '
+                'for new focused test files. Preserve existing tests and all code outside the assigned targets. '
+                'Only declare module or requirement delivery once accepted tasks plus the current task map to every '
+                'criterion in the delivery scope. Approved check IDs: '
+                + json.dumps(function_gate.catalog(self.config.checks, modules), ensure_ascii=False)
+                + '\nCriteria by ID: ' + json.dumps({**function_gate.requirement_criteria(self.requirements_review),
+                    **{k: v for ident in modules for k, v in function_gate.criteria(modules, ident).items()}}, ensure_ascii=False)
+                + '\nOptional language parser availability: ' + json.dumps(language_availability(), ensure_ascii=False)
+                + integration)
+
+    def _prepare_function_baseline(self, snapshot=None):
+        task = self.function_tasks.current
+        if self._function_baseline is not None and self._function_baseline['id'] == task['id']:
+            return self._function_baseline
+        if snapshot is None:
+            snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+        previous = self._last_invocation or {}
+        self._function_baseline = function_gate.baseline(
+            self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,
+            missing_ok=previous.get('task_id') != task['id'])
+        return self._function_baseline
+
+    def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
+        task = ledger.current
+        function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
+                                    approvals=self._integration_scopes())
+        if task['delivery_scope'] != 'function':
+            missing = function_gate.coverage(ledger, modules, task, brief, self.config.cwd,
+                                              provisional=provisional)
+            if missing:
+                raise ValueError('Assign remaining implementation before declaring delivery; uncovered criteria: ' + ', '.join(missing))
+
+    def _function_scope_problems(self):
+        try:
+            gaps, self._function_target_hashes = function_gate.scope_problems(self.config.cwd, self.function_tasks.current,
+                self._prepare_function_baseline(), file_snapshot(self.config.cwd, ignore_dir=self.run_dir))
+            return gaps
+        except (OSError, ValueError) as exc:
+            return [str(exc)]
+
+    def _reject_function_candidate(self, record, gaps):
+        review = record.verdict
+        review.status = 'continue'
+        review.task_status = 'changes_required'
+        review.next_task = None
+        review.gaps = list(dict.fromkeys([*review.gaps, *gaps]))
+        record.watcher_result.update(status='rejected', reasons=list(gaps), function_gate='repair')
+        record.delivery = {'status': 'rejected', 'reasons': list(gaps)}
+        self._event('function_gate_rejected', task_id=review.task_id, reasons=list(gaps))
+
     def _validate_function_worker(self, verdict):
         task = self.function_tasks.current
         expected = task['delivery_scope']
@@ -1780,7 +1904,7 @@ class Supervisor:
         if review.task_status == 'changes_required':
             if _accepted(review) or review.next_task is not None or not (review.gaps or review.blockers):
                 raise ValueError('Rejected function requires focused gaps and cannot dispatch another task')
-            return None
+            return None, []
         expected = task['delivery_scope']
         if (worker.task_id != task['id'] or worker.task_status != 'done' or review.gaps or review.blockers or review.next_actions
                 or (expected == 'function' and _accepted(review))
@@ -1791,7 +1915,7 @@ class Supervisor:
             review.status = 'continue'
             review.task_status = 'changes_required'
             review.gaps.append('New user instructions require reviewer planning before this function can advance.')
-            return None
+            return None, []
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree:
             raise ValueError('Function review is stale because the workspace changed')
         if self.git_history:
@@ -1801,24 +1925,49 @@ class Supervisor:
         unresolved = [i['id'] for i in self.audit.pending() if i['id'] in self._function_issue_ids]
         if unresolved:
             raise ValueError('Dispatched function has unresolved audit issues: ' + ', '.join(unresolved))
-        target = (self.config.cwd / task['file']).resolve()
+        if self._function_gate:
+            gaps = self._function_scope_problems()
+            if gaps:
+                return None, gaps
+        targets = {file: (self.config.cwd / file).resolve() for file, _ in function_tasks.targets(task)}
         for role, conclusion in [('worker', worker), ('reviewer', review)]:
             problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
                 ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
             if problems:
                 raise ValueError(role + ': ' + '; '.join(problems))
-            if target not in evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir):
-                raise ValueError(role + ' must cite the changed assignment file: ' + task['file'])
+            cited = evidence_paths(self.config.cwd, conclusion.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir)
+            missing = [file for file, path in targets.items() if path not in cited]
+            if missing:
+                raise ValueError(role + ' must cite every changed assignment file; missing: ' + ', '.join(missing))
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
         staged.accept(worker, review, index, tree)
         if expected == 'requirement' and review.next_task is not None:
             raise ValueError('Final delivery cannot include another implementation assignment')
         if review.next_task is not None:
-            staged.assign(review.next_task, self.modules.items)
-        return staged
+            if self._function_gate:
+                try:
+                    staged.assign(review.next_task, self.modules.items)
+                    self._validate_function_plan(staged, self.modules.items, self.requirements_review,
+                                                 provisional=task)
+                except ValueError as exc:
+                    staged.current = None
+                    self._event('function_next_assignment_rejected', task_id=task['id'], reason=str(exc))
+            else:
+                if isinstance(review.next_task, dict) and review.next_task.get('kind') == 'integration':
+                    raise ValueError('Integration requires the verified function gate')
+                staged.assign(review.next_task, self.modules.items)
+        return staged, []
 
     def _advance_function(self, staged, review_record):
         task = self.function_tasks.current
+        if self._function_gate:
+            selected = function_gate.catalog(self.config.checks, self.modules.items, task['module_id'])
+            staged.accepted[-1]['verification'] = {key: self._passed_function_checks[selected[key]]
+                                                   for key in task['check_ids']}
+            if task.get('kind') == 'integration':
+                staged.accepted[-1]['target_hashes'] = self._function_target_hashes
+            else:
+                staged.accepted[-1]['symbol_hash'] = self._function_target_hashes[task['file']]
         self.function_tasks = staged
         self._function_issue_ids = []
         self._dispatch_directions = list(self._direction_ids['reviewer'])
@@ -1827,10 +1976,10 @@ class Supervisor:
         self._progress_reset |= self.quality.milestone('function:' + task['id'])
         self._event('function_accepted', task_id=task['id'], tree=review_record.tree)
         if staged.current:
-            self._event('function_assigned', task_id=staged.current['id'], file=staged.current['file'], symbol=staged.current['symbol'])
+            self._record_assignment(staged.current)
 
     def _verdict_from_turn(self, turn: "_CompletedTurn", *, role: str) -> Verdict:
-        verdict = parse_verdict(turn.text, structured=turn.structured)
+        verdict = parse_verdict(turn.text, structured=turn.structured, function_gate=self._function_gate)
         if turn.interruption == "input request":
             verdict.status = "continue"
             verdict.gaps.append("The agent was waiting for input or confirmation. Continue the authorized task without waiting for a reply.")
@@ -2023,6 +2172,7 @@ class Supervisor:
             "state_version": 1,
             "workflow": self.config.workflow,
             "function_dispatch": self.config.function_dispatch,
+            "function_gate": self._function_gate,
             "function_tasks": self.function_tasks.export(),
             "dispatch_directions": self._dispatch_directions,
             "function_issue_ids": self._function_issue_ids,
@@ -2116,6 +2266,10 @@ class Supervisor:
         if type(saved_dispatch) is not bool or self.config.function_dispatch and not saved_dispatch:
             raise ValueError('Function dispatch mode cannot change on resume')
         self.config.function_dispatch = saved_dispatch
+        self._function_gate = state.get('function_gate', False)
+        if type(self._function_gate) is not bool or self._function_gate and not saved_dispatch:
+            raise ValueError('Invalid saved function gate')
+        self._function_baseline = None
         self.function_tasks = function_tasks.FunctionTasks(state.get('function_tasks'))
         self._dispatch_directions = state.get('dispatch_directions', [])
         self._function_issue_ids = state.get('function_issue_ids', [])
@@ -2260,6 +2414,9 @@ class Supervisor:
                 if saved is None or any(saved.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "checks", "depends_on", "files") if key in item):
                     raise ValueError("module definitions cannot change on resume")
             self.modules = saved_modules
+        current = self.function_tasks.current
+        if current and current.get('kind') == 'integration':
+            function_gate.verify_integration_approval(current, self._integration_scopes())
         self._next_round = int(state.get("next_round") or 1)
         if self._next_round < 1:
             raise ValueError("next_round must be positive")
@@ -2318,10 +2475,10 @@ class Supervisor:
         if self.config.function_dispatch:
             task = self.function_tasks.current
             return '\n'.join([
-                'Implement one reviewer-owned function assignment in the working directory.',
+                'Implement one reviewer-owned assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
                 function_tasks.verdict_contract('worker', task),
-                'Latest review of this function:',
+                'Latest review of this assignment:',
                 json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
                            ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',
                 'Preserve earlier accepted functions and existing test assertions. Do not execute prose as watcher checks.',
@@ -2459,10 +2616,11 @@ class Supervisor:
                        last_review: Verdict | None = None) -> str:
         return "\n".join(
             [
-                *(["Dispatched function: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
+                *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
                    function_tasks.verdict_contract('reviewer', self.function_tasks.current),
                    "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
                   if self.config.function_dispatch else []),
+                *([self._function_planning_contract()] if self._function_gate else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",
                 "The worker alone implements fixes and runs builds or tests that write files. "
@@ -2510,7 +2668,7 @@ class Supervisor:
                 "Do not invent that next requirement, and do not treat a repair of the same defect as a new requirement.",
                 "",
                 f"Review round: {index}",
-                ("Checkpoint: function review; assess the named function only, except for its explicit module/final gate."
+                ("Checkpoint: assess only the assigned targets, except for the explicit module/final gate."
                  if self.config.function_dispatch else "Checkpoint: completion candidate" if _accepted(worker)
                  else "Checkpoint: in-progress audit; steer unfinished work without accepting it as delivered"),
                 f"Workspace fingerprint: {tree}",
@@ -2572,6 +2730,8 @@ class Supervisor:
         if not worker or worker.failure or worker.interruption:
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
+        if review and review.watcher_result.get('function_gate') == 'repair':
+            return None
         rejected_audit = bool(review and (review.watcher_result.get('status') == 'rejected'
                                          or review.failure or review.interruption or review.verdict.parse_error))
         function_ready = bool(self.config.function_dispatch and self.function_tasks.current
@@ -2772,7 +2932,7 @@ class Supervisor:
             prompt += 'Preserve time to report evidence, remaining gaps and a safe handoff before these hard limits.\n'
             prompt += ('Environment failures are not coding defects: preserve known missing-tool/platform evidence. '
                        'Do not repeat an unavailable build or create substitute platforms to claim full validation. '
-                       + ('Continue only work inside the dispatched function and focused runnable checks; ' if self.config.function_dispatch
+                       + ('Continue only work inside the dispatched scope and focused runnable checks; ' if self.config.function_dispatch
                           else 'Continue independent implementation and focused runnable checks; ') +
                        'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')

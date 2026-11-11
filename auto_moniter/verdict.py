@@ -161,7 +161,7 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
-def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
+def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gate: bool = False) -> Verdict:
     status = str(data.get("status", "")).strip().lower()
     if status not in _STATUS:
         status = "continue"
@@ -183,6 +183,15 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool) -> Verdict:
     )
     # Older conclusions may omit the closure array. They cannot close any issue.
     invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data and name != "issue_resolutions"]
+    if function_gate:
+        required = set(VERDICT_SCHEMA['required']) | {'task_id', 'task_status', 'next_task'}
+        invalid.extend(required ^ data.keys())
+        if not isinstance(data.get('task_id'), str) or not data['task_id']:
+            invalid.append('task_id')
+        if data.get('task_status') not in ('done', 'incomplete', 'accepted', 'changes_required'):
+            invalid.append('task_status')
+        if data.get('next_task') is not None and not isinstance(data['next_task'], dict):
+            invalid.append('next_task')
     invalid.extend(
         name for name in ("done", "gaps", "next_actions", "evidence", "blockers", "module_ids")
         if name in data and (not isinstance(data[name], list) or not all(isinstance(item, str) for item in data[name]))
@@ -290,7 +299,7 @@ def _candidate_objects(text: str) -> list[str]:
     return _balanced_objects(text)
 
 
-def parse_verdict(text: str, *, structured: bool = False) -> Verdict:
+def parse_verdict(text: str, *, structured: bool = False, function_gate: bool = False) -> Verdict:
     """Extract the last structured conclusion from an agent turn."""
     raw = text or ""
     stripped = raw.strip()
@@ -317,7 +326,7 @@ def parse_verdict(text: str, *, structured: bool = False) -> Verdict:
             conclusion_end = stripped.rfind(candidate) + len(candidate)
             last_error = ""
     if chosen is not None:
-        verdict = _normalize(chosen, raw, structured=structured)
+        verdict = _normalize(chosen, raw, structured=structured, function_gate=function_gate)
         request = input_request(stripped[conclusion_end:])
         if request:
             verdict.status = "continue"

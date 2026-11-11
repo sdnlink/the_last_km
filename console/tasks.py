@@ -514,7 +514,8 @@ class TaskStore:
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
-        function_dispatch = data.get('function_dispatch', False)
+        function_dispatch = data.get('function_dispatch',
+            workflow == 'review-first' and data.get('verification_mode') not in ('review_only', 'planning'))
         if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
             raise TaskError('逐函数下发需要启用先审核需求的流程')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
@@ -530,9 +531,12 @@ class TaskStore:
             raise TaskError('验收命令格式不正确，每行填写一条命令')
         # Distinguish explicit mode from legacy clients that omit verification_mode.
         mode_explicit = 'verification_mode' in data
-        verification_mode = data.get('verification_mode', 'review_only')
+        verification_mode = data.get('verification_mode',
+            'executable' if function_dispatch else 'review_only')
         if verification_mode not in ('executable', 'review_only', 'planning'):
             raise TaskError('验收模式无效')
+        if function_dispatch and mode_explicit and verification_mode != 'executable':
+            raise TaskError('逐函数派单需要执行验收模式及已批准的检查')
         # Module-level checks also schedule sh -lc execution via ModuleLedger; inspect raw
         # payload before settings()/save so contradictory modes never leave a half task.
         module_check_commands = _module_check_commands(data.get('modules', []))
@@ -560,7 +564,7 @@ class TaskStore:
             if guided:
                 guided = {**guided, 'selected_ids': [], 'selected': []}
             checks = []
-        if verification_mode == 'executable' and not checks and not (guided and guided['selected']):
+        if mode_explicit and verification_mode == 'executable' and not checks and not module_check_commands and not (guided and guided['selected']):
             raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
         for key, default, maximum in [('max_runtime_minutes', 120, 43200), ('max_agent_calls', 100, 100000),
@@ -592,6 +596,15 @@ class TaskStore:
                     checks = []
                 if len(checks)>20:
                     raise TaskError('最多选择或填写 20 条验收检查')
+            scopes = execution.get('quality_policy', {}).get('integration_scopes', [])
+            if scopes:
+                if not function_dispatch:
+                    raise TaskError('集成任务需要开启逐函数派单与执行验收')
+                from auto_moniter.function_gate import validate_approvals
+                try:
+                    validate_approvals(scopes, cwd, {m['id']: m for m in execution['modules']}, checks)
+                except (ValueError, OSError) as exc:
+                    raise TaskError(str(exc)) from exc
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
                     'function_dispatch': function_dispatch,
@@ -691,8 +704,7 @@ class TaskStore:
         for check in meta['checks']:
             argv.append('--check=' + check)
         argv.append('--workflow='+meta.get('workflow','legacy'))
-        if meta.get('function_dispatch'):
-            argv.append('--function-dispatch')
+        argv.append('--function-dispatch' if meta.get('function_dispatch') else '--no-function-dispatch')
         if meta.get('acceptance'):
             argv.append('--accept=' + meta['acceptance'])
         # Legacy metadata keeps the old provider boundary; new tasks store an

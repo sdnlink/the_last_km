@@ -24,7 +24,7 @@ function deliveryDiagnosis(t){
  const labels={implementation_not_started:'实现尚未开始',watcher_gate_rejected:'watcher 未通过验收门禁',
   no_comparable_review:'没有针对同一候选及范围的有效审核',worker_reviewer_disagree:'worker 与 reviewer 结论不一致',
   both_incomplete:'worker 与 reviewer 均认为尚未完成',candidate_delivered_remaining_work_pending:'该候选已交付，仍有后续工作',
-  function_accepted_remaining_work_pending:'该函数已验收，仍有后续工作',joint_claim_delivery_unconfirmed:'双方确认，交付尚未证实'};
+  function_accepted_remaining_work_pending:'当前派单已验收，仍有后续工作',joint_claim_delivery_unconfirmed:'双方确认，交付尚未证实'};
  const role=(name,r)=>'<li><strong>'+name+'</strong>：'+(r?.index?'第 '+escape(r.index)+' 轮 · '+escape(r.task_status||r.status||'未记录')+' · '+escape(r.summary||''):'无结论')+'</li>';
  return '<div class="detail-alert"><strong>到时交付诊断：'+escape(labels[d.code]||d.code)+'</strong><ul>'+
   role('Worker',d.worker)+role('Reviewer',d.reviewer)+'<li><strong>Watcher</strong>：'+
@@ -33,8 +33,18 @@ function deliveryDiagnosis(t){
 }
 function renderRequirements(t){
  const task=t.function_tasks?.current;
- const functionHTML=t.function_dispatch?'<h3>函数任务单</h3><p>已通过 '+escape(t.function_tasks?.accepted?.length||0)+' 项函数审核</p>'+
-  (task?'<p><strong>'+escape(task.id)+'</strong> · '+escape(task.file)+' · '+escape(task.symbol)+'</p><p>'+escape(task.objective)+'</p>':'<p>等待 reviewer 下发或任务已结束。</p>'):'';
+ const functions=t.function_tasks?.accepted||[];
+ const functionHTML=t.function_dispatch?'<h3>开发任务单</h3><p>已通过 '+escape(functions.length)+' 项派单验收</p>'+
+  (task?'<p><strong>'+escape(task.id)+'</strong> · '+(task.kind==='integration'?'集成任务 · '+escape(task.integration_scope):
+     escape(task.file)+' · '+escape(task.symbol))+'</p><p>'+escape(task.objective)+'</p>'+
+   (task.kind==='integration'?'<p>'+escape(task.atomic_reason)+'</p><ul>'+task.targets.map(target=>'<li>'+
+     escape(target.file)+' · '+escape(target.symbol)+'</li>').join('')+'</ul>':'')+
+   (task.criterion_ids?'<p>关联验收条目：'+escape(task.criterion_ids.join('、'))+'；待执行检查：'+escape(task.check_ids.join('、'))+'</p>':''):
+   '<p>等待 reviewer 下发或任务已结束。</p>')+
+  (functions.length?pagedList('accepted-functions',functions,item=>'<li><span>'+escape(item.task.id)+
+    (item.task.kind==='integration'?' · 集成任务（'+escape(item.task.targets.length)+' 个函数）':'')+'</span><span>'+
+    escape((item.task.criterion_ids||[]).join('、'))+'</span><span>'+
+    escape(item.verification?Object.entries(item.verification).map(([id,log])=>id+' 通过（'+log+'）').join('、'):'历史语义审核')+'</span></li>'):''):'';
  const coverage=t.requirement_coverage;
  const coverageHTML=coverage?.requirements?.length?`<h3>上次需求证据覆盖检查</h3><p>此处为历史检查，不代表当前交付确认。核对版本：${escape(coverage.tree||'未记录')}；${coverage.complete?'已满足结构化覆盖门禁':'尚有缺口'}</p>${pagedList('requirement-coverage',coverage.requirements,r=>`<li><span>${escape(r.id)}</span><span>${escape(r.text)} · ${escape((r.evidence||[]).join('、'))}</span><span>${r.covered?'已覆盖':'待核对'}</span></li>`)} `:'';
  const brief=t.requirements_review;

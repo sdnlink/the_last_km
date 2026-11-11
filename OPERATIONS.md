@@ -14,6 +14,8 @@ python3 -m venv .venv
 
 也可以从源码 `pip install .`。要求 Python 3.11+、Linux `/proc`、POSIX 进程组和文件锁；完整测试在 Python 3.12 完成。无需第三方 Python 运行时依赖。agent CLI 需另行安装并配置登录；monitor 在创建运行记录或启动 worker 前检查所选内置 CLI 可执行文件是否存在。
 
+其他语言的函数范围校验使用可选依赖：在 monitor 的 Python 环境安装 `pip install 'auto-moniter[languages]'`（源码安装用 `pip install '.[languages]'`）。`doctor` 的 `function_languages` 显示已注册语言的可用状态；Reviewer 同样会收到解析器目录。Watcher 按扩展名选择本地语法规则，不执行目标代码、不在任务运行时安装或下载解析器。函数语法错误、重名或缺少解析器会明确拒绝，不会降级为整文件修改。离线部署可事先下载带依赖的 wheel，再使用 `pip install --no-index --find-links=/path/to/wheels 'auto-moniter[languages]'`。
+
 `selftest` 是离线本地 fixture，不使用模型、不检查登录。实际后端的 CLI 版本、认证和模型输出质量必须在目标环境验证。不要把离线测试通过理解为所有厂商后端都完成实机认证。
 
 ## 日常运行

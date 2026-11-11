@@ -393,7 +393,7 @@ function bind(name){
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
    const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
-   if(form.elements.function_dispatch)data.function_dispatch=form.elements.function_dispatch.checked;
+   if(form.elements.function_dispatch)data.function_dispatch=data.verification_mode==='executable'&&form.elements.function_dispatch.checked;
    try{selectedModels(form,data);}catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;return;}
    for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
    data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);

@@ -10,22 +10,69 @@ TASK_SCHEMA={'type':'object','additionalProperties':False,'properties':{
  **{k:{'type':'array','items':{'type':'string'}} for k in ['boundaries','verification','depends_on']},
  'delivery_scope':{'type':'string','enum':['function','module','requirement']}},'required':sorted(FIELDS)}
 NEXT_SCHEMA={'anyOf':[{'type':'null'},TASK_SCHEMA]}
+GATE_FIELDS = {'criterion_ids', 'check_ids', 'test_files'}
+INTEGRATION_FIELDS = {'kind', 'integration_scope', 'targets', 'atomic_reason'}
+INTEGRATION_TASK_FIELDS = (FIELDS - {'file', 'symbol'}) | GATE_FIELDS | INTEGRATION_FIELDS
+MAX_INTEGRATION_TARGETS = 4
+
+
+def targets(task):
+    if task.get('kind') == 'integration':
+        return tuple((target['file'], target['symbol']) for target in task['targets'])
+    return ((task['file'], task['symbol']),)
+
+
+def identity(task):
+    return (task['id'], task['module_id'], task['delivery_scope'], task['depends_on'],
+            task.get('integration_scope'), sorted(targets(task)),
+            sorted(task['test_files']) if task.get('kind') == 'integration' else None)
+
+
+def validate_target(file, symbol):
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 2000 or '\0' in v for v in (file, symbol)):
+        raise ValueError('Missing precise function assignment file or symbol')
+    path = Path(file)
+    if path.is_absolute() or '..' in path.parts or not path.parts or re.search(r'[*?\[\]\r\n]', file):
+        raise ValueError('Function assignment file must be project-relative')
+    if re.search(r'\s|[,;，；*?]', symbol):
+        raise ValueError('Function assignment must name one qualified function symbol')
+
+
+def validate_targets(value):
+    if not isinstance(value, list) or not 2 <= len(value) <= MAX_INTEGRATION_TARGETS:
+        raise ValueError(f'Integration requires 2–{MAX_INTEGRATION_TARGETS} function targets')
+    files = set()
+    for target in value:
+        if not isinstance(target, dict) or set(target) != {'file', 'symbol'}:
+            raise ValueError('Each integration target requires file and symbol')
+        file, symbol = target['file'], target['symbol']
+        validate_target(file, symbol)
+        if file in files:
+            raise ValueError('Integration targets must use distinct files')
+        files.add(file)
+
+
+def identifier(value):
+    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', value)
 
 
 def validate(value, modules=None):
-    if not isinstance(value,dict) or set(value)!=FIELDS:
+    if not isinstance(value,dict) or set(value) not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
     for key in ['id','module_id']:
-        if not isinstance(value[key],str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',value[key]):
+        if not identifier(value[key]):
             raise ValueError('Invalid function assignment '+key)
-    for key in ['file','symbol','objective','inputs','outputs']:
+    for key in ['objective','inputs','outputs']:
         if not isinstance(value[key],str) or not value[key].strip() or len(value[key])>2000 or '\0' in value[key]:
             raise ValueError('Missing precise function assignment '+key)
-    path=Path(value['file'])
-    if path.is_absolute() or '..' in path.parts or not path.parts or re.search(r'[*?\[\]\r\n]', value['file']):
-        raise ValueError('Function assignment file must be project-relative')
-    if re.search(r'\s|[,;，；*?]',value['symbol']):
-        raise ValueError('Function assignment must name one qualified function symbol')
+    if set(value) == INTEGRATION_TASK_FIELDS:
+        reason = value['atomic_reason']
+        if (value['kind'] != 'integration' or not identifier(value['integration_scope'])
+                or not isinstance(reason, str) or not reason.strip() or len(reason) > 1500 or '\0' in reason):
+            raise ValueError('Integration requires a valid scope ID and a reason the targets must change together')
+        validate_targets(value['targets'])
+    else:
+        validate_target(value['file'], value['symbol'])
     for key in ['boundaries','verification','depends_on']:
         v=value[key]
         if not isinstance(v,list) or len(v)>20 or any(not isinstance(s,str) or not s.strip() or len(s)>1500 for s in v):
@@ -38,6 +85,13 @@ def validate(value, modules=None):
         raise ValueError('Function assignment names an unknown module')
     if len(json.dumps(value,ensure_ascii=False).encode())>16000:
         raise ValueError('Function assignment exceeds 16 KiB')
+    if GATE_FIELDS <= value.keys():
+        for key in GATE_FIELDS:
+            entries = value[key]
+            if (not isinstance(entries, list) or len(entries) > 30
+                    or any(not isinstance(x, str) or not x or len(x) > 512 for x in entries)
+                    or len(set(entries)) != len(entries) or (not entries and key != 'test_files')):
+                raise ValueError('Invalid function assignment ' + key)
     return copy.deepcopy(value)
 
 
@@ -51,7 +105,9 @@ class FunctionTasks:
         self.accepted=copy.deepcopy(saved['accepted'])
         seen=set()
         for item in self.accepted:
-            if not isinstance(item,dict) or set(item)!={'task','round','tree','evidence'}:
+            if not isinstance(item,dict) or set(item) not in (
+                    {'task','round','tree','evidence'}, {'task','round','tree','evidence','verification','symbol_hash'},
+                    {'task','round','tree','evidence','verification','target_hashes'}):
                 raise ValueError('Invalid accepted function checkpoint')
             task=validate(item['task'])
             if (task['id'] in seen or not set(task['depends_on']) <= seen or type(item['round']) is not int or item['round']<1
@@ -59,6 +115,21 @@ class FunctionTasks:
                 raise ValueError('Invalid accepted function version')
             if not isinstance(item['evidence'],list) or any(not isinstance(e,str) for e in item['evidence']) or len(json.dumps(item).encode())>24000:
                 raise ValueError('Invalid accepted function evidence')
+            if 'verification' in item:
+                checks = item['verification']
+                if task.get('kind') == 'integration':
+                    hashes = item.get('target_hashes')
+                    valid_hashes = (isinstance(hashes, dict) and set(hashes) == {file for file, _ in targets(task)}
+                                    and all(isinstance(h, str) and re.fullmatch('[0-9a-f]{64}', h) for h in hashes.values()))
+                else:
+                    digest = item.get('symbol_hash')
+                    valid_hashes = isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest)
+                if (not GATE_FIELDS <= task.keys() or not isinstance(checks, dict) or set(checks) != set(task['check_ids'])
+                        or not valid_hashes
+                        or any(not isinstance(log, str) or not re.fullmatch(r'[0-9]+-check-[0-9]+\.log', log) for log in checks.values())):
+                    raise ValueError('Invalid accepted function verification')
+            elif task.get('kind') == 'integration':
+                raise ValueError('Accepted integration requires verification for every target')
             seen.add(task['id'])
         if self.current and (self.current['id'] in seen or not set(self.current['depends_on']) <= seen):
             raise ValueError('Saved assignment repeats accepted work or has unaccepted dependencies')
@@ -87,13 +158,31 @@ class FunctionTasks:
         return True
 
 
-def schema(base, *, planning=False):
+def schema(base, *, planning=False, gate=False, integration=False):
     result=copy.deepcopy(base)
+    next_schema = copy.deepcopy(NEXT_SCHEMA)
+    if gate:
+        task = next_schema['anyOf'][1]
+        task['properties'].update({k: {'type': 'array', 'items': {'type': 'string'}} for k in GATE_FIELDS})
+        task['required'].extend(sorted(GATE_FIELDS))
+        if integration:
+            grouped = copy.deepcopy(task)
+            for key in ('file', 'symbol'):
+                grouped['properties'].pop(key)
+            grouped['properties'].update({
+                'kind': {'type': 'string', 'enum': ['integration']},
+                'integration_scope': {'type': 'string'}, 'atomic_reason': {'type': 'string'},
+                'targets': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+                            'properties': {k: {'type': 'string'} for k in ('file', 'symbol')},
+                            'required': ['file', 'symbol']}},
+            })
+            grouped['required'] = sorted(INTEGRATION_TASK_FIELDS)
+            next_schema['anyOf'].append(grouped)
     if planning:
-        additions={'next_task':NEXT_SCHEMA,'modules':module_schema()}
+        additions={'next_task':next_schema,'modules':module_schema()}
     else:
         additions={'task_id':{'type':'string'},'task_status':{'type':'string',
-                   'enum':['done','incomplete','accepted','changes_required']},'next_task':NEXT_SCHEMA}
+                   'enum':['done','incomplete','accepted','changes_required']},'next_task':next_schema}
     result['properties'].update(additions)
     result['required'].extend(additions)
     return result
@@ -105,21 +194,23 @@ def module_schema():
 
 
 def verdict_contract(role, task):
+    group = task.get('kind') == 'integration'
+    scope = 'the dispatched integration and all of its listed functions' if group else 'the dispatched function'
     if role=='worker':
         return (
-            'Only implement the dispatched function and its focused verification. Do not start other work. '
-            'Return task_id='+task['id']+' and task_status=done only when the function is implemented and checked; '
+            f'Only implement {scope} and its focused verification. Do not start other work. '
+            'Return task_id='+task['id']+' and task_status=done only when the whole assignment is implemented and checked; '
             'otherwise task_status=incomplete. Return next_task=null and modules=[]. '
             'For delivery_scope=function return status=continue even when task_status=done. '
             'For module or requirement delivery, return status=done with scope matching delivery_scope and '
             'module_ids=['+task['module_id']+'] only when that delivery scope is fully verified. '
-            'Give changed-file evidence and behavioral check results; gaps and next_actions are only for this function.')
+            'Give evidence for every changed target file and behavioral check results; gaps and next_actions are only for this assignment.')
     return (
-        'Review only the dispatched function and its caller/verification evidence. Return matching task_id and '
+        f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Accept only after worker task_status=done and current evidence agrees. '
-        'For changes_required: status=continue, next_task=null; give only this function\'s actionable gaps and minimal repair. '
-        'For an accepted intermediate function: status=continue, gaps/next_actions/blockers=[], '
-        'and propose exactly one independently implementable next_task. '
+        'For changes_required: status=continue, next_task=null; give only this assignment\'s actionable gaps and minimal repair. '
+        'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
+        'and propose exactly one next_task that can be implemented and verified on its own. '
         'For module or requirement delivery: status=done with matching scope and module_ids containing only the '
         'current module; propose one next_task after module delivery, null after requirement delivery. '
         'Final requirement approval still checks coverage of every original requirement and integration.')

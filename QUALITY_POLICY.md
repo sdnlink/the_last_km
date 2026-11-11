@@ -64,6 +64,30 @@ review-first 中，`review_interval_s` 是累计 worker 工作时间的审核间
 
 审计问题目前继续采用工作树变化后的保守重开规则；模块影响范围优化不意味着业务问题可自动关闭。
 
+## 集成任务
+
+只有跨文件的指定函数必须一起变更时，才使用集成任务。先在固定模块清单里声明模块和行为检查，然后在质量策略中加入 `integration_scopes`。在 Web 填写「高级执行配置 → 质量策略（JSON）」；CLI 使用 `--modules modules.json --quality-policy quality.json`。
+
+```json
+{
+  "integration_scopes": [
+    {
+      "id": "pagination-contract",
+      "module_id": "API",
+      "targets": [
+        {"file": "src/api/handler.py", "symbol": "list_items"},
+        {"file": "src/ui/items.js", "symbol": "loadItems"}
+      ],
+      "check_ids": ["API:check:1"]
+    }
+  ]
+}
+```
+
+`API:check:1` 是固定模块 `API` 的第一条检查；`check:1` 是本任务第一条全局检查。在 Web 使用全局编号时，已选检查排在自定义命令之前，并按命令去重。优先使用固定模块检查，以免改变全局检查顺序时需要调整编号。
+
+Reviewer 下发 `kind: integration`、对应的 `integration_scope`、完全相同的目标及检查编号，并填写 `atomic_reason`。每组允许 2–4 个不同文件，每文件一个函数；必须是精确的项目相对路径，支持 Python、JavaScript 和 HTML 内联 JavaScript。每个函数都必须有实际改动。Watcher 只在所有目标、双方证据和批准的回归都通过后接受整单。新增测试遵循普通函数任务规则；配置和迁移仍不在此范围。Python、JavaScript、HTML 内联 JavaScript 为内置解析器；TypeScript/TSX、Go、Rust、Java、C/C++、C#、Kotlin、Swift、Ruby、PHP、Lua、Bash 由 `auto-moniter[languages]` 提供的 tree-sitter 规则自动识别。解析器不可用或语法错误时任务停止并说明安装/源码问题，不放宽范围。需要扩大批准范围时，请用新策略创建后续任务；恢复已有任务仍使用原审批清单。
+
 ## reviewer 工具边界
 
 `review_tools: "provider"` 沿用所选后端只读模式及配置的 OS 隔离。

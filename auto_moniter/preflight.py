@@ -23,6 +23,12 @@ def validate(config) -> None:
         from auto_moniter.quality import policy
         config.quality_policy = policy(config.quality_policy)
         module_ids = {m['id'] for m in config.modules}
+        scopes = config.quality_policy.get('integration_scopes', [])
+        if scopes and not config.resume:
+            if not config.function_dispatch:
+                raise ValueError('Integration scopes require function dispatch')
+            from auto_moniter.function_gate import validate_approvals
+            validate_approvals(scopes, config.cwd, {m['id']: m for m in config.modules}, config.checks)
         if not config.resume and any(set(r['module_ids']) - module_ids for r in config.quality_policy['requirements']):
             raise ValueError('Quality requirements must map to user-defined modules')
         if not config.resume:
@@ -92,6 +98,9 @@ def doctor(cwd: Path) -> dict:
         "project_exists": cwd.is_dir(), "project_writable": cwd.is_dir() and os.access(cwd, os.W_OK),
         "proc_available": Path("/proc/self/stat").is_file(), "shell_available": shutil.which("sh") is not None,
     }
+    from auto_moniter.function_languages import availability as language_availability
+    languages = language_availability()
     return {"version": __version__, "supported": all(checks.values()), "checks": checks,
             "providers": discover_providers(), "strict_review_available": shutil.which("bwrap") is not None,
+            "function_languages": languages,
             "note": "Offline checks only; provider login, API access, CLI flag compatibility, and strict mount support are not verified."}

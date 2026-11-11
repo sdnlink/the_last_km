@@ -15,7 +15,7 @@ DEFAULTS = {'protect_tests': True, 'verified_progress': True, 'no_progress_limit
 
 
 def policy(value):
-    if not isinstance(value, dict) or set(value) - DEFAULTS.keys():
+    if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {'integration_scopes'}):
         raise ValueError('Unknown or invalid quality policy field')
     result = {**DEFAULTS, **value}
     if len(json.dumps(result, ensure_ascii=False).encode()) > 128 * 1024:
@@ -52,6 +52,24 @@ def policy(value):
         for path in req['evidence_paths']:
             relative_path(path)
         seen.add(req['id'])
+    if 'integration_scopes' in result:
+        from auto_moniter.function_tasks import identifier, validate_targets
+        scopes = result['integration_scopes']
+        if not isinstance(scopes, list) or len(scopes) > 32:
+            raise ValueError('integration_scopes must be an array with at most 32 entries')
+        seen = set()
+        for scope in scopes:
+            if (not isinstance(scope, dict) or set(scope) != {'id', 'module_id', 'targets', 'check_ids'}
+                    or not identifier(scope['id']) or not identifier(scope['module_id']) or scope['id'] in seen):
+                raise ValueError('Each integration scope requires a unique ID, module_id, targets and check_ids')
+            validate_targets(scope['targets'])
+            ids = scope['check_ids']
+            if (not isinstance(ids, list) or not 1 <= len(ids) <= 30
+                    or any(not isinstance(x, str) or not re.fullmatch(
+                        r'(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:)?check:[1-9][0-9]{0,3}', x) for x in ids)
+                    or len(set(ids)) != len(ids)):
+                raise ValueError('Integration scopes require distinct approved check IDs')
+            seen.add(scope['id'])
     return result
 
 

@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: python -m pip install 'setuptools>=68' wheel
+      - run: python -m pip install 'setuptools>=68' wheel '.[languages]'
       - run: python -m compileall -q auto_moniter console tests
       - name: Run offline tests without installed AI CLIs
         env:

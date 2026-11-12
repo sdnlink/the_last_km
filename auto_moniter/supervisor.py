@@ -60,6 +60,7 @@ from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
 from auto_moniter.business_recovery import BusinessHeadChanged
+from auto_moniter.project_workspace import ProjectInputsChanged
 from auto_moniter.locking import workspace_lease
 from auto_moniter.quality import Quality
 from auto_moniter.metering import UsageMeter
@@ -243,6 +244,8 @@ class Supervisor:
         self._planning_rejection = None
         self._check_changes = []
         self._last_invocation = {}
+        self.project = None
+        self._project_replan = False
         self._delivery_diagnosis = {}
         self._started = time.monotonic()
         self._elapsed_before = 0.0
@@ -322,6 +325,11 @@ class Supervisor:
                     while True:
                         try:
                             return self._run_locked()
+                        except ProjectInputsChanged:
+                            self._check_budget()
+                            self._project_replan = True
+                            self.config.resume = True
+                            self._started = time.monotonic()
                         except BusinessHeadChanged:
                             self._check_budget()
                             if self._stop_requested or not self._sync_business_head(self._records):
@@ -410,6 +418,12 @@ class Supervisor:
                                    or self.quality.config.get('max_cost_usd') and self.meter.state['unknown_cost_turns'])
         history_type = ApprovedHistory if self.config.workflow=='review-first' else GitHistory
         self.git_history = history_type.open(self.config.cwd, self.run_dir, self.config.git_history)
+        from auto_moniter.project_workspace import ProjectWorkspace
+        self.project = ProjectWorkspace.open(self.config.cwd, self.run_dir)
+        if self.project:
+            if self.config.workflow != 'review-first' or self.config.no_review or not getattr(self.git_history,'business_commits',False):
+                raise ValueError('Parallel project work requires reviewed business-branch publication')
+            self.project.observe(force=True)
         if self.git_history:
             if (self.git_history.last_worker and self.git_history.last_worker['round'] >= self._next_round):
                 raise RecoveryError('Git checkpoint is ahead of run state; reconcile the saved round before resuming')
@@ -456,6 +470,9 @@ class Supervisor:
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
         if self._function_gate and not function_gate.catalog(self.config.checks, self.modules.items):
             return self._finish('action_required', 'Function dispatch requires an approved executable acceptance check. Configure checks and start a new run.', records, None)
+        self._wait_project_dependencies()
+        if self.project and not self._stop:
+            self._sync_business_head(records)
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
                 or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
@@ -482,6 +499,25 @@ class Supervisor:
                 last_worker = None
                 last_review = self._audit_feedback
                 stall, previous_gap_key, previous_tree = 0, '', ''
+            self._wait_project_dependencies()
+            if self._stop:
+                break
+            if self.project:
+                self._sync_business_head(records)
+            if self.project and self.requirements_review.get('status') == 'ready' and (self.project.needs_review or self._project_replan):
+                self.project.retain_assignment(self.function_tasks.current)
+                self.function_tasks.current = None
+                self._function_baseline = None
+                if self.git_history:
+                    self.git_history.candidate = {}
+                self._drop_worker_session = True
+                self._project_replan = False
+                self._event('project_replanning', source=self.project.current.get('source_commit',''))
+                if not self._elaborate_requirement(records, next_function=True):
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                        self.requirements_review.get('summary','Project impact review needs input'),records,last_worker)
+                last_worker = None
+                last_review = self._audit_feedback
             if self.config.quality_policy:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
@@ -521,7 +557,7 @@ class Supervisor:
                 if self.git_history:
                     self._git_before = self.git_history.begin_round(round_index)
 
-                track_files = bool(self._function_gate or self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
+                track_files = bool(self.project or self._function_gate or self.config.quality_policy or any(m.get('files') for m in self.modules.items.values()))
                 before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
                 if self._function_gate:
                     try:
@@ -569,6 +605,11 @@ class Supervisor:
                 self._rounds_since_review += 1
                 self._worker_seconds_since_review += turn.elapsed_s
                 after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
+                if self.project:
+                    outside = self.project.scope_errors(before_files,after_files)
+                    if outside:
+                        verdict.status = 'continue'
+                        verdict.gaps.append('Edits outside the declared parallel task scope require repair: '+', '.join(outside))
                 tree = (snapshot_fingerprint(self.config.cwd, after_files) if track_files else
                         workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
@@ -603,6 +644,11 @@ class Supervisor:
                     last_worker = None
                     last_review = self._audit_feedback
                     stall, previous_gap_key, previous_tree = 0, '', ''
+                    continue
+                if self.project and self.project.needs_review:
+                    record.failure = 'Project inputs changed during implementation; reviewer must update the assignment'
+                    self._event('project_candidate_stale', round=round_index)
+                    last_worker = None
                     continue
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed; restore original assertions before resuming. Files: '
@@ -758,7 +804,13 @@ class Supervisor:
             if self._stop:
                 break
             review_tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+            review_files = file_snapshot(self.config.cwd,ignore_dir=self.run_dir) if self.project else {}
             if tree != review_tree:
+                if self.project:
+                    self.project.note_changes(['Workspace changed after worker conclusion'])
+                    self._project_replan = True
+                    record.failure = 'Workspace changed after worker conclusion; assignment needs fresh review'
+                    continue
                 raise RuntimeError("Workspace changed after worker conclusion; worker evidence is stale")
             self._beat(f"round {round_index}: starting reviewer")
             self.log(f"round {round_index}: reviewer running")
@@ -780,7 +832,13 @@ class Supervisor:
                 self._beat(f"round {round_index}: checking reviewer writes")
                 if (workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != review_tree
                         and not self._business_head_changed()):
-                    raise RuntimeError(
+                    if self.project:
+                        current = file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
+                        previous = review_files
+                        self.project.note_changes([str(Path(p).relative_to(self.config.cwd)) for p in previous.keys() | current.keys()
+                                                   if previous.get(p) != current.get(p)])
+                    else:
+                        raise RuntimeError(
                         "Workspace changed during read-only review. Stopped without accepting the review. "
                         "No review backup was created; inspect the changes before resuming."
                     )
@@ -794,6 +852,15 @@ class Supervisor:
                 self._active_reviewer_id = ""
             review = self._verdict_from_turn(review_turn, role="reviewer")
             reported_review_status = review.status
+            if self.project:
+                self.project.observe(force=True)
+                if self.project.needs_review:
+                    records.append(RoundRecord(round_index,'reviewer',review,review_turn.exit_code,
+                        review_turn.timed_out,review_turn.elapsed_s,review_turn.session_id,str(review_turn.output_path),
+                        tree=tree,failure='Project changed during review; stale result was not accepted'))
+                    self._project_replan = True
+                    self._event('project_review_stale',round=round_index)
+                    continue
             if self._business_head_changed():
                 records.append(RoundRecord(round_index, 'reviewer', review, review_turn.exit_code,
                     review_turn.timed_out, review_turn.elapsed_s, review_turn.session_id,
@@ -1013,6 +1080,13 @@ class Supervisor:
                 if verdict.scope == "requirement" and review.scope == "requirement":
                     accepted = self._delivery_checks(round_index, review, expected_tree=review_tree) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree)
                     if accepted:
+                        if self.project:
+                            changed = self._sync_business_head(records)
+                            if changed or self.project.sync_errors or self.project.needs_review:
+                                self._project_replan = True
+                                last_worker = None
+                                self._event('project_integration_review', errors=self.project.sync_errors)
+                                continue
                         review_record.delivery = {'status': 'accepted', 'reasons': []}
                         self.modules.accept(verdict, review, round_index, review_tree)
                         if next_functions is not None:
@@ -1090,6 +1164,8 @@ class Supervisor:
                 and self.git_history._business_identity() != self.git_history.business_head)
 
     def _sync_business_head(self, records):
+        if self.project:
+            self.project.sync()
         history = self.git_history
         if not isinstance(history, ApprovedHistory) or not history.business_commits:
             return False
@@ -1121,6 +1197,8 @@ class Supervisor:
         self._worker_seconds_since_review = 0.0
         self._business_update_count = history.business_update_count
         self._business_input = {'before': before, 'after': dict(history.business_head), 'count': self._business_update_count}
+        if self.project:
+            self._project_replan = True
         self._recovery_count += 1
         self._no_progress = 0
         self._recovery_note = (
@@ -1141,6 +1219,29 @@ class Supervisor:
                  + ' with fresh implementation, review and acceptance checks')
         self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, current))
         return True
+
+    def _wait_project_dependencies(self):
+        if not self.project:
+            return
+        self.project.observe(force=True)
+        while self.project.waiting() and not self._stop:
+            self._beat('waiting for project dependencies: '+', '.join(self.project.waiting()))
+            self._process_control()
+            self._check_budget()
+            self._stop_event.wait(.5)
+            self.project.observe()
+
+    def _check_project_delivery(self, records):
+        if not self.project:
+            return
+        self.project.observe(force=True)
+        current = workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
+        if self.project.needs_review or current != self._delivery_tree:
+            if current != self._delivery_tree:
+                self.project.note_changes(['Workspace changed at final delivery'])
+            self._write_state(records,'running',0,'',current)
+            self._event('project_review_stale',reason='Inputs changed at final delivery; reopening review')
+            raise ProjectInputsChanged('Final project inputs need fresh review')
 
     def _begin_follow_up(self, records, review, review_record=None):
         """Start another reviewed requirement only when the saved request asks for one.
@@ -1206,6 +1307,17 @@ class Supervisor:
             raise RuntimeError('Workspace changed while closing delivered agents; revalidation required')
 
     def _elaborate_requirement(self,records, *, next_function=False):
+        while True:
+            self._project_review_changed = False
+            result = self._elaborate_requirement_once(records,next_function=next_function)
+            if not self._project_review_changed or self._stop:
+                return result
+            self._event('project_review_retry', reason='Concurrent changes invalidated the review; preserving work and reviewing current inputs')
+            self._check_budget()
+            self._retry_pause(1,'coalescing concurrent project changes')
+            self._sync_business_head(records)
+
+    def _elaborate_requirement_once(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         previous_brief = self.requirements_review
         if next_function and previous_brief.get('status') != 'ready':
@@ -1252,6 +1364,13 @@ class Supervisor:
                                'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
+            elif next_function:
+                prompt += ('\nAssess the changed project inputs against the existing brief and update the implementation plan. '
+                           'Preserve its original acceptance criteria and all outstanding work: '
+                           +json.dumps(previous_brief,ensure_ascii=False))
+            if self.project:
+                self.project.observe(force=True)
+            project_signature = self.project.signature if self.project else ''
             turn=self._invoke(self.config.reviewer,prompt,'',
                               role='reviewer',index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
@@ -1259,6 +1378,11 @@ class Supervisor:
             output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
             after_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
             after=snapshot_fingerprint(self.config.cwd,after_files)
+            if self.project:
+                self.project.observe(force=True)
+                if project_signature != self.project.signature:
+                    self._project_review_changed = True
+                    raise ValueError('Project inputs changed during requirement review; retrying on the latest inputs')
             if after!=before:
                 changes = [{'file':str(Path(name).relative_to(self.config.cwd)),
                             'change':'added' if name not in before_files else 'removed' if name not in after_files else 'modified'}
@@ -1269,6 +1393,9 @@ class Supervisor:
                     'cycle':len(self.requirement_cycles)+1,'at':datetime.now(timezone.utc).isoformat(),
                     'output_file':output_file,'accepted':False,'source':'unknown'}),durable=True)
                 workspace_changes = {'count':len(changes),'files':changes[:50],'report_file':report}
+                if self.project:
+                    self.project.note_changes([item['file'] for item in changes])
+                    self._project_review_changed = True
                 preview = ', '.join(item['change']+' '+json.dumps(item['file'],ensure_ascii=False) for item in changes[:10])
                 raise ValueError('Workspace changed during requirement review; review was not accepted. '
                                  'Change source is unknown; concurrent writes are possible. Files: '+preview+'. See '+report)
@@ -1281,7 +1408,7 @@ class Supervisor:
                 assignment, modules = plan.pop('next_task'), plan.pop('modules')
                 brief = requirements_review.parse(json.dumps(plan))
                 brief['cycle'] = len(self.requirement_cycles) + 1
-                if self._function_gate and next_function and previous_brief.get('status') == 'ready':
+                if next_function and previous_brief.get('status') == 'ready':
                     previous = previous_brief['acceptance_criteria']
                     if brief['acceptance_criteria'][:len(previous)] != previous:
                         # The reviewer owns the next assignment, not the existing
@@ -1306,6 +1433,11 @@ class Supervisor:
                             raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
                         dispatch.current = None
                     dispatch.assign(assignment, staged.items)
+                    if self.project:
+                        from auto_moniter.project_workspace import contains
+                        files = [file for file,_ in function_tasks.targets(dispatch.current)] + dispatch.current.get('test_files',[])
+                        if any(not contains(self.project.scope,file) for file in files):
+                            raise ValueError('Parallel assignment targets must stay inside the declared task scope')
                     if self._function_gate:
                         self._validate_function_plan(dispatch, staged.items, brief)
                     elif dispatch.current.get('kind') in ('integration','verification'):
@@ -1319,10 +1451,15 @@ class Supervisor:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
                 brief=requirements_review.parse(turn.text)
+                if next_function and previous_brief.get('status') == 'ready':
+                    brief['acceptance_criteria'] = list(previous_brief['acceptance_criteria'])
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
             self.requirements_review=brief
+            if self.project and brief['status']=='ready':
+                self.project.mark_reviewed(project_signature)
+                self._project_replan = False
             self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
             write_json(self.run_dir/'reviewed-requirement.json',safe(brief),durable=True)
             self._event('requirements_reviewed',status=brief['status'])
@@ -1332,7 +1469,7 @@ class Supervisor:
                                       'cycle': len(self.requirement_cycles) + 1,
                                       **({'output_file':output_file} if output_file else {}),
                                       **({'workspace_changes':workspace_changes} if workspace_changes else {})}
-            if follow_up and not self._stop_requested:
+            if follow_up and not self._stop_requested and not self._project_review_changed:
                 self._stop = True
                 self._stop_reason = 'Next requirement not ready: ' + self.requirements_review['summary']
             return False
@@ -1358,6 +1495,19 @@ class Supervisor:
         entry and again immediately before irreversible ref updates.
         """
         self._process_control(active=True)
+        if self.project:
+            self.project.observe(force=True)
+            if self.project.needs_review:
+                reviewer.verdict.status = 'continue'
+                reviewer.verdict.gaps.append('Parallel project inputs changed; review their impact and refresh the worker assignment before publication')
+                self._project_replan = True
+                return False
+            outside = self.project.pending_scope_errors()
+            if outside or self.project.sync_errors:
+                reviewer.verdict.status = 'continue'
+                reviewer.verdict.gaps.append('Parallel publication requires scope and integration repair: '
+                    + ', '.join([*outside,*self.project.sync_errors]))
+                return False
         if self._stop or self._stop_requested:
             reviewer.verdict.status = 'continue'
             reviewer.verdict.gaps.append(
@@ -1383,6 +1533,12 @@ class Supervisor:
         if not self._publication_boundary(reviewer):
             return False
         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=tree:
+            if self.project:
+                self.project.note_changes(['Workspace changed after review'])
+                self._project_replan = True
+                reviewer.verdict.status='continue'
+                reviewer.verdict.gaps.append('Workspace changed after review; review current inputs before committing')
+                return False
             raise RuntimeError('Workspace changed after review; refusing local commit')
         if self._pending_directions():
             reviewer.verdict.status='continue'
@@ -1448,6 +1604,14 @@ class Supervisor:
 
     def _should_stop(self) -> bool:
         self._process_control(active=True)
+        if self.project:
+            try:
+                if self.project.observe():
+                    self._event('project_change_detected', source=self.project.current.get('source_commit',''),
+                                note='Current call may finish; reviewer will refresh the next worker assignment')
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                self._project_replan = True
+                self._event('project_observation_failed', reason=str(exc))
         self._check_storage_quota()
         if self.config.max_run_bytes and time.monotonic() - self._last_space_check >= 1:
             self._last_space_check = time.monotonic()
@@ -1964,6 +2128,11 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
+        if self.project:
+            from auto_moniter.project_workspace import contains
+            files = [file for file,_ in function_tasks.targets(task)] + task.get('test_files',[])
+            if any(not contains(self.project.scope,file) for file in files):
+                raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
                                     approvals=self._integration_scopes())
         if task['delivery_scope'] != 'function':
@@ -2176,6 +2345,7 @@ class Supervisor:
                 'note': 'Unaccepted work and interrupted output require independent review; no delivery implied.'}), durable=True)
         if status == "done":
             self._check_budget()
+            self._check_project_delivery(records)
             current = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
             if current != self._delivery_tree:
                 raise RuntimeError("Workspace changed since final acceptance; refusing stale delivery")
@@ -2184,6 +2354,7 @@ class Supervisor:
             if cleanup_errors:
                 status = "failed"
                 summary = "Work accepted, but agent cleanup failed: " + "; ".join(cleanup_errors)
+            self._check_project_delivery(records)
             if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != self._delivery_tree:
                 raise RuntimeError("Workspace changed while closing agents; refusing stale delivery")
         report = RunReport(
@@ -3137,6 +3308,18 @@ class Supervisor:
                        'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')
         messages = self.directions.messages()
+        if self.project:
+            prompt += ('\n\nParallel project coordination (watcher-owned task boundary):\n'
+                       +json.dumps(self.project.context(),ensure_ascii=False)
+                       +'\nInspect changed shared inputs and peer work before selecting or implementing the next task. '
+                       'Preserve the original acceptance criteria and other tasks. Only edit this task scope. '
+                       'Reassess any interrupted_assignment explicitly; its implementation is preserved but unaccepted. '
+                       'Use a fresh assignment ID after changed inputs so scope baselines can be reviewed again. '
+                       'Identify actual dependencies; never claim a peer delivery is accepted from its text alone. '
+                       'Uncommitted source files are observed, not imported or verified. '
+                       'The watcher merges committed shared inputs; do not stage, commit, merge or alter Git refs. '
+                       'If integration was refused, inspect the conflicting delta, adapt the scoped implementation, '
+                       'and obtain review before the watcher retries integration.\n')
         if role=='worker' and self.config.function_dispatch:
             # Reviewer already received these instructions when defining the
             # assignment. Keep the worker input limited to the approved task.

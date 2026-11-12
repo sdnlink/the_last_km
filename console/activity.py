@@ -61,6 +61,13 @@ EVENT_LABELS = {
     'function_accepted': '函数通过验收',
     'acceptance_checks_added': '已追加验收检查',
     'maintenance_started': '部署维护，保存检查点后恢复',
+    'project_change_detected': '发现共享工程变化，等待当前调用结束后复核',
+    'project_observation_failed': '共享工程状态暂时无法读取，需要重新核对',
+    'project_replanning': 'Reviewer 正在复核工程变化并更新任务',
+    'project_review_retry': '工程继续变化，保留工作并重新审查',
+    'project_review_stale': '本轮审查输入已变化，结论需要重新核对',
+    'project_candidate_stale': '实现期间共享输入变化，先复核再派单',
+    'project_integration_review': '共享输入集成需重新审查',
 }
 
 

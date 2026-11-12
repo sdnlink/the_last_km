@@ -20,6 +20,7 @@ from auto_moniter.processes import process_identity
 from auto_moniter.providers import discover_providers
 from auto_moniter.providers import DEFAULT_PASEO_BACKEND, ProviderError
 from auto_moniter.locking import workspaces_overlap
+from auto_moniter.workspace import LockError
 from console.settings import settings, DEFAULTS
 from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
@@ -195,6 +196,8 @@ class TaskStore:
 
     def _save(self, meta: dict) -> None:
         write_json(self.tasks_dir / (meta['id'] + '.json'), meta, durable=True)
+        if meta.get('parallel_project'):
+            write_json(Path(meta['run_dir']) / 'project-lifecycle.json', {'status':meta['status']}, durable=True)
 
     def _launcher_alive(self, meta: dict) -> bool:
         identity = meta.get('launcher') or {}
@@ -342,6 +345,9 @@ class TaskStore:
             delivery_diagnosis = diagnose_delivery(rounds, acceptance=acceptance_results)
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
+                     'project_cwd':meta.get('project_cwd',''), 'parallel_project':meta.get('parallel_project',False),
+                     'task_scope':meta.get('task_scope',[]), 'task_dependencies':meta.get('task_dependencies',[]),
+                     'task_branch':meta.get('task_branch',''),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
                      'provider': meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                      'reviewer': meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'),
@@ -384,7 +390,7 @@ class TaskStore:
     @staticmethod
     def summary(view: dict) -> dict:
         """Allowlisted task metadata; streams and task instructions stay in detail APIs."""
-        keys = ('id', 'title', 'cwd', 'status', 'provider', 'reviewer', 'created_at', 'updated_at',
+        keys = ('id', 'title', 'cwd', 'project_cwd', 'parallel_project', 'task_branch', 'status', 'provider', 'reviewer', 'created_at', 'updated_at',
                 'resources', 'accepted_modules', 'total_modules', 'actions', 'control', 'control_message',
                 'can_direct', 'resume_unavailable')
         result = {key: view.get(key) for key in keys}
@@ -454,13 +460,41 @@ class TaskStore:
                 raise TaskError('pause 必须是布尔值')
             if pause and 'pause' not in view['actions']:
                 raise TaskError('当前任务无法请求暂停，请刷新状态后重试', 409)
+            directions = Directions(Path(meta['run_dir']))
+            text = data.get('text', '')
+            if not isinstance(text, str) or len(text) > 4000 or '\0' in text:
+                raise TaskError('请填写 1 到 4000 字的补充要求')
             try:
-                Directions(Path(meta['run_dir'])).append(data.get('text'))
+                if text.strip():
+                    directions.append(text)
+                elif view['status'] == 'queued' or not directions.messages():
+                    raise ValueError('请填写补充要求；已有要求可留空继续发送')
             except ValueError as exc:
                 raise TaskError(str(exc)) from exc
+            # Saving succeeds independently of resuming. A launch/validation
+            # failure must not make the person re-enter an accepted amendment.
+            submission = {'status': 'saved', 'message': '补充要求已保存，任务启动后发送给 AI。'}
             if pause:
                 write_json(Path(meta['run_dir']) / 'control.json', {'action': 'pause'}, durable=True)
-            return self.detail(ident)
+                submission.update(status='pause_requested', message='补充要求已保存，当前轮次结束后暂停。')
+            else:
+                try:
+                    if 'continue' in view['actions']:
+                        self.action(ident, 'continue')
+                        submission.update(status='continuing', message='补充要求已保存，已请求继续执行。')
+                    elif view['status'] in RESUMABLE:
+                        if 'resume' not in view['actions']:
+                            raise TaskError(view.get('resume_unavailable') or '当前检查点暂不能恢复，请核对任务状态', 409)
+                        self.action(ident, 'resume')
+                        submission.update(status='resuming', message='补充要求已保存，已启动恢复执行。')
+                    elif view['direction_delivery'] == 'restart_required':
+                        submission.update(message='补充要求已保存；当前监督器版本需停止并恢复后才能发送。')
+                    elif view['status'] in {'running', 'starting'}:
+                        submission.update(status='pending', message='补充要求已保存，将在下一轮 AI 调用时发送。')
+                except (TaskError, OSError, ValueError) as exc:
+                    submission.update(status='resume_blocked', error=redact(str(exc)),
+                                      message='补充要求已保存，但自动恢复受阻；无需重复填写。')
+            return {**self.detail(ident), 'direction_submission': submission}
 
     def detail(self, ident: str) -> dict:
         with self._lock:
@@ -519,6 +553,11 @@ class TaskStore:
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
+        parallel = data.get('parallel_project',False)
+        if type(parallel) is not bool:
+            raise TaskError('parallel_project 必须是布尔值')
+        if parallel and workflow != 'review-first':
+            raise TaskError('同工程并行任务需要先审核需求的流程')
         function_dispatch = data.get('function_dispatch',
             workflow == 'review-first' and data.get('verification_mode') not in ('review_only', 'planning'))
         if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
@@ -616,6 +655,25 @@ class TaskStore:
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
+            if parallel:
+                if verification_mode == 'planning':
+                    raise TaskError('并行开发请使用实现与验收模式；只制定验收方案不创建并行工作副本')
+                try:
+                    from auto_moniter.project_workspace import create as create_workspace
+                    def validate_workspace(workspace):
+                        nonlocal guided
+                        meta.update(project_cwd=str(cwd),cwd=workspace['cwd'],parallel_project=True,
+                                    task_scope=workspace['scope'],task_dependencies=workspace['dependencies'],task_branch=workspace['branch'])
+                        if guided:
+                            guided = select_acceptance(meta['cwd'],guided)
+                            meta['acceptance_plan'] = guided
+                        if auto_start:
+                            self._check_start(meta)
+                    workspace = create_workspace(cwd,run,ident,title,data.get('task_scope',[]),
+                                                 data.get('task_dependencies',[]),[*checks,*module_check_commands],
+                                                 validate=validate_workspace)
+                except (OSError,ValueError,LockError,subprocess.SubprocessError) as exc:
+                    raise TaskError('无法创建并行任务：'+str(exc),409) from exc
             from console.acceptance import coverage_warning
             meta['acceptance_warning'] = coverage_warning([*checks, *module_check_commands])
             if guided:
@@ -623,7 +681,7 @@ class TaskStore:
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']
                 if 'ndr-documentation' in guided['selected_ids'] and run.is_relative_to(cwd):
                     raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
-            if auto_start:
+            if auto_start and not parallel:
                 self._check_start(meta)
             self._save(meta)
             if auto_start:
@@ -889,9 +947,15 @@ class TaskStore:
                         marker = self.deleted_dir / (run_key(run) + '.json')
                         write_json(marker, {'id': ident, 'run_dir': str(run.resolve()),
                                           'deleted_at': timestamp(), 'logs_cleaned': True, **cleanup}, durable=True)
+                        lifecycle = run / 'project-lifecycle.json'
+                        previous_lifecycle = read_json(lifecycle) if meta.get('parallel_project') else None
                         try:
+                            if previous_lifecycle is not None:
+                                write_json(lifecycle,{'status':'deleted'},durable=True)
                             (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
                         except OSError:
+                            if previous_lifecycle is not None:
+                                write_json(lifecycle,previous_lifecycle,durable=True)
                             marker.unlink(missing_ok=True)
                             raise
                 except ValueError as exc:

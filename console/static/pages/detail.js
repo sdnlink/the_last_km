@@ -6,7 +6,7 @@ const id=document.body.dataset.taskId;
 const section=$('#detail-page').dataset.section;
 let task,role='all',log='',logSequence=0,logTotal=0;
 function render(t){
- task=t;$('#detail-title').textContent=t.title;$('#detail-project').textContent=t.cwd;
+ task=t;$('#detail-title').textContent=t.title;$('#detail-project').textContent=t.project_cwd||t.cwd;
  $('#detail-open-direction').dataset.direction=id;$('#detail-open-direction').disabled=!t.can_direct;
  $('#detail-progress-link').href=`/progress?task=${id}`;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
@@ -50,7 +50,8 @@ function renderRequirements(t){
  const coverage=t.requirement_coverage;
  const coverageHTML=coverage?.requirements?.length?`<h3>上次需求证据覆盖检查</h3><p>此处为历史检查，不代表当前交付确认。核对版本：${escape(coverage.tree||'未记录')}；${coverage.complete?'已满足结构化覆盖门禁':'尚有缺口'}</p>${pagedList('requirement-coverage',coverage.requirements,r=>`<li><span>${escape(r.id)}</span><span>${escape(r.text)} · ${escape((r.evidence||[]).join('、'))}</span><span>${r.covered?'已覆盖':'待核对'}</span></li>`)} `:'';
  const brief=t.requirements_review;
- const briefHTML=requirementReviewHTML(brief);
+ const parallelHTML=t.parallel_project?`<h3>同工程并行任务</h3><p>原工程：${escape(t.project_cwd)}</p><p>独立工作副本：${escape(t.cwd)}</p><p>交付分支：${escape(t.task_branch)}</p><p>负责范围：${escape((t.task_scope||[]).join('、'))}</p><p>前置任务：${escape((t.task_dependencies||[]).join('、')||'无')}</p><p>共享输入变化由 watcher 检测并交 reviewer 复核；任务分支保留独立交付记录，不覆盖原工作区。</p>`:'';
+ const briefHTML=parallelHTML+requirementReviewHTML(brief);
  const plan=t.acceptance_plan,results=t.acceptance_results;
  const checkLabels={passed:'检查通过',check_failed:'检查未通过（需核对输出）',environment_unavailable:'运行环境不可用',timed_out:'检查超时',interrupted:'检查被中断'};
  const acceptanceHTML=plan?.criteria?`<h3>完成标准</h3><div class="requirement-text">${escape(plan.criteria)}</div><p>${t.verification_mode==='planning'?'本任务仅制定验收方案，不代表原目标验收。':t.verification_mode==='review_only'?'仅语义审核：未提供运行测试通过证明。':'检查通过仍须结合独立审核、模块及审计门禁。'}</p><h3>选定检查</h3>${pagedList('acceptance-selected',plan.selected||[],c=>`<li><span>${escape(c.title)}</span><span>${escape(c.purpose)}</span></li>`,{empty:'<li>未选择项目自动检查；如有高级命令，结果在下面单列。</li>'})}`:'';

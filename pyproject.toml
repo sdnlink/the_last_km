@@ -34,6 +34,6 @@ include = ["auto_moniter*", "console*"]
 console = ["static/*", "static/pages/*", "static/fragments/*"]
 
 [tool.setuptools.data-files]
-"share/doc/auto-moniter" = ["README.md", "OPERATIONS.md", "CHANGELOG.md", "QUALITY_POLICY.md", "ACCEPTANCE_GUIDE.md", "WORKFLOW.md"]
+"share/doc/auto-moniter" = ["README.md", "README.zh-CN.md", "OPERATIONS.md", "CHANGELOG.md", "QUALITY_POLICY.md", "ACCEPTANCE_GUIDE.md", "WORKFLOW.md"]
 "share/doc/auto-moniter/deploy" = ["deploy/auto-moniter@.service", "deploy/task.example.json"]
 "share/doc/auto-moniter/tools" = ["tools/soak.py", "tools/certify_backend.py", "tools/check_documentation.py"]

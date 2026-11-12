@@ -3,31 +3,94 @@ body[data-page="setup"] #new-task { display:none; }
 .setup-intro h2 { margin:8px 0; font-size:22px; }
 .setup-intro p, .setup-notice { color:var(--muted); font-size:12px; line-height:1.9; }
 .setup-actions { display:flex; flex-wrap:wrap; gap:10px; }
-.setup-notice { margin:18px 0; }
-.setup-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr)); gap:18px; }
-.agent-card { min-width:0; margin:0; padding:22px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.setup-overview { display:flex; gap:24px; align-items:center; justify-content:space-between; margin:18px 0; }
+.setup-notice { margin:0; max-width:760px; }
+.setup-count { white-space:nowrap; color:var(--accent); font-size:11px; padding:6px 11px; border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:20px; }
+.setup-list-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:25px 0 15px; }
+.setup-list-heading h2 { font-size:15px; margin:0; }
+.setup-list-heading p, .setup-list-heading > span { color:var(--muted); font-size:11px; margin:5px 0 0; }
+.setup-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,290px),1fr)); gap:16px; }
+.agent-card { min-width:0; margin:0; padding:19px 20px 15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); transition:border-color .15s,box-shadow .15s; }
+.agent-card:hover { border-color:var(--accent-line); box-shadow:0 5px 18px #123c3b08; }
 .agent-card.selected { border-color:var(--accent-line); }
-.agent-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
-.agent-select { display:flex; align-items:center; gap:10px; font-size:16px; font-weight:600; }
+.agent-card-head { display:flex; align-items:center; gap:11px; }
+.agent-avatar { display:grid; place-items:center; width:36px; height:36px; border-radius:10px; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:600; flex-shrink:0; border:1px solid var(--accent-line); }
+.agent-card-head > div { min-width:0; }
+.agent-name { display:flex; align-items:center; gap:7px; max-width:100%; background:none; border:0; font-size:16px; font-weight:600; padding:0; text-align:left; overflow-wrap:anywhere; }
+.agent-name:hover { color:var(--accent); }
+.agent-name svg { width:13px; height:13px; color:var(--muted); }
+.agent-role { display:block; color:var(--muted); font-size:10px; margin-top:3px; }
+.agent-select { display:flex; align-items:center; gap:5px; margin-left:auto; font-size:10px; color:var(--muted); flex-shrink:0; cursor:pointer; }
 .agent-select input { accent-color:var(--accent); }
-.agent-detected { color:var(--muted); font-size:11px; white-space:nowrap; }
+.agent-card-summary { display:flex; gap:9px; align-items:center; margin-top:17px; min-height:20px; flex-wrap:wrap; }
+.agent-detected { color:var(--muted); font-size:10px; }
+.agent-detected::before { content:""; display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--control-line); margin-right:6px; vertical-align:1px; }
 .agent-detected.installed { color:var(--accent); }
-.agent-note { font-size:11px; color:var(--muted); line-height:1.8; margin:0 0 12px; }
-.agent-card label:not(.agent-select) { display:block; margin-top:12px; }
-.agent-card label:not(.agent-select) input, .agent-card label select { width:100%; margin:6px 0 0; padding:9px 11px; min-width:0; font-size:12px; }
-.agent-card small { display:block; margin-top:7px; color:var(--muted); font-size:10px; overflow-wrap:anywhere; }
-.agent-card-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:18px; }
-.agent-card-actions a { margin-left:auto; font-size:11px; color:var(--accent); }
-.agent-message { min-height:20px; font-size:11px; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
-.agent-card [data-clear-key] { font-size:10px; margin:7px 0 0; color:var(--muted); border:0; background:none; padding:0; }
-.setup-jobs { margin-top:22px; }
-#setup-jobs { padding:0 24px 24px; }
-.setup-job { margin-top:12px; font-size:12px; overflow-wrap:anywhere; }
-.setup-job summary { cursor:pointer; }
-.setup-job pre { max-height:240px; overflow:auto; white-space:pre-wrap; background:#f4f7fa; padding:12px; font-size:11px; }
+.agent-detected.installed::before { background:var(--accent); }
+.agent-draft { font-size:9px; color:var(--amber); }
+.agent-model-summary { display:flex; align-items:center; gap:10px; width:100%; padding:12px 0; border:0; border-bottom:1px solid var(--line); background:none; text-align:left; font-size:11px; }
+.agent-model-summary > span:first-child { color:var(--muted); flex-shrink:0; }
+.agent-model-summary strong { font-size:11px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.agent-model-summary > span:last-child { margin-left:auto; color:var(--muted); }
+.agent-summary-bottom { display:flex; justify-content:space-between; gap:10px; padding-top:12px; font-size:10px; color:var(--muted); }
+.agent-settings-link { background:none; border:0; color:var(--accent); padding:0; font-size:10px; }
+.agent-config-dialog { padding:0; width:min(620px,calc(100vw - 32px)); max-height:calc(100dvh - 48px); border:1px solid var(--line); border-radius:14px; color:var(--text); box-shadow:0 20px 90px #102d3840; overflow:auto; }
+.agent-config-dialog::backdrop { background:#17333c66; backdrop-filter:blur(2px); }
+.agent-config-dialog .dialog-heading { display:flex; justify-content:space-between; align-items:flex-start; padding:25px 28px; border-bottom:1px solid var(--line); }
+.agent-config-dialog h2 { margin:8px 0; font-size:23px; }
+.agent-config-dialog .dialog-heading p { color:var(--muted); font-size:11px; margin:0; }
+.agent-config-body { padding:22px 28px 15px; }
+.agent-config-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.agent-config-wide { grid-column:1/-1; }
+.agent-config-dialog label { display:block; font-size:12px; }
+.agent-config-dialog label input, .agent-config-dialog label select { display:block; width:100%; margin:7px 0 0; padding:10px 11px; min-width:0; font-size:12px; border:1px solid var(--control-line); border-radius:5px; background:var(--surface); color:var(--text); }
+.agent-config-dialog small { display:block; margin-top:7px; color:var(--muted); font-size:10px; overflow-wrap:anywhere; }
+.agent-note { color:var(--muted); font-size:11px; line-height:1.8; margin:0 0 17px; }
+.agent-config-dialog [data-clear-key] { font-size:10px; margin:7px 0 0; color:var(--muted); border:0; background:none; padding:0; }
+.agent-executable { margin-top:21px; border-top:1px solid var(--line); padding-top:15px; }
+.agent-executable summary { cursor:pointer; font-size:11px; color:var(--muted); }
+.agent-executable label { margin-top:13px; }
+.agent-cli-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:20px; }
+.agent-cli-tools a { margin-left:auto; font-size:11px; color:var(--accent); }
+.agent-message { min-height:20px; font-size:11px; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; margin:12px 0 0; }
+.agent-config-dialog .dialog-footer { display:flex; gap:10px; align-items:center; justify-content:flex-end; padding:17px 28px; background:var(--surface-2); border-top:1px solid var(--line); }
+.agent-config-hint { margin-right:auto; font-size:10px; color:var(--muted); }
+.setup-jobs { margin:0 0 23px; scroll-margin-top:28px; }
+.setup-jobs .panel-heading { padding:19px 23px; }
+.setup-jobs .panel-heading h2 { margin:6px 0; font-size:16px; }
+.setup-jobs .panel-heading p { font-size:11px; }
+#setup-jobs { padding:0 23px 17px; }
+.setup-job { margin:0 0 12px; padding:14px 16px; border:1px solid var(--line); border-radius:8px; font-size:12px; background:var(--surface-2); overflow-wrap:anywhere; }
+.setup-job-heading { display:flex; align-items:center; gap:9px; }
+.install-status { display:grid; place-items:center; width:23px; height:23px; border-radius:50%; background:var(--accent-soft); color:var(--accent); flex-shrink:0; }
+.setup-job.failed .install-status { color:var(--red); background:var(--danger-soft); }
+.setup-job-heading strong { font-size:12px; }
+.job-state { font-size:10px; color:var(--accent); }
+.setup-job.failed .job-state { color:var(--red); }
+.setup-job-heading time { margin-left:auto; font-size:10px; color:var(--muted); }
+.job-message { font-size:11px; color:var(--muted); margin:9px 0 0; line-height:1.8; }
+.install-progress { margin-top:12px; height:3px; background:var(--line); overflow:hidden; border-radius:2px; }
+.install-progress span { display:block; height:100%; width:36%; background:var(--accent); border-radius:2px; animation:install-progress 1.8s ease-in-out infinite; }
+@keyframes install-progress { from {transform:translateX(-100%);} to {transform:translateX(280%);} }
+.setup-job-output { margin-top:10px; }
+.setup-job-output summary { cursor:pointer; color:var(--accent); font-size:10px; }
+.setup-job-output pre { max-height:180px; overflow:auto; white-space:pre-wrap; background:var(--surface); border:1px solid var(--line); padding:12px; font-size:11px; margin:10px 0 0; }
+.setup-job-history > summary { cursor:pointer; font-size:11px; color:var(--muted); padding:2px 0; }
+.setup-job-history > summary span { font-size:10px; margin-left:10px; }
+.setup-job-list { margin-top:13px; }
 @media(max-width:640px) {
  .setup-intro, .agent-card { padding:18px; }
  .setup-actions { width:100%; }
  .setup-actions .button { flex:1; }
+ .setup-overview { flex-direction:column; gap:12px; align-items:flex-start; }
+ .setup-list-heading > span { display:none; }
  .setup-grid { grid-template-columns:minmax(0,1fr); }
+ .agent-config-dialog .dialog-heading, .agent-config-body { padding:20px; }
+ .agent-config-grid { grid-template-columns:1fr; }
+ .agent-config-dialog .dialog-footer { padding:15px 20px; flex-wrap:wrap; }
+ .agent-config-hint { width:100%; }
+ .agent-cli-tools a { width:100%; margin-top:6px; }
+ .setup-job-heading { flex-wrap:wrap; }
+ .setup-job-heading time { width:100%; margin-left:32px; }
 }
+@media(prefers-reduced-motion:reduce) { .install-progress span { animation:none; width:100%; opacity:.5; } }

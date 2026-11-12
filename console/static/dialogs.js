@@ -3,7 +3,7 @@ import {paginate,resetPage,onPaginationChange} from './pagination.js';
 import {api,config,fragment,toast,runAction,refresh} from './core.js';
 const loaded=new Map();
 const state={config:null,rolesConfig:null,directionTask:null,directionPending:new Set()};
-let directionTimer,stopTarget;
+let directionTimer,stopTarget,directionSequence=0;
 let gitSequence=0,gitController;
 let acceptanceScan=null,acceptanceSequence=0;
 let acceptanceScanRequest=0,preflightRequest=0;
@@ -236,14 +236,21 @@ function updateProviderHint() {
 function renderDirectionHistory(task) {
   if (!task || state.directionTask !== task.id) return;
   $("#direction-task-title").textContent = task.title;
+  const hasSaved = task.status !== 'queued' && (task.directions||[]).length > 0;
+  const resumes = task.actions.includes('resume') || task.actions.includes('continue') || ['stopped','blocked','budget_exceeded','recovery_failed','action_required','interrupted'].includes(task.status);
   const description =
     task.direction_delivery === "restart_required"
       ? "当前任务由旧版监督器执行。补充内容会保存，停止并恢复任务后发送给 AI；仅暂停和继续不会升级监督器。"
+      : resumes
+        ? "点击发送会保存补充要求并恢复执行。已有要求无需重复填写；若恢复受阻，会保留内容并显示原因。"
       : task.direction_delivery === "on_start"
         ? "要求会保存到当前任务，启动或恢复后的下一轮执行时发送给 AI。"
         : "补充要求在下一轮 AI 调用时发送。当前已经开始的调用不会被中途改写，提交不等于 AI 已完成处理。";
   $("#direction-delivery").textContent = task.direction_error || description;
+  $('#direction-text').required = !hasSaved;
+  $('#direction-help').textContent = hasSaved ? '已有补充要求会继续发送，无需重复填写。没有新内容时，可留空直接点击发送。' : '补充内容会保留在任务中，并发送给后续执行器及审查器。';
   $("#direction-pause-label").hidden = !task.actions.includes("pause");
+  $('#direction-submit').textContent = !$('#direction-pause-label').hidden && $('#direction-pause').checked ? '保存并暂停' : resumes ? '发送并恢复执行' : '发送补充要求';
   $("#direction-submit").disabled =
     !task.can_direct || state.directionPending.has(task.id);
   const label = (receipt) =>
@@ -270,16 +277,19 @@ export async function openCreate(){
  catch(error){if(sequence===createSequence)toast(error.message,true);}
 }
 function refreshDirection(task){if(state.directionTask===task.id){state.currentDirection=task;renderDirectionHistory(task);}}
-async function pollDirection(){
+function currentDirectionSession(sequence,id){return sequence===directionSequence&&state.directionTask===id&&$('#direction-dialog')?.open;}
+async function pollDirection(sequence=directionSequence){
  clearTimeout(directionTimer);if(!state.directionTask||!$('#direction-dialog')?.open)return;
- if(document.hidden){directionTimer=setTimeout(pollDirection,3000);return;}
+ if(sequence!==directionSequence)return;
+ if(document.hidden){directionTimer=setTimeout(()=>pollDirection(sequence),3000);return;}
  const id=state.directionTask;
- try{refreshDirection(await api(`/api/tasks/${id}`));}catch(error){if(state.directionTask===id){$('#direction-error').hidden=false;$('#direction-error').textContent=error.message;}}
- if(state.directionTask===id&&$('#direction-dialog').open)directionTimer=setTimeout(pollDirection,3000);
+ try{const task=await api(`/api/tasks/${id}`);if(currentDirectionSession(sequence,id))refreshDirection(task);}catch(error){if(currentDirectionSession(sequence,id)){$('#direction-error').hidden=false;$('#direction-error').textContent=error.message;}}
+ if(currentDirectionSession(sequence,id))directionTimer=setTimeout(()=>pollDirection(sequence),3000);
 }
 export async function openDirection(id){
- try{await ensure('direction');resetPage('directions');state.directionTask=id;$('#direction-error').hidden=true;$('#direction-text').value=localStorage.getItem(`auto-moniter-direction-${id}`)||'';$('#direction-pause').checked=false;$('#direction-history').textContent='加载任务要求…';delete $('#direction-history').dataset.html;$('#direction-submit').disabled=true;if(!$('#direction-dialog').open)$('#direction-dialog').showModal();await pollDirection();}
- catch(error){toast(error.message,true);}
+ const sequence=++directionSequence;state.directionTask=null;state.currentDirection=null;clearTimeout(directionTimer);
+ try{await ensure('direction');if(sequence!==directionSequence)return;resetPage('directions');state.directionTask=id;$('#direction-error').hidden=true;$('#direction-text').value=localStorage.getItem(`auto-moniter-direction-${id}`)||'';$('#direction-pause').checked=false;$('#direction-history').textContent='加载任务要求…';delete $('#direction-history').dataset.html;$('#direction-submit').disabled=true;if(!$('#direction-dialog').open)$('#direction-dialog').showModal();await pollDirection(sequence);}
+ catch(error){if(sequence===directionSequence)toast(error.message,true);}
 }
 export async function confirmStop(id){
  try{await ensure('confirm');stopTarget=id;if(!$('#confirm-dialog').open)$('#confirm-dialog').showModal();}
@@ -396,6 +406,7 @@ function bind(name){
    e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
    const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
    if(form.elements.function_dispatch)data.function_dispatch=data.verification_mode==='executable'&&form.elements.function_dispatch.checked;
+   if(form.elements.parallel_project){data.parallel_project=form.elements.parallel_project.checked;data.task_scope=String(data.task_scope||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);data.task_dependencies=String(data.task_dependencies||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);}
    try{selectedModels(form,data);}catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;return;}
    for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
    data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);
@@ -416,17 +427,23 @@ function bind(name){
   });return;
  }
  $('#direction-text').addEventListener('input',e=>{if(state.directionTask)localStorage.setItem(`auto-moniter-direction-${state.directionTask}`,e.target.value);});
- $('#direction-dialog').addEventListener('close',()=>{state.directionTask=null;clearTimeout(directionTimer);});
+ $('#direction-pause').addEventListener('change',()=>{if(state.currentDirection)renderDirectionHistory(state.currentDirection);});
+ $('#direction-dialog').addEventListener('close',()=>{directionSequence++;state.directionTask=null;state.currentDirection=null;clearTimeout(directionTimer);});
  $('#direction-form').addEventListener('submit',async e=>{
-  e.preventDefault();const id=state.directionTask;if(!id||state.directionPending.has(id))return;
+  e.preventDefault();const id=state.directionTask,sequence=directionSequence;if(!id||!state.currentDirection?.can_direct||state.currentDirection.id!==id||state.directionPending.has(id))return;
   const text=$('#direction-text').value,pause=!$('#direction-pause-label').hidden&&$('#direction-pause').checked;
   state.directionPending.add(id);$('#direction-submit').disabled=true;$('#direction-error').hidden=true;
   try{
    const t=await api(`/api/tasks/${id}/directions`,{text,pause});
    if(localStorage.getItem(`auto-moniter-direction-${id}`)===text)localStorage.removeItem(`auto-moniter-direction-${id}`);
-   if(state.directionTask===id){if($('#direction-text').value===text){$('#direction-text').value='';$('#direction-pause').checked=false;}refreshDirection(t);}
-   toast('补充要求已保存，可查看执行器与审查器回执');await refresh();
-  }catch(error){if(state.directionTask===id){$('#direction-error').hidden=false;$('#direction-error').textContent=error.message;}else toast(error.message,true);}
+   const outcome=t.direction_submission,message=outcome?.message||'补充要求已保存，可查看执行器与审查器回执';
+   if(currentDirectionSession(sequence,id)){
+    if($('#direction-text').value===text){$('#direction-text').value='';$('#direction-pause').checked=false;}
+    refreshDirection(t);
+    if(outcome?.error){$('#direction-error').hidden=false;$('#direction-error').textContent=message+' '+outcome.error;}
+   }
+   toast((currentDirectionSession(sequence,id)?'':`任务 ${id}：`)+message,!!outcome?.error);await refresh();
+  }catch(error){if(currentDirectionSession(sequence,id)){$('#direction-error').hidden=false;$('#direction-error').textContent=error.message;}else toast(`任务 ${id}：${error.message}`,true);}
   finally{state.directionPending.delete(id);if(state.directionTask===id&&state.currentDirection)renderDirectionHistory(state.currentDirection);}
  });
 }

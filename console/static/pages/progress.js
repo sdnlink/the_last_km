@@ -6,15 +6,15 @@ const selected=new URLSearchParams(location.search).get('task');
 let tasks=[],current=null,firstList=true;
 function renderPicker(){
  const query=$('#progress-search').value.toLowerCase();
- const visible=tasks.filter(t=>($('#progress-state').value==='all'||active(t)||t.id===selected)&&`${t.title} ${t.cwd}`.toLowerCase().includes(query)).sort((a,b)=>taskPriority(a)-taskPriority(b));
+ const visible=tasks.filter(t=>($('#progress-state').value==='all'||active(t)||t.id===selected)&&`${t.title} ${t.project_cwd||''} ${t.cwd}`.toLowerCase().includes(query)).sort((a,b)=>taskPriority(a)-taskPriority(b));
  $('#progress-task-count').textContent=`${visible.length} 个可跟进任务`;
  const page=paginate('progress-tasks',visible,{rowHeight:135});
  $('#progress-pagination').innerHTML=page.controls;
- stableHTML($('#progress-tasks'),page.items.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.cwd)}</small><p>${escape(t.failure?.title||phases[t.health.phase]||t.summary||'等待启动')}</p></a>`).join('')||'<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>');
+ stableHTML($('#progress-tasks'),page.items.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.project_cwd||t.cwd)}</small><p>${escape(t.failure?.title||phases[t.health.phase]||t.summary||'等待启动')}</p></a>`).join('')||'<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>');
 }
 function renderCurrent(t){
  current=t;$('#progress-empty').hidden=true;$('#progress-selected').hidden=false;
- $('#progress-title').textContent=t.title;$('#progress-project').textContent=t.cwd;
+ $('#progress-title').textContent=t.title;$('#progress-project').textContent=t.project_cwd||t.cwd;
  $('#progress-actions').innerHTML=`${badge(t)}${taskButtons(t)}${t.can_direct?`<button class="button secondary" data-direction="${t.id}">调整任务方向</button>`:''}<a class="detail-button" href="/tasks/${t.id}">完整任务详情 →</a>`;
  const isLive=['running','starting'].includes(t.status),roles=t.work?.roles||{};
  const role=Object.values(roles).find(r=>r.status==='running');

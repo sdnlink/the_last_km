@@ -3081,6 +3081,12 @@ class Supervisor:
                 else 'Implement one reviewer-owned assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
                 function_tasks.verdict_contract('worker', task),
+                'Watcher acceptance catalog currently in effect (context, not additional implementation work):',
+                json.dumps(safe(self._function_check_catalog(task)), ensure_ascii=False) if self._function_gate else '(legacy checks)',
+                'Watcher executes these checks after review. Do not repeat an old configuration blocker if its '
+                'invalid command is absent from this current catalog. Report actual remaining implementation '
+                'defects; if code and focused regressions are ready, submit task_status=done for independent review. '
+                'Do not edit code solely to resolve a past watcher configuration error.',
                 'Latest review of this assignment:',
                 json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
                            ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',

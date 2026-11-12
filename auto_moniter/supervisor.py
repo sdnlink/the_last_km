@@ -1011,6 +1011,32 @@ class Supervisor:
                                     + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
             next_functions = None
             if self.config.function_dispatch:
+                if (verdict.task_status == 'incomplete' and review.task_status == 'accepted'
+                        and self.function_tasks.current
+                        and verdict.task_id == review.task_id == self.function_tasks.current['id']
+                        and not record.failure and not verdict.parse_error
+                        and not (review.gaps or review.blockers or review.next_actions)
+                        and (not self._function_gate or not self._function_scope_problems())):
+                    report = record.watcher_result.get('worker_report')
+                    if report is None:
+                        record.watcher_result['worker_report'] = {
+                            'status':'pending', 'task':self.function_tasks.current,
+                            'original':verdict.to_dict(), 'review':review.to_dict(),
+                            'errors':['Reviewer independently accepted this SAME candidate. Confirm whether implementation '
+                                      'is complete using the current acceptance catalog; watcher checks are not unfinished coding.']}
+                        # If confirmation is interrupted, reuse only this exact
+                        # approval under the same version, role and instructions.
+                        review_record.watcher_result['check_retry'] = {
+                            'tree':review_tree, 'review':review.to_dict(), 'provider_config':self._provider_config(),
+                            'reviewer_model':self._reviewer_model(), 'task':self.function_tasks.current,
+                            'direction_ids':list(self._direction_ids['reviewer'])}
+                        self._event('worker_completion_confirmation', round=round_index, task_id=verdict.task_id)
+                    correction = self._repair_function_worker_report(record, records)
+                    if correction is None or record.verdict.task_status != 'done':
+                        return self._finish('stopped' if self._stop else 'action_required',
+                            record.failure or 'Worker did not confirm the independently reviewed candidate; '
+                            'implementation preserved without another writable turn.', records, record.verdict)
+                    turn, verdict = correction, record.verdict
                 if (self._verification_only() and review.task_status == 'changes_required'
                         and review.next_task is not None):
                     try:
@@ -2193,7 +2219,7 @@ class Supervisor:
 
     def _function_check_catalog(self, task):
         return function_gate.catalog(self.config.checks, self.modules.items, task['module_id'],
-                                     root=self.config.cwd, task=task)
+                                     root=self.config.cwd, task=task, regressions=self._local_test_paths)
 
     def _record_assignment(self, task):
         fields = ({'task_kind': 'integration', 'targets': task['targets'], 'integration_scope': task['integration_scope']}
@@ -2229,6 +2255,8 @@ class Supervisor:
                 'Supported: Python unittest test_*.py or *_test.py; Node *.js/*.cjs/*.mjs; '
                 'Rust Cargo package tests/name.rs or tests/name/main.rs with an existing Cargo.toml. '
                 'Use auto:N in check_ids for the Nth test_files entry (one-based); no shell commands or test installation. '
+                'For verification-only delivery with test_files=[], select regression:N from previously accepted tests. '
+                'Current test files become eligible for regression:N only after this assignment is accepted. '
                 'These local tests need no manually supplied check command. The worker must implement real assertions, '
                 'show failure before the fix and success after; reviewer independently checks the behavior and test relevance. '
                 'Watcher rejects missing, empty or entirely skipped test suites and reruns accepted regressions at delivery. '
@@ -2238,6 +2266,10 @@ class Supervisor:
                 'Only declare module or requirement delivery once accepted tasks plus the current task map to every '
                 'criterion in the delivery scope. Approved check IDs: '
                 + json.dumps(function_gate.catalog(self.config.checks, modules), ensure_ascii=False)
+                + '\nAccepted regression checks (including current tests only after acceptance): '
+                + json.dumps(function_gate.catalog([], {}, root=self.config.cwd,
+                    regressions=list(dict.fromkeys([*self._local_test_paths,
+                        *(self.function_tasks.current or {}).get('test_files', [])]))), ensure_ascii=False)
                 + '\nCriteria by ID: ' + json.dumps({**function_gate.requirement_criteria(self.requirements_review),
                     **{k: v for ident in modules for k, v in function_gate.criteria(modules, ident).items()}}, ensure_ascii=False)
                 + '\nOptional language parser availability: ' + json.dumps(language_availability(), ensure_ascii=False)
@@ -2286,7 +2318,9 @@ class Supervisor:
             if any(not contains(self.project.scope,file) for file in files):
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
-                                    approvals=self._integration_scopes())
+                                    approvals=self._integration_scopes(),
+                                    regressions=list(dict.fromkeys(name for item in ledger.accepted
+                                        for name in item['task'].get('test_files', []))))
         if task['delivery_scope'] != 'function':
             missing = function_gate.coverage(ledger, modules, task, brief, self.config.cwd,
                                               provisional=provisional)
@@ -2408,6 +2442,10 @@ class Supervisor:
                   + '\nAssignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
                   + '\nWatcher report errors:\n' + json.dumps(report['errors'], ensure_ascii=False)
                   + '\nOriginal worker report:\n' + json.dumps(report['original'], ensure_ascii=False))
+        if report.get('review'):
+            prompt += ('\nIndependent assessment of the SAME candidate:\n' + json.dumps(report['review'], ensure_ascii=False)
+                       + '\nCurrent watcher acceptance catalog (historical command failures may be obsolete):\n'
+                       + json.dumps(safe(self._function_check_catalog(self.function_tasks.current)), ensure_ascii=False))
         signature = self.project.signature if self.project else ''
         turn = self._invoke(provider, prompt, '', role='worker', index=record.index,
             model=self.config.model, extra_args=self.config.extra_args, read_only=True)
@@ -3478,6 +3516,9 @@ class Supervisor:
         previous = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == kwargs['index']), None)
         retry = self._check_retry_review(previous) if previous else None
         if retry:
+            context = previous.watcher_result.get('check_retry')
+            if isinstance(context, dict):
+                self._direction_ids['reviewer'] = list(context['direction_ids'])
             self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
             return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])

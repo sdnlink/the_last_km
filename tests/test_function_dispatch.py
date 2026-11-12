@@ -557,6 +557,74 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('auto:1',saved['function_tasks']['accepted'][0]['verification'])
             self.assertIn('test_real_behavior',(root/'run/001-check-01.log').read_text())
 
+    def test_reviewer_acceptance_of_incomplete_report_only_confirms_read_only_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            assignment=task('F1','app.py',scope='requirement')
+            assignment['criterion_ids']=['main:1','req:1:1','req:1:2']
+            incomplete=result('F1','incomplete',gaps=['Historical watcher configuration failure'])
+            worker=FunctionWorker('worker',[{**incomplete,'touch':'app.py'},result('F1','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=1,review_every=1)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual([c['read_only'] for c in worker.calls],[False,True])
+            self.assertEqual(len(reviewer.calls),2)
+            self.assertIn('Independent assessment of the SAME candidate',worker.calls[-1]['prompt'])
+            self.assertIn('Current watcher acceptance catalog',worker.calls[-1]['prompt'])
+            self.assertTrue(list((root/'run').glob('001-worker-report-original-*-text.md')))
+
+    def test_unconfirmed_candidate_stops_without_another_implementation_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            incomplete=result('F1','incomplete',gaps=['Actual implementation is still incomplete'])
+            worker=FunctionWorker('worker',[{**incomplete,'touch':'app.py'},incomplete])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=3,review_every=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertIn('did not confirm',report.summary)
+            self.assertEqual([c['read_only'] for c in worker.calls],[False,True])
+            self.assertEqual(len(reviewer.calls),2)
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertFalse(state['function_tasks']['accepted'])
+
+    def test_resume_only_confirms_the_report_and_reuses_the_same_independent_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);assignment=task('F1','app.py',scope='requirement')
+            from auto_moniter.directions import Directions
+            instruction=Directions(root/'run').append('Keep the same scope and preserve the original requirements.')
+            assignment['criterion_ids']=['main:1','req:1:1','req:1:2']
+            worker=FunctionWorker('worker',[{**result('F1','incomplete',gaps=['Past watcher error']),'touch':'app.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            repair=Supervisor._repair_function_worker_report
+            def stop_before_confirmation(monitor, record, records):
+                monitor.request_stop()
+                return repair(monitor,record,records)
+            with patch.object(Supervisor,'_repair_function_worker_report',stop_before_confirmation):
+                report=self.run_monitor(root,worker,reviewer,max_rounds=1,review_every=1)
+            self.assertEqual(report.status,'stopped',report.summary)
+            worker=FunctionWorker('worker',[result('F1','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=1,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual([c['read_only'] for c in worker.calls],[True])
+            self.assertFalse(reviewer.calls)
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['dispatch_directions'],[instruction['id']])
+
+    def test_writes_during_completion_confirmation_invalidate_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            incomplete=result('F1','incomplete',gaps=['Waiting for watcher checks'])
+            worker=FunctionWorker('worker',[{**incomplete,'touch':'app.py'},
+                {**result('F1','done'),'source':'def parse_input(): return 99\n'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=3,review_every=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertIn('changed during',report.summary)
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertFalse(state['function_tasks']['accepted'])
+
     def test_declared_regression_failure_is_not_hidden_by_passing_fixed_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -601,6 +669,23 @@ class DispatchTests(unittest.TestCase):
                 git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
             self.assertEqual(report.status,'done',report.summary)
             self.assertEqual(counter.read_text(),'2')
+
+    def test_automatic_checks_allow_final_read_only_verification_without_manual_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            first=task('F1','app.py');first['test_files']=['test_app.py'];first['check_ids']=['auto:1']
+            final=verification_task(depends=['F1']);final['check_ids']=['regression:1']
+            source='import unittest\nfrom app import parse_input\nclass Test(unittest.TestCase):\n def test_real(self): self.assertEqual(parse_input(),42)\n'
+            worker=FunctionWorker('worker',[{**result('F1','done'),
+                'writes':{'app.py':'def parse_input(): return 42\n','test_app.py':source}},
+                result('VERIFY','done',status='done')])
+            reviewer=ScriptedProvider('reviewer',[plan(first),result('F1','accepted',next_task=final),
+                result('VERIFY','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,checks=[],max_rounds=2)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual([c['read_only'] for c in worker.calls],[False,True])
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertIn('regression:1',state['function_tasks']['accepted'][-1]['verification'])
 
     def test_portable_swift_regression_path_is_accepted_as_a_new_test(self):
         from auto_moniter.function_gate import validate_task

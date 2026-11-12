@@ -127,7 +127,7 @@ Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-mo
 4. Set models, runtime and call budgets, review frequency, and isolation settings, then start the task.
 5. Follow execution in **实时协作**. Open task details for requirements, conclusions, Git records, and logs.
 
-The default flow reviews requirements before implementation. Select executable acceptance to run checks, semantic review for review without test execution, or planning to prepare an acceptance plan as a separate task. Function dispatch requires approved executable checks.
+The default flow reviews requirements before implementation. Select executable acceptance to run checks, semantic review for review without test execution, or planning to prepare an acceptance plan as a separate task. Function dispatch requires a runnable test plan, which the reviewer can supply without user-written commands.
 
 Use **补充要求 / 调整方向** to update a task. For a resumable stopped task, sending the amendment also attempts to resume execution. Previously saved amendments can be sent with an empty input field. If a budget is exhausted, use the recovery window to increase it explicitly.
 
@@ -296,6 +296,8 @@ Load it with `--modules modules.json`. Module definitions remain fixed during th
 ### Function dispatch and quality settings
 
 With function dispatch enabled, the reviewer selects a named function, its allowed files, acceptance criterion IDs, approved check IDs, and any new focused test files. The watcher checks scope and runs the selected regressions before advancing. Use `--no-function-dispatch` when the task needs broader assignments. Additional parser requirements are listed under installation.
+
+The reviewer designs positive, negative and boundary assertions; the worker implements them; the watcher derives local commands from declared `test_files`. Supported runners are Python unittest, Node 22 and Cargo integration tests with locked offline dependencies. `auto:N` refers to the Nth declared test file. Supported declared regressions run even when the reviewer selects only existing check IDs, and accepted regressions run again at final delivery and after resume. Empty or entirely skipped suites fail acceptance. Deployment, real devices, credentials and other environments still need explicitly configured entry points. See [acceptance responsibilities](ACCEPTANCE_GUIDE.md#reviewerworker-和-watcher-的验收职责).
 
 Save optional settings in `quality-policy.json`:
 

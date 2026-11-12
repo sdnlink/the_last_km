@@ -613,7 +613,8 @@ class TaskStore:
             if guided:
                 guided = {**guided, 'selected_ids': [], 'selected': []}
             checks = []
-        if mode_explicit and verification_mode == 'executable' and not checks and not module_check_commands and not (guided and guided['selected']):
+        if (mode_explicit and verification_mode == 'executable' and not function_dispatch
+                and not checks and not module_check_commands and not (guided and guided['selected'])):
             raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
         for key, default, maximum in [('max_runtime_minutes', 120, 43200), ('max_agent_calls', 100, 100000),

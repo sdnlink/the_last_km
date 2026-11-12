@@ -240,6 +240,7 @@ class Supervisor:
         self._function_gate = self.config.function_dispatch
         self._function_baseline = None
         self._passed_function_checks = {}
+        self._local_test_paths = []
         self._dispatch_directions = []
         self._function_issue_ids = []
         self._planning_rejection = None
@@ -469,8 +470,6 @@ class Supervisor:
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
             return self._finish('action_required',
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
-        if self._function_gate and not function_gate.catalog(self.config.checks, self.modules.items):
-            return self._finish('action_required', 'Function dispatch requires an approved executable acceptance check. Configure checks and start a new run.', records, None)
         self._wait_project_dependencies()
         if self.project and not self._stop:
             self._sync_business_head(records)
@@ -1058,9 +1057,10 @@ class Supervisor:
                                 'Reviewer must dispatch implementation tasks for uncovered criteria before declaring delivery: ' + ', '.join(missing),
                                 records, review)
                     else:
-                        selected = function_gate.catalog(self.config.checks, self.modules.items, task['module_id'])
+                        selected = self._function_check_catalog(task)
                         if not self._delivery_checks(round_index, review, final=False, expected_tree=review_tree,
-                                function_commands=[selected[key] for key in task['check_ids']]):
+                                function_commands=list(dict.fromkeys([*[selected[key] for key in task['check_ids']],
+                                    *self._local_test_commands(task['test_files'])]))):
                             gaps = review.gaps or ['Function regression checks did not complete']
                     if gaps:
                         self._reject_function_candidate(review_record, gaps)
@@ -2031,6 +2031,10 @@ class Supervisor:
         if final:
             ids.update(key for key, item in self.modules.items.items() if item["status"] == "accepted")
         commands.extend(self.modules.checks_for(ids))
+        if self._function_gate:
+            commands.extend(self._local_test_commands(self._local_test_paths))
+            if self.function_tasks.current:
+                commands.extend(self._local_test_commands(self.function_tasks.current.get('test_files', [])))
         if function_commands is not None:
             commands = function_commands
         failures = []
@@ -2182,6 +2186,15 @@ class Supervisor:
         return bool(self._function_gate and self.function_tasks.current
                     and self.function_tasks.current.get('kind') == 'verification')
 
+    def _local_test_commands(self, paths):
+        from auto_moniter.local_tests import command
+        return list(dict.fromkeys(value for name in paths
+                                 if (value := command(self.config.cwd, name)) is not None))
+
+    def _function_check_catalog(self, task):
+        return function_gate.catalog(self.config.checks, self.modules.items, task['module_id'],
+                                     root=self.config.cwd, task=task)
+
     def _record_assignment(self, task):
         fields = ({'task_kind': 'integration', 'targets': task['targets'], 'integration_scope': task['integration_scope']}
                   if task.get('kind') == 'integration' else {'file': task['file'], 'symbol': task['symbol']})
@@ -2211,6 +2224,14 @@ class Supervisor:
                 'Use the same indices for new module definitions or a new brief returned in this response. Select check_ids from the '
                 'approved catalog; never write an executable command in a task. Include test_files=[] or exact paths '
                 'for new focused test files. Preserve existing tests and all code outside the assigned targets. '
+                'You own acceptance design: specify positive, negative and boundary assertions for the worker. '
+                'Watcher automatically derives and executes local tests declared in test_files, even if not selected. '
+                'Supported: Python unittest test_*.py or *_test.py; Node *.js/*.cjs/*.mjs; '
+                'Rust Cargo package tests/name.rs or tests/name/main.rs with an existing Cargo.toml. '
+                'Use auto:N in check_ids for the Nth test_files entry (one-based); no shell commands or test installation. '
+                'These local tests need no manually supplied check command. The worker must implement real assertions, '
+                'show failure before the fix and success after; reviewer independently checks the behavior and test relevance. '
+                'Watcher rejects missing, empty or entirely skipped test suites and reruns accepted regressions at delivery. '
                 'Select behavioral checks relevant to the target; git diff --check alone is insufficient. '
                 'If the catalog lacks the required platform or language check, request operator input to append it; '
                 'do not substitute unrelated checks or generate executable commands. '
@@ -2494,13 +2515,18 @@ class Supervisor:
     def _advance_function(self, staged, review_record):
         task = self.function_tasks.current
         if self._function_gate:
-            selected = function_gate.catalog(self.config.checks, self.modules.items, task['module_id'])
+            selected = self._function_check_catalog(task)
             staged.accepted[-1]['verification'] = {key: self._passed_function_checks[selected[key]]
                                                    for key in task['check_ids']}
             if task.get('kind') == 'integration':
                 staged.accepted[-1]['target_hashes'] = self._function_target_hashes
             else:
                 staged.accepted[-1]['symbol_hash'] = self._function_target_hashes[task['file']]
+            local = self._local_test_commands(task.get('test_files', []))
+            if local:
+                review_record.watcher_result['local_tests'] = {
+                    value: self._passed_function_checks[value] for value in local}
+            self._local_test_paths = list(dict.fromkeys([*self._local_test_paths, *task.get('test_files', [])]))
         self.function_tasks = staged
         self._function_issue_ids = []
         self._dispatch_directions = list(self._direction_ids['reviewer'])
@@ -2829,6 +2855,8 @@ class Supervisor:
             raise ValueError('Invalid saved function gate')
         self._function_baseline = None
         self.function_tasks = function_tasks.FunctionTasks(state.get('function_tasks'))
+        self._local_test_paths = list(dict.fromkeys(name for accepted in self.function_tasks.accepted
+                                                   for name in accepted['task'].get('test_files', [])))
         self._dispatch_directions = state.get('dispatch_directions', [])
         self._function_issue_ids = state.get('function_issue_ids', [])
         self._planning_rejection = state.get('planning_rejection')

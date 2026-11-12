@@ -211,12 +211,15 @@ def requirement_criteria(brief):
             for i, text in enumerate(brief.get('acceptance_criteria', []), 1)}
 
 
-def catalog(checks, modules, module_id=None):
+def catalog(checks, modules, module_id=None, *, root=None, task=None):
     result = {f'check:{i}': command for i, command in enumerate(checks, 1)}
     for key, item in modules.items():
         if module_id is None or key == module_id:
             result.update({f'{key}:check:{i}': command
                            for i, command in enumerate(item.get('checks', []), 1)})
+    if root is not None and task:
+        from auto_moniter.local_tests import catalog as local_catalog
+        result.update(local_catalog(root, task))
     return result
 
 
@@ -272,10 +275,11 @@ def validate_task(task, root, modules, checks, brief, *, approvals=()):
     ids = set(task['criterion_ids'])
     if not ids & module_criteria.keys() or not ids <= module_criteria.keys() | requirement_criteria(brief).keys():
         raise ValueError('Function assignment must reference its module criteria and only known requirement criteria')
-    approved = catalog(checks, modules, task['module_id'])
+    approved = catalog(checks, modules, task['module_id'], root=root, task=task)
     if not set(task['check_ids']) <= approved.keys():
-        raise ValueError('Function assignment must select approved check IDs for its module; no agent commands')
-    if all(re.fullmatch(r'\s*git\s+diff\s+--check\s*', approved[ident]) for ident in task['check_ids']):
+        raise ValueError('Function assignment must select approved check IDs or auto:N for declared local test files; no agent commands')
+    if (all(re.fullmatch(r'\s*git\s+diff\s+--check\s*', approved[ident]) for ident in task['check_ids'])
+            and not any(key.startswith('auto:') for key in approved)):
         raise ValueError('Function acceptance requires a behavioral check; git diff --check alone cannot verify functionality. '
                          'Ask the operator to append the missing approved check before dispatch.')
     for name in task['test_files']:

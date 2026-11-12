@@ -85,7 +85,7 @@
             <p>独立语义审核始终保留。未选择的功能、数据库、HTTP、端到端和性能检查不能推定通过。</p>
             <details><summary>高级：解释器与自定义命令</summary>
               <label>Python 解释器<input name="acceptance_python" placeholder="自动选择项目 .venv 或控制台 Python；也可填绝对路径"></label>
-              <label>额外验收命令<textarea name="checks" rows="3" placeholder="熟悉项目时填写，每行一条；通常只需勾选上面的检查项"></textarea><small>仅 git diff --check 只能检查格式，不能证明功能可用。请选择与本轮需求对应的行为测试；原有测试通过也不等于新增能力已验证。</small></label>
+              <label>额外验收命令<textarea name="checks" rows="3" placeholder="可选：已有检查命令，每行一条"></textarea><small>逐函数模式可留空：Reviewer 设计验收并声明测试路径，Worker 补齐测试，Watcher 自动运行支持的 Python unittest、Node 和 Rust Cargo 测试。部署、真实设备和其他环境检查仍需明确配置。仅 git diff --check 不能证明功能可用。</small></label>
               <small>自定义命令会在项目目录执行，其依赖和副作用无法由入口扫描完整确认。</small>
             </details>
           </section>
@@ -133,7 +133,7 @@
                 <label>worker 隔离<select name="worker_isolation"><option value="provider">provider：执行器权限模式</option><option value="strict">strict：项目外只读，保护验收资产</option></select></label>
               </div>
               <label>保护路径<textarea name="protect_paths" rows="2" placeholder="每行一个项目内相对路径，例如 tests"></textarea><small>需要 strict worker；运行目录须在目标项目之外。</small></label>
-              <label>固定模块清单（JSON）<textarea name="modules" rows="4" placeholder='[{"id":"API","title":"接口","acceptance":["正负路径通过"],"depends_on":[],"checks":["python -m unittest"]}]'></textarea><small>固定原始需求及检查，防止模型自行缩小范围。留空时由 worker 提出计划；验收命令为空不代表功能经过测试。</small></label>
+              <label>固定模块清单（JSON）<textarea name="modules" rows="4" placeholder='[{"id":"API","title":"接口","acceptance":["正负路径通过"],"depends_on":[],"checks":["python -m unittest"]}]'></textarea><small>固定原始需求及检查，防止模型自行缩小范围。逐函数模式留空时由 Reviewer 拆分计划并设计验收；测试执行结果由 Watcher 确认。</small></label>
               <div class="form-grid thirds">
                 <label>单轮超时（秒）<input name="turn_timeout" type="number" min="0" max="9007199254740991" value="1800" required></label>
                 <label>无输出超时（秒）<input name="idle_timeout" type="number" min="0" max="9007199254740991" value="900" required></label>

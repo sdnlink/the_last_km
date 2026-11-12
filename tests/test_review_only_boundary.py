@@ -107,6 +107,7 @@ class ReviewOnlyBoundaryTests(unittest.TestCase):
                 'requirement': 'implement',
                 'verification_mode': 'executable',
                 'acceptance_plan': self.plan([]),
+                'function_dispatch': False,
             })
         task = self.store.create({
             'title': 'exec ok',

@@ -529,12 +529,78 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(d['last_call']['role'],'reviewer')
             self.assertEqual(len(w.calls),1)
 
-    def test_empty_check_catalog_stops_before_planning(self):
+    def test_empty_check_catalog_still_requires_a_valid_reviewer_test_plan(self):
         with tempfile.TemporaryDirectory() as d:
-            worker, reviewer = ScriptedProvider('worker', []), ScriptedProvider('reviewer', [])
+            worker=ScriptedProvider('worker', [])
+            reviewer=ScriptedProvider('reviewer', [plan(task('F1','app.py'))])
             report = self.run_monitor(Path(d), worker, reviewer, checks=[])
             self.assertEqual(report.status, 'action_required')
-            self.assertIn('approved executable', report.summary)
+            self.assertIn('approved check IDs or auto:N', report.summary)
+            self.assertFalse(worker.calls)
+
+    def test_reviewer_declared_tests_run_without_any_user_supplied_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            assignment=task('F1','app.py',scope='requirement')
+            assignment['criterion_ids']=['main:1','req:1:1','req:1:2']
+            assignment['test_files']=['test_app.py'];assignment['check_ids']=['auto:1']
+            test_source=('import unittest\nfrom app import parse_input\n'
+                         'class Behavior(unittest.TestCase):\n'
+                         ' def test_real_behavior(self): self.assertEqual(parse_input(),42)\n')
+            worker=FunctionWorker('worker',[{**result('F1','done',status='done'),
+                'writes':{'app.py':'def parse_input(): return 42\n','test_app.py':test_source}}])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted',status='done')])
+            report=self.run_monitor(root,worker,reviewer,checks=[],max_rounds=1)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertIn('auto:1',saved['function_tasks']['accepted'][0]['verification'])
+            self.assertIn('test_real_behavior',(root/'run/001-check-01.log').read_text())
+
+    def test_declared_regression_failure_is_not_hidden_by_passing_fixed_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            assignment=task('F1','app.py');assignment['test_files']=['test_app.py']
+            worker=FunctionWorker('worker',[{**result('F1','done'),
+                'writes':{'app.py':'def parse_input(): return 41\n',
+                    'test_app.py':'import unittest\nfrom app import parse_input\nclass Behavior(unittest.TestCase):\n def test_result(self): self.assertEqual(parse_input(),42)\n'}}])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=1)
+            self.assertEqual(report.status,'max_rounds',report.summary)
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertFalse(saved['function_tasks']['accepted'])
+            self.assertEqual(saved['function_tasks']['current']['id'],'F1')
+            self.assertIn('41 != 42',(root/'run/001-check-02.log').read_text())
+
+    def test_accepted_local_tests_are_reloaded_and_rerun_at_final_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory);root=parent/'project';root.mkdir();counter=parent/'runs.txt'
+            first=task('F1','app.py');first['test_files']=['test_app.py'];first['check_ids']=['auto:1']
+            test_source=('import unittest\nfrom pathlib import Path\nfrom app import parse_input\n'
+                         'class Behavior(unittest.TestCase):\n def test_result(self):\n'
+                         '  self.assertEqual(parse_input(),42)\n'
+                         f'  p=Path({str(counter)!r}); p.write_text(str(int(p.read_text())+1) if p.exists() else "1")\n')
+            worker=FunctionWorker('worker',[{**result('F1','done'),
+                'writes':{'app.py':'def parse_input(): return 42\n','test_app.py':test_source}}])
+            reviewer=ScriptedProvider('reviewer',[plan(first),result('F1','accepted')])
+            process=Supervisor._process_control
+            def stop_after_acceptance(monitor, active=False):
+                if not active and monitor.function_tasks.accepted:
+                    (root/'run/control.json').write_text(json.dumps({'action':'stop'}))
+                return process(monitor,active)
+            with patch.object(Supervisor,'_process_control',stop_after_acceptance):
+                report=self.run_monitor(root,worker,reviewer)
+            self.assertEqual(report.status,'stopped',report.summary)
+            self.assertEqual(counter.read_text(),'1')
+            (root/'run/control.json').unlink()
+            final=task('F2','next.py',scope='requirement',depends=['F1'])
+            final['criterion_ids']=['main:1','req:1:1','req:1:2']
+            worker=FunctionWorker('worker',[{**result('F2','done',status='done',file='next.py'),'touch':'next.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(final),result('F2','accepted',status='done',file='next.py')])
+            report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual(counter.read_text(),'2')
 
     def test_portable_swift_regression_path_is_accepted_as_a_new_test(self):
         from auto_moniter.function_gate import validate_task

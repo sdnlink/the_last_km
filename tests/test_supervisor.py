@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -52,7 +53,7 @@ class ScriptedProvider(Provider):
             ),
             encoding="utf-8",
         )
-        return PreparedCommand(["python3", str(script_path)])
+        return PreparedCommand([sys.executable, str(script_path)])
 
 
 def _verdict(

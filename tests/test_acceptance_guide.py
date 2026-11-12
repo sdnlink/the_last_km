@@ -85,7 +85,10 @@ class AcceptanceGuideTests(unittest.TestCase):
   self.assertEqual(task['acceptance_plan']['selected'][0]['title'],'Python 自动化测试')
  def test_no_selection_cannot_be_executable_review_only_is_explicit(self):
   p=self.plan()
-  with self.assertRaises(TaskError):self.store.create({'title':'task','requirement':'implement','acceptance_plan':p,'verification_mode':'executable'})
+  with self.assertRaises(TaskError):self.store.create({'title':'task','requirement':'implement','acceptance_plan':p,'verification_mode':'executable','function_dispatch':False})
+  automatic=self.store.create({'title':'automatic local tests','requirement':'implement with behavioral tests',
+                              'acceptance_plan':p,'verification_mode':'executable'})
+  self.assertTrue(automatic['function_dispatch']);self.assertEqual(automatic['checks'],[])
   task=self.store.create({'title':'task','requirement':'review','acceptance_plan':p,'verification_mode':'review_only'})
   self.assertEqual(task['checks'],[])
  def test_integration_scope_requires_a_real_check_in_the_configured_module(self):

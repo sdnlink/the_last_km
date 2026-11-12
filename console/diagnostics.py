@@ -69,6 +69,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='Watcher 检测到测试、验收入口或忽略规则与任务启动时不一致，已停止验收；这不代表 Worker 进程异常退出。'
         actions=['对照下方文件列表和原始基线核对实际差异；不要重建基线或放宽保护。',
                  '确认变更来源后恢复受保护文件；若是有意修改验收规则，应另行安排明确范围的任务。']
+    elif 'workspace changed during requirement review' in text or 'requirement reviewer changed the read-only workspace' in text:
+        code='requirement_workspace_changed';title='需求审查期间工作区发生变化';role='reviewer';phase='需求完善'
+        reason='审查前后的工作区内容或文件权限不同，本次审查未获接受，尚未派发本轮 worker 任务。此检查不能确定修改者，也可能由并发写入触发。'
+        actions=['核对变化文件及其来源，保留已有工作；不要通过重置或删除改动绕过检查。',
+                 '在没有并发写入的工作区重新审查，或为并行任务使用独立工作副本；审查结果仍需通过原验收条件。']
     elif 'business head changed' in text:
         code='business_head_changed';role='watcher';phase='业务版本一致性检查'
         title='业务分支在任务外发生变化'
@@ -143,4 +148,15 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
                                 'reason':str(r.get('failure') or r.get('interruption'))[:1000],
                                 'exit_code':r.get('exit_code')}
                                for r in records if r.get('failure') or r.get('interruption')][-3:]}
+    if code=='requirement_workspace_changed':
+        changes=brief.get('workspace_changes') if isinstance(brief,dict) else None
+        if isinstance(changes,dict):
+            result['workspace_changes']=changes
+        invocation=state.get('last_invocation') or {}
+        index=invocation.get('round')
+        if invocation.get('role')=='reviewer' and type(index) is int and index>=0:
+            name=f'{index:03d}-reviewer-text.md'
+            path=Path(run)/name
+            if path.is_file() and not path.is_symlink():
+                result['review_output_file']=name
     return safe(result)

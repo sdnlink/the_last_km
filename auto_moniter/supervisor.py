@@ -1222,7 +1222,8 @@ class Supervisor:
                     previous_brief = approved
         self.requirements_review={**(previous_brief if next_function else {}),'status':'reviewing','summary':'Reviewer is selecting the next function.' if next_function else 'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
                                   'cycle': len(self.requirement_cycles) + 1}
-        before=workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
+        before_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
+        before=snapshot_fingerprint(self.config.cwd,before_files)
         self._write_state(records,'running',0,'',before)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
@@ -1231,6 +1232,8 @@ class Supervisor:
         schema.write_text(json.dumps(plan_schema))
         self.schema_path=schema
         self.log('requirements: reviewer elaborating next requirement; worker has not started' if follow_up else 'requirements: reviewer elaborating original request; worker has not started')
+        workspace_changes = None
+        output_file = ''
         try:
             if self._stop:
                 return False
@@ -1252,9 +1255,23 @@ class Supervisor:
             turn=self._invoke(self.config.reviewer,prompt,'',
                               role='reviewer',index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
                               extra_args=self.config.reviewer_extra_args,read_only=True)
-            if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)!=before:
-                raise ValueError('Requirement reviewer changed the read-only workspace')
             if turn.session_id:self._active_reviewer_id=turn.session_id
+            output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
+            after_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
+            after=snapshot_fingerprint(self.config.cwd,after_files)
+            if after!=before:
+                changes = [{'file':str(Path(name).relative_to(self.config.cwd)),
+                            'change':'added' if name not in before_files else 'removed' if name not in after_files else 'modified'}
+                           for name in sorted(before_files.keys() | after_files.keys())
+                           if before_files.get(name)!=after_files.get(name)]
+                report = 'requirements-workspace-change.json'
+                write_json(self.run_dir/report,safe({'before':before,'after':after,'files':changes,
+                    'cycle':len(self.requirement_cycles)+1,'at':datetime.now(timezone.utc).isoformat(),
+                    'output_file':output_file,'accepted':False,'source':'unknown'}),durable=True)
+                workspace_changes = {'count':len(changes),'files':changes[:50],'report_file':report}
+                preview = ', '.join(item['change']+' '+json.dumps(item['file'],ensure_ascii=False) for item in changes[:10])
+                raise ValueError('Workspace changed during requirement review; review was not accepted. '
+                                 'Change source is unknown; concurrent writes are possible. Files: '+preview+'. See '+report)
             if turn.exit_code or turn.timed_out or turn.interruption:
                 raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
             if self.config.function_dispatch:
@@ -1312,7 +1329,9 @@ class Supervisor:
             return brief['status']=='ready'
         except ValueError as exc:
             self.requirements_review={'status':'failed','summary':redact(str(exc)),
-                                      'cycle': len(self.requirement_cycles) + 1}
+                                      'cycle': len(self.requirement_cycles) + 1,
+                                      **({'output_file':output_file} if output_file else {}),
+                                      **({'workspace_changes':workspace_changes} if workspace_changes else {})}
             if follow_up and not self._stop_requested:
                 self._stop = True
                 self._stop_reason = 'Next requirement not ready: ' + self.requirements_review['summary']
@@ -3304,7 +3323,9 @@ class Supervisor:
             ),
             encoding="utf-8",
         )
-        (self.run_dir / f"{index:03d}-{role}-text.md").write_text(clipped(redact(text or partial)), encoding="utf-8")
+        # The round log is a bounded summary; the text artifact is the complete
+        # captured public result, including rejected requirement reviews.
+        (self.run_dir / f"{index:03d}-{role}-text.md").write_text(redact(text or partial), encoding="utf-8")
         return output_path
 
     def _save_external_session(self, role: str, session_id: str) -> None:

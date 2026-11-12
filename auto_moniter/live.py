@@ -15,6 +15,11 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def text_preview(text: str) -> dict:
+    text = redact(text)
+    return {'text': text[:4000], **({'truncated': True, 'text_length': len(text)} if len(text) > 4000 else {})}
+
+
 def public_events(value: dict, at: str = '') -> list[dict]:
     """Normalize public messages and tool operations; ignore private model reasoning."""
     try:
@@ -41,14 +46,14 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
         return _public_events({'type':'tool_result', 'call_id':value['toolCallId'], 'content':text}, at)
     if kind == 'end' and isinstance(value.get('structuredOutput'), dict):
         summary = value['structuredOutput'].get('summary')
-        return [{'at': at, 'kind': 'message', 'text': redact(summary)[:4000]}] if isinstance(summary, str) and summary.strip() else []
+        return [{'at': at, 'kind': 'message', **text_preview(summary)}] if isinstance(summary, str) and summary.strip() else []
     if kind in {'assistant','user'} and isinstance(value.get('message'),dict):
         events=[]
         for block in value['message'].get('content',[]):
             if not isinstance(block,dict):
                 continue
             if kind=='assistant' and block.get('type')=='text' and isinstance(block.get('text'),str):
-                events.append({'at':at or now(),'kind':'message','text':redact(block['text'])[:4000]})
+                events.append({'at':at or now(),'kind':'message',**text_preview(block['text'])})
             elif block.get('type')=='tool_use':
                 events.extend(_public_events({'type':'function_call','name':block.get('name'),
                                              'arguments':block.get('input',{}),'call_id':block.get('id')},at))
@@ -61,7 +66,7 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
     elif kind == 'event_msg':
         payload = value.get('payload') or {}
         if payload.get('type') == 'agent_message' and isinstance(payload.get('message'), str):
-            return [{'at': at, 'kind': 'message', 'text': redact(payload['message'])[:4000]}]
+            return [{'at': at, 'kind': 'message', **text_preview(payload['message'])}]
         return []
     else:
         item = value.get('item', value)
@@ -134,7 +139,7 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
         return []
     if not entry['text'].strip():
         return []
-    entry['text'] = redact(entry['text'])[:4000]
+    entry.update(text_preview(entry['text']))
     if 'output' in entry:
         entry['output'] = redact(entry['output'])
     return [entry]
@@ -186,7 +191,7 @@ class LiveOutput:
             value = json.loads(line)
         except ValueError:
             if not line.lstrip().startswith(('{', '[')):
-                self.emit({'kind': 'output' if stream == 0 else 'error', 'text': redact(line)[:4000]})
+                self.emit({'kind': 'output' if stream == 0 else 'error', **text_preview(line)})
             return
         if isinstance(value, dict):
             if (value.get('type') == 'text' and isinstance(value.get('data'), str)
@@ -201,7 +206,7 @@ class LiveOutput:
 
     def _flush_text(self):
         if self.text_fragments.strip():
-            self.emit({'kind':'message', 'text':redact(self.text_fragments)[:4000]})
+            self.emit({'kind':'message', **text_preview(self.text_fragments)})
         self.text_fragments = ''
 
     def close(self) -> None:

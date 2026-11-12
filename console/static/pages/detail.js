@@ -1,6 +1,6 @@
 import {$,escape,badge,taskButtons,stableHTML} from '/ui.js';
 import {api,watch,toast} from '/core.js';
-import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions} from '/task-view.js';
+import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
 const id=document.body.dataset.taskId;
 const section=$('#detail-page').dataset.section;
@@ -50,7 +50,7 @@ function renderRequirements(t){
  const coverage=t.requirement_coverage;
  const coverageHTML=coverage?.requirements?.length?`<h3>上次需求证据覆盖检查</h3><p>此处为历史检查，不代表当前交付确认。核对版本：${escape(coverage.tree||'未记录')}；${coverage.complete?'已满足结构化覆盖门禁':'尚有缺口'}</p>${pagedList('requirement-coverage',coverage.requirements,r=>`<li><span>${escape(r.id)}</span><span>${escape(r.text)} · ${escape((r.evidence||[]).join('、'))}</span><span>${r.covered?'已覆盖':'待核对'}</span></li>`)} `:'';
  const brief=t.requirements_review;
- const briefHTML=brief?.status?`<h3>reviewer 需求完善 · ${escape(brief.status)}</h3><div class="requirement-text">${escape(brief.refined_requirement||brief.summary)}</div>${pagedList('acceptance-criteria',brief.acceptance_criteria||[],c=>`<li>${escape(c)}</li>`)}<p>原始需求保留；这些补充不代表功能已经实现。</p>`:'';
+ const briefHTML=requirementReviewHTML(brief);
  const plan=t.acceptance_plan,results=t.acceptance_results;
  const checkLabels={passed:'检查通过',check_failed:'检查未通过（需核对输出）',environment_unavailable:'运行环境不可用',timed_out:'检查超时',interrupted:'检查被中断'};
  const acceptanceHTML=plan?.criteria?`<h3>完成标准</h3><div class="requirement-text">${escape(plan.criteria)}</div><p>${t.verification_mode==='planning'?'本任务仅制定验收方案，不代表原目标验收。':t.verification_mode==='review_only'?'仅语义审核：未提供运行测试通过证明。':'检查通过仍须结合独立审核、模块及审计门禁。'}</p><h3>选定检查</h3>${pagedList('acceptance-selected',plan.selected||[],c=>`<li><span>${escape(c.title)}</span><span>${escape(c.purpose)}</span></li>`,{empty:'<li>未选择项目自动检查；如有高级命令，结果在下面单列。</li>'})}`:'';
@@ -68,6 +68,7 @@ async function loadLogs(){
   if(seq!==logSequence)return;
   $('#log-select').innerHTML=data.files.length?data.files.map(n=>`<option value="${escape(n)}">${escape(n)}</option>`).join(''):'<option>暂无日志</option>';
   $('#log-select').value=data.selected;log=data.selected||'';
+  $('#log-full').hidden=!log;$('#log-full').href=fullLogURL(id,log);
   const output=$('#log-output'),scroll=output.scrollTop;
   output.textContent=data.content||'暂无执行日志。';output.scrollTop=$('#log-follow').checked?output.scrollHeight:scroll;
   logTotal=data.total_lines;pager.page=data.page;

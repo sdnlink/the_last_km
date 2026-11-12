@@ -16,7 +16,8 @@ def conclusion_event(event: dict) -> bool:
         value = json.loads(event.get('text', ''))
     except (ValueError, TypeError):
         return False
-    return isinstance(value, dict) and 'status' in value and 'summary' in value
+    return (isinstance(value, dict) and value.get('status') in {'done', 'continue', 'blocked'}
+            and 'summary' in value)
 
 
 def review_wait(state: dict, health: dict, status: str, rounds: list, current_round: int | None) -> dict:

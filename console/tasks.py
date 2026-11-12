@@ -949,25 +949,44 @@ class TaskStore:
                 write_json(run / 'control.json', {'action': action, **({'reason': reason.strip()} if reason.strip() else {})}, durable=True)
             return self.detail(ident)
 
+    def _log_selection(self, ident: str, name: str):
+        run = Path(self._get(ident)['run_dir'])
+        files = []
+        for path in run.glob('*'):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl', 'requirements-workspace-change.json'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+)?)(-text)?\.(log|md)|check-\d+\.log)', path.name):
+                continue
+            try:
+                files.append((path.stat().st_mtime, path.name))
+            except FileNotFoundError:
+                continue  # The supervisor can rotate/prune logs during enumeration.
+        names = [name for _, name in sorted(files, reverse=True)]
+        selected = name or next((n for n in names if '-text.md' in n), names[0] if names else '')
+        if selected and selected not in names:
+            raise TaskError('日志文件不存在', 404)
+        return run, names, selected
+
+    def log_text(self, ident: str, name: str) -> str:
+        """Read an explicitly selected public artifact without preview truncation."""
+        if not name:
+            raise TaskError('请选择日志文件', 400)
+        with self._lock:
+            run, _, selected = self._log_selection(ident, name)
+            try:
+                with os.fdopen(os.open(run/selected, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+                    raw = stream.read(8 * 1024 * 1024 + 1)
+            except FileNotFoundError:
+                raise TaskError('日志文件不存在', 404) from None
+            if len(raw) > 8 * 1024 * 1024:
+                raise TaskError('完整文本超过 8 MiB，请在运行记录目录读取原文件；未返回截断内容。', 413)
+            return redact(raw.decode('utf-8', errors='replace'))
+
     def logs(self, ident: str, name: str = '', page: int = 1, page_size: int = 10) -> dict:
         if type(page) is not int or not 0 <= page <= 1000000000 or type(page_size) is not int or not 1 <= page_size <= 100:
             raise TaskError('日志页码须为非负整数，每页数量须为 1 至 100', 400)
         with self._lock:
-            run = Path(self._get(ident)['run_dir'])
-            files = []
-            for path in run.glob('*'):
-                if path.is_symlink() or not path.is_file():
-                    continue
-                if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+)?)(-text)?\.(log|md)|check-\d+\.log)', path.name):
-                    continue
-                try:
-                    files.append((path.stat().st_mtime, path.name))
-                except FileNotFoundError:
-                    continue  # The supervisor can rotate/prune logs during enumeration.
-            names = [name for _, name in sorted(files, reverse=True)]
-            selected = name or next((n for n in names if '-text.md' in n), names[0] if names else '')
-            if selected and selected not in names:
-                raise TaskError('日志文件不存在', 404)
+            run, names, selected = self._log_selection(ident, name)
             if not hasattr(self, '_log_reader'):
                 self._log_reader = LogReader()
             try:

@@ -201,6 +201,21 @@ class ActivityReader:
             seen.add(key)
             unique.append(entry)
         activity = list(reversed(unique[:60]))
+        # Completed turns retain the full result separately from live previews.
+        # Old live records have no truncation flag; label their 4000-char limit
+        # without claiming we know how many characters were omitted.
+        for entry in activity:
+            if entry.get('kind') not in {'message', 'output'}:
+                continue
+            text = entry.get('text')
+            if isinstance(text, str) and len(text) == 4000 and not entry.get('truncated'):
+                entry['preview_only'] = True
+            round_id, entry_role = str(entry.get('round', '')), entry.get('role')
+            if round_id.isdecimal() and len(round_id) <= 9 and entry_role in {'worker', 'reviewer'}:
+                name = f'{int(round_id):03d}-{entry_role}-text.md'
+                path = run / name
+                if path.is_file() and not path.is_symlink():
+                    entry['text_file'] = name
         messages = [e for e in current_entries if e.get('kind') in {'message', 'output'}]
         operations = [e for e in current_entries if e.get('kind') in {'command', 'file', 'tool'}]
         operation = dict(operations[-1]) if operations else None

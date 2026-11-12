@@ -28,7 +28,7 @@ jobs:
           ln -sf "$(command -v python)" "$test_tools_dir/python3"
           ln -sf "$(command -v node)" "$test_tools_dir/node"
           PATH="$test_tools_dir:/usr/bin:/bin" python -m unittest discover -q
-      - run: node --test tests/test_agent_model_choices.mjs tests/test_console_requests.mjs tests/test_review_only_boundary.mjs
+      - run: node --test tests/test_agent_model_choices.mjs tests/test_console_requests.mjs tests/test_review_only_boundary.mjs tests/test_review_progress.mjs
       - run: git diff --check
       - run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .
       - name: Validate installed wheel outside source directory

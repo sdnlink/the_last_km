@@ -82,8 +82,11 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 4 and parts[3] == 'logs':
                     query = parse_qs(url.query)
                     name = query.get('file', [''])[0]
-                    page, size = int(query.get('page', ['1'])[0]), int(query.get('page_size', ['10'])[0])
-                    self._json(self.server.store.logs(parts[2], name, page, size))
+                    if query.get('full') == ['1']:
+                        self._send(200, self.server.store.log_text(parts[2], name).encode('utf-8'), 'text/plain; charset=utf-8')
+                    else:
+                        page, size = int(query.get('page', ['1'])[0]), int(query.get('page_size', ['10'])[0])
+                        self._json(self.server.store.logs(parts[2], name, page, size))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
                 elif len(parts) == 5 and parts[3] == 'git':

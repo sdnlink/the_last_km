@@ -1,8 +1,24 @@
 import {$,$$,escape,duration,active,roleStatuses,timeLabel,stableHTML} from './ui.js';
-import {paginate} from './pagination.js';
+import {paginate,pagedList} from './pagination.js';
+function fullLogURL(id,file){
+ return `/api/tasks/${encodeURIComponent(id)}/logs?file=${encodeURIComponent(file)}&full=1`;
+}
+function activityTextHTML(t,e){
+ const preview=e.truncated?`进度说明已截断${e.text_length?`（共 ${escape(e.text_length)} 字符）`:''}。`:e.preview_only?'当前为进度预览。':'';
+ const link=e.text_file?`<a href="${escape(fullLogURL(t.id,e.text_file))}" target="_blank" rel="noopener">查看本轮完整输出</a>`:'';
+ return `<pre>${escape(e.text)}${e.output?`\n\n${escape(e.output)}`:''}</pre>${preview||link?`<p class="control-hint">${preview}${link||'完整输出将在本轮结束后保存到执行日志。'}</p>`:''}`;
+}
+function requirementReviewHTML(brief){
+ if(!brief?.status)return '';
+ const fields=[['验收条件','acceptance_criteria'],['约束','constraints'],['假设','assumptions'],['阻塞条件','blockers']];
+ return `<h3>reviewer 需求完善 · ${escape(brief.status)}</h3><div class="requirement-text">${escape(brief.summary)}</div>${brief.refined_requirement?`<div class="requirement-text">${escape(brief.refined_requirement)}</div>`:''}${fields.filter(([,key])=>brief[key]?.length).map(([label,key])=>`<h4>${label}</h4>${pagedList('review-'+key,brief[key],c=>`<li>${escape(c)}</li>`)}`).join('')}<p>原始需求保留；这些补充不代表功能已经实现。</p>`;
+}
 function failureHTML(task){
  const f=task.failure;if(!f)return '';
- return `<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · 第 '+escape(f.round)+' 轮':''} · ${escape(f.role||'watcher')}${f.exit_code!=null?' · 监督进程退出码 '+escape(f.exit_code):''}</p>${f.expected_commit?`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${f.raw_summary?`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||'运行记录')}</summary><pre>${escape(f.raw_summary)}</pre></details>`:''}${f.recent_failures?.length?`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
+ const changes=f.workspace_changes;
+ const changedHTML=changes?`<details open data-key="requirement-workspace-changes"><summary>审查期间变化文件 · ${escape(changes.count)} 项</summary><ul>${(changes.files||[]).map(item=>`<li>${escape(({added:'新增',removed:'删除',modified:'修改'})[item.change]||item.change)} · ${escape(item.file)}</li>`).join('')}</ul>${changes.report_file?`<a href="${escape(fullLogURL(task.id,changes.report_file))}" target="_blank" rel="noopener">查看完整变化记录</a>`:''}</details>`:'';
+ const reviewHTML=f.review_output_file?`<p><a href="${escape(fullLogURL(task.id,f.review_output_file))}" target="_blank" rel="noopener">查看 reviewer 完整原始结果（未获 watcher 接受）</a></p>`:'';
+ return `<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · 第 '+escape(f.round)+' 轮':''} · ${escape(f.role||'watcher')}${f.exit_code!=null?' · 监督进程退出码 '+escape(f.exit_code):''}</p>${f.expected_commit?`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||'运行记录')}</summary><pre>${escape(f.raw_summary)}</pre></details>`:''}${f.recent_failures?.length?`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
 }
 function checkpointHTML(id, c) {
   const cp=c.git_checkpoint||c;
@@ -71,7 +87,7 @@ function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true}
   const labels = {message:"进度说明",command:"执行命令",file:"文件变更",tool:"工具操作",result:"工具结果",plan:"执行计划",output:"执行输出",phase:"监督事件",error:"执行异常",direction:"用户要求"};
   const plan = role === "all" || role === t.activity?.role ? t.activity?.plan || [] : [];
   const page=paginate('workflow',events,{rowHeight:130});
-  const html = `${plan.length ? `<ol class="live-plan">${plan.map(p=>`<li class="${escape(p.status)}">${escape(p.step)}</li>`).join("")}</ol>` : ""}<ol class="work-events" data-page-list="workflow">${page.items.map(e=>`<li><div class="work-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${e.kind === "phase" ? "watcher" : escape(e.role || "worker")} · ${labels[e.kind] || "工作活动"}</span>${e.round ? `<span>第 ${escape(e.round)} 轮</span>` : ""}</div><details data-key="${escape(`${e.at}-${e.role}-${e.kind}-${e.text?.slice(0,60)}`)}" ${["message","phase"].includes(e.kind) ? "open" : ""}><summary>${escape((e.text || "").split("\n")[0].slice(0,200))}</summary><pre>${escape(e.text)}${e.output ? `\n\n${escape(e.output)}` : ""}</pre></details></li>`).join("") || '<li class="live-empty">该角色暂无工作流记录；新活动将在这里自动更新。</li>'}</ol>${page.controls}`;
+  const html = `${plan.length ? `<ol class="live-plan">${plan.map(p=>`<li class="${escape(p.status)}">${escape(p.step)}</li>`).join("")}</ol>` : ""}<ol class="work-events" data-page-list="workflow">${page.items.map(e=>`<li><div class="work-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${e.kind === "phase" ? "watcher" : escape(e.role || "worker")} · ${labels[e.kind] || "工作活动"}</span>${e.round ? `<span>第 ${escape(e.round)} 轮</span>` : ""}</div><details data-key="${escape(`${e.at}-${e.role}-${e.kind}-${e.text?.slice(0,60)}`)}" ${["message","phase"].includes(e.kind) ? "open" : ""}><summary>${escape((e.text || "").split("\n")[0].slice(0,200))}</summary>${activityTextHTML(t,e)}</details></li>`).join("") || '<li class="live-empty">该角色暂无工作流记录；新活动将在这里自动更新。</li>'}</ol>${page.controls}`;
   stableHTML($("#detail-live"),html);
   $$("[data-role-filter]").forEach(el=>el.classList.toggle("active",el.dataset.roleFilter === role));
 }
@@ -109,4 +125,4 @@ function renderConclusions(t, {groupByRound=false} = {}) {
   stableHTML(root,html+page.controls);
 }
 
-export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions};
+export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions,activityTextHTML,requirementReviewHTML,fullLogURL};

@@ -1317,6 +1317,54 @@ class Supervisor:
             self._retry_pause(1,'coalescing concurrent project changes')
             self._sync_business_head(records)
 
+    def _invoke_requirement_review(self, prompt, index):
+        """Repair malformed assignment IDs once, keeping implementation stopped."""
+        tree = workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
+        signature = self.project.signature if self.project else ''
+        for attempt in range(2):
+            turn = self._invoke(self.config.reviewer,prompt,'',role='reviewer',index=index,
+                model=self._reviewer_model(),extra_args=self.config.reviewer_extra_args,read_only=True)
+            if turn.session_id:
+                self._active_reviewer_id = turn.session_id
+            if not self.config.function_dispatch or turn.exit_code or turn.timed_out or turn.interruption:
+                return turn
+            try:
+                plan = json.loads(turn.text)
+                assignment = plan.get('next_task') if isinstance(plan,dict) else None
+                if isinstance(assignment,dict):
+                    function_tasks.validate_identifiers(assignment)
+            except function_tasks.AssignmentIdentifierError as exc:
+                if not attempt:
+                    self._process_control()
+                if (attempt or self._stop or self._stop_requested
+                        or workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) != tree):
+                    return turn
+                if self.project:
+                    self.project.observe(force=True)
+                    if signature != self.project.signature:
+                        return turn
+                if self.config.reviewer.name == 'paseo' and self._active_reviewer_id:
+                    stopped = _paseo_stop(self.config.reviewer.binary,self._active_reviewer_id,self.config.cwd)
+                    archived = _paseo_archive(self.config.reviewer.binary,self._active_reviewer_id,self.config.cwd)
+                    if not stopped or not archived:
+                        raise RecoveryError('Requirement reviewer cleanup failed before identifier repair')
+                    self._active_reviewer_id = ''
+                artifact = f'{index:03d}-reviewer-repair-{self._agent_calls}'
+                for suffix in ['.log','-text.md','-prompt.md']:
+                    source = self.run_dir / f'{index:03d}-reviewer{suffix}'
+                    if source.exists():
+                        source.replace(self.run_dir / (artifact+suffix))
+                self._event('requirements_assignment_repair',reason=str(exc),output_file=artifact+'-text.md')
+                prompt += ('\n\nReviewer-only repair of the requirement plan. No worker has started for this plan. '
+                           'Correct identifier syntax and corresponding references in the previous response. '
+                           'Preserve its requirements, acceptance criteria, target files/symbols and approved checks. '
+                           +function_tasks.IDENTIFIER_CONTRACT+'Watcher rejection: '+str(exc)
+                           +'\nPrevious response:\n'+turn.text)
+            except ValueError:
+                return turn
+            else:
+                return turn
+
     def _elaborate_requirement_once(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         previous_brief = self.requirements_review
@@ -1351,7 +1399,8 @@ class Supervisor:
                 return False
             prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None)
             if self.config.function_dispatch:
-                prompt += ('\n\nYou own function decomposition. Propose exactly one next_task, normally for a single named function, '
+                prompt += ('\n\n'+function_tasks.IDENTIFIER_CONTRACT+
+                           'You own function decomposition. Propose exactly one next_task, normally for a single named function, '
                            'with objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
                            'Use delivery_scope=function for intermediate work; module or requirement only for a final function plus the corresponding verification. '
                            'Declare original modules once in modules (files=[]; no commands); use modules=[] when the ledger is already populated. '
@@ -1371,9 +1420,8 @@ class Supervisor:
             if self.project:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
-            turn=self._invoke(self.config.reviewer,prompt,'',
-                              role='reviewer',index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0,model=self._reviewer_model(),
-                              extra_args=self.config.reviewer_extra_args,read_only=True)
+            turn=self._invoke_requirement_review(prompt,
+                index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0)
             if turn.session_id:self._active_reviewer_id=turn.session_id
             output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
             after_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)

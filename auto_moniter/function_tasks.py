@@ -4,10 +4,20 @@ import json
 import re
 from pathlib import Path
 
+IDENTIFIER_PATTERN = r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+IDENTIFIER_SCHEMA = {'type':'string','pattern':IDENTIFIER_PATTERN,
+                     'description':'1-64 ASCII letters, digits, underscores, dots or hyphens; begin with a letter or digit. Example: F1.'}
+IDENTIFIER_CONTRACT = ('Task id, module_id and integration_scope must use 1-64 ASCII letters, digits, '
+                       'underscores, dots or hyphens, beginning with a letter or digit; for example F1 or auth-01. '
+                       'Use accepted task IDs in depends_on. Colons belong to criterion/check references such as '
+                       'req:1:1 or check:1; task:1 is not a valid task ID. ')
+
 FIELDS={'id','module_id','file','symbol','objective','inputs','outputs','boundaries','verification','depends_on','delivery_scope'}
 TASK_SCHEMA={'type':'object','additionalProperties':False,'properties':{
- **{k:{'type':'string'} for k in ['id','module_id','file','symbol','objective','inputs','outputs']},
- **{k:{'type':'array','items':{'type':'string'}} for k in ['boundaries','verification','depends_on']},
+ **{k:{'type':'string'} for k in ['file','symbol','objective','inputs','outputs']},
+ **{k:{'type':'array','items':{'type':'string'}} for k in ['boundaries','verification']},
+ **{k:copy.deepcopy(IDENTIFIER_SCHEMA) for k in ['id','module_id']},
+ 'depends_on':{'type':'array','items':copy.deepcopy(IDENTIFIER_SCHEMA)},
  'delivery_scope':{'type':'string','enum':['function','module','requirement']}},'required':sorted(FIELDS)}
 NEXT_SCHEMA={'anyOf':[{'type':'null'},TASK_SCHEMA]}
 GATE_FIELDS = {'criterion_ids', 'check_ids', 'test_files'}
@@ -54,15 +64,25 @@ def validate_targets(value):
 
 
 def identifier(value):
-    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', value)
+    return isinstance(value, str) and re.fullmatch(IDENTIFIER_PATTERN, value)
+
+
+class AssignmentIdentifierError(ValueError):
+    """A reviewer can repair identifier syntax without changing the task."""
+
+
+def validate_identifiers(value):
+    for key in ['id','module_id','integration_scope']:
+        if key in value and not identifier(value[key]):
+            raise AssignmentIdentifierError('Invalid function assignment '+key+
+                ': use 1-64 ASCII letters, digits, underscores, dots or hyphens; '
+                'start with a letter or digit (for example F1). Colons and spaces are not allowed.')
 
 
 def validate(value, modules=None):
     if not isinstance(value,dict) or set(value) not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
-    for key in ['id','module_id']:
-        if not identifier(value[key]):
-            raise ValueError('Invalid function assignment '+key)
+    validate_identifiers(value)
     for key in ['objective','inputs','outputs']:
         if not isinstance(value[key],str) or not value[key].strip() or len(value[key])>2000 or '\0' in value[key]:
             raise ValueError('Missing precise function assignment '+key)
@@ -165,6 +185,7 @@ class FunctionTasks:
 
 def schema(base, *, planning=False, gate=False, integration=False):
     result=copy.deepcopy(base)
+    result['properties']['modules'] = module_schema()
     next_schema = copy.deepcopy(NEXT_SCHEMA)
     if gate:
         task = next_schema['anyOf'][1]
@@ -181,7 +202,7 @@ def schema(base, *, planning=False, gate=False, integration=False):
                 grouped['properties'].pop(key)
             grouped['properties'].update({
                 'kind': {'type': 'string', 'enum': ['integration']},
-                'integration_scope': {'type': 'string'}, 'atomic_reason': {'type': 'string'},
+                'integration_scope': copy.deepcopy(IDENTIFIER_SCHEMA), 'atomic_reason': {'type': 'string'},
                 'targets': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
                             'properties': {k: {'type': 'string'} for k in ('file', 'symbol')},
                             'required': ['file', 'symbol']}},
@@ -200,7 +221,9 @@ def schema(base, *, planning=False, gate=False, integration=False):
 
 def module_schema():
     from auto_moniter.verdict import VERDICT_SCHEMA
-    return VERDICT_SCHEMA['properties']['modules']
+    result = copy.deepcopy(VERDICT_SCHEMA['properties']['modules'])
+    result['items']['properties']['id'] = copy.deepcopy(IDENTIFIER_SCHEMA)
+    return result
 
 
 def verdict_contract(role, task):
@@ -218,7 +241,7 @@ def verdict_contract(role, task):
             'module_ids=['+task['module_id']+'] only when that delivery scope is fully verified. '
             'Give evidence for every target file and behavioral check results; gaps and next_actions are only for this assignment.')
     return (
-        f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
+        IDENTIFIER_CONTRACT + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Accept only after worker task_status=done and current evidence agrees. '
         'For changes_required: status=continue, next_task=null; give only this assignment\'s actionable gaps and minimal repair. '
         + ('For a concrete defect found in verification-only work, you may instead give next_task as one bounded '

@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-企业宣传网站提供 [中文](webdist/index.html) 与 [English](webdist/en/index.html) 两种版本。GitHub 默认 README 使用英文，本页保留完整中文参考。
+企业宣传网站提供 [中文](https://sdnlink.cn/index.html) 与 [English](https://sdnlink.cn/en/index.html) 两种版本。GitHub 默认 README 使用英文，本页保留完整中文参考。
 
 一个人提需求。`auto-moniter` 盯着 coding agent，直到独立审查认为需求已经落地。
 

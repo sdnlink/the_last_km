@@ -11,7 +11,7 @@ It works with the Agent CLIs you already use, with a Linux CLI and a web console
 - **Current version:** 0.4.1
 - **Platform:** Linux, Python 3.11 or later
 - **Runtime dependencies:** Python standard library; install and authenticate your chosen Agent CLIs separately
-- **Project website:** [Chinese](webdist/index.html) · [English](webdist/en/index.html)
+- **Project website:** [Chinese](https://sdnlink.cn/index.html) · [English](https://sdnlink.cn/en/index.html)
 
 ## Why use it?
 

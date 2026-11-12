@@ -1040,6 +1040,9 @@ class Supervisor:
                     review.status = 'continue'
                     review_record.watcher_result.update(status='rejected', reasons=[str(exc)])
                     return self._finish('action_required', 'Function handoff rejected: ' + str(exc), records, review)
+                if next_functions is not None:
+                    self._apply_function_assessment(record, review_record)
+                    verdict = record.verdict
                 if scope_gaps:
                     self._reject_function_candidate(review_record, scope_gaps)
                 if next_functions is not None and self._function_gate:
@@ -2278,21 +2281,18 @@ class Supervisor:
             (verdict.task_status not in ('done', 'incomplete'), 'task_status must be done or incomplete'),
             (verdict.next_task is not None, 'next_task must be null; only the reviewer assigns the next task'),
             (verdict.modules, 'modules must be []; the worker cannot redefine modules'),
-            (verdict.issue_resolutions, 'issue_resolutions must be []; independent review closes audit findings'),
             (set(verdict.module_ids) - {task['module_id']}, 'module_ids may contain only ' + task['module_id']),
-            (_accepted(verdict) and (expected == 'function' or verdict.scope != expected
+            (verdict.status == 'done' and (expected == 'function' or verdict.scope != expected
                 or verdict.module_ids != [task['module_id']] or verdict.task_status != 'done'),
                 'Overall status/scope must match delivery_scope=' + expected + '; function completion uses status=continue'),
         ]:
             if invalid:
                 errors.append(reason)
         if verdict.task_status == 'done':
-            for field in ('gaps', 'blockers', 'next_actions'):
-                if getattr(verdict, field):
-                    errors.append('task_status=done requires ' + field + '=[]; watcher checks and reviewer acceptance belong in summary')
             if not verdict.evidence:
                 errors.append('task_status=done requires existing completion evidence')
-            if expected != 'function' and not _accepted(verdict):
+            if expected != 'function' and (verdict.status != 'done' or verdict.scope != expected
+                    or verdict.module_ids != [task['module_id']]):
                 errors.append('Module/requirement completion requires status=done and complete delivery evidence')
         if errors:
             verdict.status = 'continue'
@@ -2304,6 +2304,19 @@ class Supervisor:
             verdict.module_ids = []
             verdict.gaps.extend('Function completion report rejected: ' + error for error in errors)
         return errors
+
+    def _apply_function_assessment(self, worker_record, review_record):
+        """Use independent acceptance without rewriting the captured worker report."""
+        worker, review = worker_record.verdict, review_record.verdict
+        if not (review.task_status == 'accepted' and worker.task_status == 'done'):
+            return
+        if worker.gaps or worker.next_actions or worker.blockers or worker.issue_resolutions:
+            worker_record.watcher_result['function_assessment'] = {
+                'review_round': review_record.index, 'tree': review_record.tree,
+                'original': worker.to_dict(), 'reviewer_evidence': list(review.evidence),
+                'note': 'Independent review assessed the worker concerns; original transcript is preserved.'}
+            from dataclasses import replace
+            worker_record.verdict = replace(worker, gaps=[], next_actions=[], blockers=[], issue_resolutions=[])
 
     def _repair_function_worker_report(self, record, records):
         """Correct one completion report on the saved candidate, without implementation."""
@@ -2480,7 +2493,8 @@ class Supervisor:
             self._record_assignment(staged.current)
 
     def _verdict_from_turn(self, turn: "_CompletedTurn", *, role: str) -> Verdict:
-        verdict = parse_verdict(turn.text, structured=turn.structured, function_gate=self._function_gate)
+        verdict = parse_verdict(turn.text, structured=turn.structured, function_gate=self._function_gate,
+                                worker_submission=role == 'worker' and self.config.function_dispatch)
         if turn.interruption == "input request":
             verdict.status = "continue"
             verdict.gaps.append("The agent was waiting for input or confirmation. Continue the authorized task without waiting for a reply.")
@@ -3243,8 +3257,11 @@ class Supervisor:
                 "requirements or transcripts are historical references, not current issue identifiers. "
                 "Report newly found or inherited defects as plain findings prefixed by their current module ID. "
                 "Only IDs present in this ledger may be used in issue_resolutions; never invent or transplant closures.",
-                "For each fixed or invalid finding, return issue_resolutions with its exact AUD ID, an explanation and changed-file evidence. "
+                "For each fixed or invalid finding, return issue_resolutions with its exact AUD ID, an explanation and current file evidence. "
                 "Do not mark an issue resolved based only on a worker claim. Unresolved issues remain open across turns and resume.",
+                "A finding about completion report formatting or waiting for automatic checks does not require source edits. "
+                "If current code and evidence satisfy the assignment, close that invalid finding in this same review, "
+                "accept the function and dispatch the next task. Do not require the worker to send the same candidate again.",
                 "When an existing issue remains open, prefix its gaps entry with its exact AUD ID (for example 'AUD-1: assertion still fails'). "
                 "This preserves its original description and scope instead of creating a duplicate under new wording.",
                 "",
@@ -3276,6 +3293,9 @@ class Supervisor:
         worker = next((r for r in reversed(records) if r.role == 'worker'), None)
         if not worker:
             return None
+        recovered = self._recover_function_submission(worker)
+        if recovered:
+            return worker
         report = worker.watcher_result.get('worker_report', {})
         if (report.get('status') in ('pending', 'attempted', 'rejected')
                 and report.get('task') == self.function_tasks.current
@@ -3307,6 +3327,42 @@ class Supervisor:
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree:
             return None
         return worker
+
+    def _recover_function_submission(self, record):
+        """Recover a legacy report downgrade once; the reviewer still decides acceptance."""
+        task = self.function_tasks.current
+        if (not self.config.function_dispatch or not task or record.interruption
+                or record.exit_code or record.timed_out
+                or record.watcher_result.get('submission_recovered')
+                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
+            return False
+        pending_report = record.watcher_result.get('worker_report', {})
+        if record.verdict.task_status != 'incomplete' and not pending_report:
+            return False
+        if not pending_report and not any(
+                gap == 'Report only the dispatched function with its exact task ID and verified completion evidence.'
+                or gap.startswith('Function completion report rejected:') for gap in record.verdict.gaps):
+            return False
+        source = pending_report.get('original')
+        if not isinstance(source, dict):
+            path = self.run_dir / f'{record.index:03d}-worker-text.md'
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024*1024:
+                return False
+            raw = path.read_text(encoding='utf-8')
+        else:
+            raw = json.dumps(source, ensure_ascii=False)
+        verdict = parse_verdict(raw, function_gate=self._function_gate, worker_submission=True)
+        if verdict.task_status != 'done' or self._validate_function_worker(verdict):
+            return False
+        record.watcher_result['submission_recovered'] = {
+            'previous': record.verdict.to_dict(), 'tree': record.tree,
+            'reason': 'Report annotations require independent assessment, not another worker submission.'}
+        if pending_report:
+            pending_report['status'] = 'review_pending'
+        record.failure = ''
+        record.verdict = verdict
+        self._event('function_submission_recovered', round=record.index, task_id=task['id'])
+        return True
 
     def _check_retry_review(self, record):
         retry = record.watcher_result.get('check_retry')
@@ -3427,6 +3483,10 @@ class Supervisor:
                         and review.task_status == 'accepted' and not review.parse_error
                         and (not self._function_gate or not self._function_scope_problems())):
                     problems = self._function_evidence_problems(review, 'reviewer')
+                    pending = [item['id'] for item in staged.pending() if item['id'] in self._function_issue_ids]
+                    if pending:
+                        problems.append('Accepted function needs explicit reviewer closure for: ' + ', '.join(pending)
+                            + '. Use current file evidence to close invalid findings; no worker report or source edit is required.')
                     if problems:
                         review.parse_error = 'invalid function evidence'
                         review.status = 'continue'

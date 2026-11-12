@@ -352,6 +352,8 @@ Resume retains requirements, checks, saved work, and cumulative usage. Resolve t
 
 An approved requirement and pending function assignment are reused on resume. If requirement review stopped on a blocker or invalid plan, the reviewer continues from its saved analysis and checks the outstanding issue, new instructions, and changed inputs. Starting a fresh reviewer session does not restart a full repository review. Cached analysis supplies context; a revised plan still passes the dispatch checks before the worker runs.
 
+For a submitted function, the reviewer assesses the implementation, test evidence, and any concerns in the worker report. Notes about pending watcher checks do not require another worker report. Once the reviewer accepts the function and the watcher checks pass, dispatch continues. Only the reviewer can close audit findings; an invalid report-only finding can be closed using current file evidence without changing the code.
+
 In the console, stop the task before using **临时调整角色** to change a supported native worker, reviewer, or model, then resume it. The original requirement and cumulative usage remain attached to the task. Paseo, custom commands, and configurations with incompatible extra arguments require a separate follow-up task.
 
 For authentication errors, repair the selected CLI login or profile before resuming. For missing build or test dependencies, prepare them in the task environment. A `needs_input` requirement needs the reported decision or evidence before implementation can start. Check `report.json`, role logs, and acceptance results for the specific reason.

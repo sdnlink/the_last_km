@@ -161,7 +161,8 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
-def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gate: bool = False) -> Verdict:
+def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gate: bool = False,
+               worker_submission: bool = False) -> Verdict:
     status = str(data.get("status", "")).strip().lower()
     if status not in _STATUS:
         status = "continue"
@@ -232,7 +233,8 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
             if completion not in verdict.gaps:
                 verdict.gaps.append(completion)
     # A claim of done with leftover work is not done.
-    if verdict.status == "done" and (verdict.gaps or verdict.next_actions or verdict.blockers):
+    if (verdict.status == "done" and (verdict.gaps or verdict.next_actions or verdict.blockers)
+            and not (worker_submission and verdict.task_status == 'done')):
         verdict.status = "continue"
         if verdict.blockers and not verdict.gaps:
             verdict.gaps.append("Done was reported with unresolved external blockers.")
@@ -299,7 +301,8 @@ def _candidate_objects(text: str) -> list[str]:
     return _balanced_objects(text)
 
 
-def parse_verdict(text: str, *, structured: bool = False, function_gate: bool = False) -> Verdict:
+def parse_verdict(text: str, *, structured: bool = False, function_gate: bool = False,
+                  worker_submission: bool = False) -> Verdict:
     """Extract the last structured conclusion from an agent turn."""
     raw = text or ""
     stripped = raw.strip()
@@ -326,7 +329,8 @@ def parse_verdict(text: str, *, structured: bool = False, function_gate: bool = 
             conclusion_end = stripped.rfind(candidate) + len(candidate)
             last_error = ""
     if chosen is not None:
-        verdict = _normalize(chosen, raw, structured=structured, function_gate=function_gate)
+        verdict = _normalize(chosen, raw, structured=structured, function_gate=function_gate,
+                             worker_submission=worker_submission)
         request = input_request(stripped[conclusion_end:])
         if request:
             verdict.status = "continue"

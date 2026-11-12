@@ -128,6 +128,66 @@ def _digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _rust_file_symbol(path, symbol):
+    """Resolve Cargo's implicit crate/file modules without dropping arbitrary prefixes."""
+    import tomllib
+    path = path.resolve()
+    for source_root in path.parents:
+        manifest = source_root.parent/'Cargo.toml'
+        if source_root.name != 'src' or not manifest.is_file():
+            continue
+        try:
+            if manifest.stat().st_size > 64*1024:
+                return symbol
+            data = tomllib.loads(manifest.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError):
+            return symbol
+        package = data.get('package', {}).get('name', '')
+        if not isinstance(package, str):
+            return symbol
+        library = data.get('lib', {}).get('name', package.replace('-', '_'))
+        if not isinstance(library, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', library):
+            return symbol
+        relative = path.relative_to(source_root)
+        modules = list(relative.parts[:-1])
+        if relative.stem not in ('lib', 'main', 'mod'):
+            modules.append(relative.stem)
+        parts = re.split(r'::|\.', symbol)
+        for crate in (library, 'crate'):
+            prefix = [crate, *modules]
+            if parts[:len(prefix)] == prefix and len(parts) > len(prefix):
+                return '::'.join(parts[len(prefix):])
+        return symbol
+    return symbol
+
+
+def source_state(path, symbol, source):
+    """Measure current or immutable historical source with the same parser."""
+    source = source.replace('\r\n', '\n')
+    suffix = path.suffix.lower()
+    if suffix == '.py':
+        spans = _python_spans(source, symbol)
+    elif suffix in {'.js', '.mjs', '.cjs', '.html', '.htm'}:
+        spans = _js_spans(source, symbol, suffix in {'.html', '.htm'})
+    elif suffix in GRAMMARS:
+        resolved = _rust_file_symbol(path, symbol) if suffix == '.rs' else symbol
+        spans = language_spans(source, resolved, GRAMMARS[suffix])
+    else:
+        raise ValueError('Function scope verification does not support: ' + suffix)
+    if len(spans) > 1:
+        raise ValueError('Assigned symbol is ambiguous: ' + symbol)
+    if not spans:
+        return {'whole': _digest(source), 'outside': None, 'body': None}
+    start, end = spans[0]
+    before, after = source[:start], source[end:]
+    without = {before + after}
+    if (not before or before.endswith('\n')) and (not after or after.startswith('\n')):
+        without.add(before + after.removeprefix('\n'))
+        without.add(before.removesuffix('\n') + after.removeprefix('\n'))
+    return {'without': sorted(_digest(text) for text in without),
+            'outside': [_digest(before), _digest(after)], 'body': _digest(source[start:end])}
+
+
 def target_state(path, symbol):
     if not path.exists():
         return {'whole': _digest(''), 'outside': None, 'body': None}
@@ -136,32 +196,9 @@ def target_state(path, symbol):
             data = handle.read(MAX_SOURCE + 1)
         if len(data) > MAX_SOURCE:
             raise ValueError('Function target exceeds 2 MiB')
-        source = data.decode('utf-8').replace('\r\n', '\n')
-        suffix = path.suffix.lower()
-        if suffix == '.py':
-            spans = _python_spans(source, symbol)
-        elif suffix in {'.js', '.mjs', '.cjs', '.html', '.htm'}:
-            spans = _js_spans(source, symbol, suffix in {'.html', '.htm'})
-        elif suffix in GRAMMARS:
-            spans = language_spans(source, symbol, GRAMMARS[suffix])
-        else:
-            raise ValueError('Function scope verification does not support: ' + suffix)
+        return source_state(path, symbol, data.decode('utf-8'))
     except (OSError, SyntaxError, UnicodeError, RecursionError) as exc:
         raise ValueError('Cannot parse function target: ' + path.name) from exc
-    if len(spans) > 1:
-        raise ValueError('Assigned symbol is ambiguous: ' + symbol)
-    if not spans:
-        return {'whole': _digest(source), 'outside': None, 'body': None}
-    start, end = spans[0]
-    before, after = source[:start], source[end:]
-    without = {before + after}
-    # When inserting a declaration on its own line, allow the one separator
-    # line used for that declaration. Leave all other outside bytes intact.
-    if (not before or before.endswith('\n')) and (not after or after.startswith('\n')):
-        without.add(before + after.removeprefix('\n'))
-        without.add(before.removesuffix('\n') + after.removeprefix('\n'))
-    return {'without': sorted(_digest(text) for text in without),
-            'outside': [_digest(before), _digest(after)], 'body': _digest(source[start:end])}
 
 
 def criteria(modules, module_id):
@@ -249,13 +286,28 @@ def validate_task(task, root, modules, checks, brief, *, approvals=()):
             raise ValueError('Additional function files must be focused regression test paths: ' + name)
 
 
-def baseline(path, root, task, snapshot, *, missing_ok):
+def baseline(path, root, task, snapshot, *, missing_ok, historical_source=None):
     if path.is_file():
         with gzip.open(path, 'rt', encoding='utf-8') as handle:
             saved = json.load(handle)
         if saved['id'] == task['id']:
             if any((root / name).exists() and str(root / name) not in snapshot for name in task['test_files']):
                 raise ValueError('Declared regression test is outside the monitored workspace')
+            repaired = False
+            for file, symbol in targets(task):
+                previous = saved.get('targets', {}).get(file)
+                if (not historical_source or not previous or previous.get('body') is not None
+                        or not previous.get('whole')):
+                    continue
+                source = historical_source(file, previous['whole'])
+                if source is None or _digest(source.replace('\r\n', '\n')) != previous['whole']:
+                    continue
+                measured = source_state(_path(root, file), symbol, source)
+                if measured['body'] is not None:
+                    saved['targets'][file] = measured
+                    repaired = True
+            if repaired:
+                _write_baseline(path, saved)
             return saved
     if not missing_ok:
         raise ValueError('Saved function scope baseline is missing; refusing to reset it after implementation')
@@ -266,13 +318,17 @@ def baseline(path, root, task, snapshot, *, missing_ok):
              'targets': {file: target_state(_path(root, file), symbol) for file, symbol in targets(task)}}
     if task.get('kind') == 'verification' and any(t['body'] is None for t in saved['targets'].values()):
         raise ValueError('Verification-only assignment must name an existing, unambiguous function')
+    _write_baseline(path, saved)
+    return saved
+
+
+def _write_baseline(path, saved):
     tmp = path.with_suffix('.tmp')
     with gzip.open(tmp, 'wt', encoding='utf-8') as handle:
         json.dump(saved, handle, separators=(',', ':'))
     with tmp.open('rb') as handle:
         os.fsync(handle.fileno())
     tmp.replace(path)
-    return saved
 
 
 def scope_problems(root, task, saved, snapshot):

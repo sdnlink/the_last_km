@@ -2235,8 +2235,27 @@ class Supervisor:
         previous = self._last_invocation or {}
         self._function_baseline = function_gate.baseline(
             self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,
-            missing_ok=previous.get('task_id') != task['id'])
+            missing_ok=previous.get('task_id') != task['id'], historical_source=self._historical_function_source)
         return self._function_baseline
+
+    def _historical_function_source(self, file, digest):
+        if not self.git_history:
+            return None
+        relative = (self.config.cwd.relative_to(self.git_history.root)/file).as_posix()
+        refs = [self.git_history.initial, getattr(self.git_history, 'candidate', {}).get('base')]
+        for ref in dict.fromkeys(refs):
+            if not ref:
+                continue
+            data = self.git_history.git('show', ref+':'+relative, check=False)
+            if len(data) > function_gate.MAX_SOURCE:
+                continue
+            try:
+                source = data.decode('utf-8').replace('\r\n', '\n')
+            except UnicodeError:
+                continue
+            if hashlib.sha256(source.encode()).hexdigest() == digest:
+                return source
+        return None
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
@@ -3366,6 +3385,8 @@ class Supervisor:
 
     def _check_retry_review(self, record):
         retry = record.watcher_result.get('check_retry')
+        if not isinstance(retry, dict):
+            return self._scope_retry_review(record)
         if (not isinstance(retry, dict) or self._pending_directions()
                 or retry.get('tree') != record.tree
                 or retry.get('tree') != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
@@ -3380,6 +3401,28 @@ class Supervisor:
         review = parse_verdict(json.dumps(value), function_gate=self._function_gate)
         if review.parse_error or not (_accepted(review) or review.task_status == 'accepted'):
             return None
+        return review
+
+    def _scope_retry_review(self, record):
+        """Reuse an unchanged approval after correcting a function locator failure."""
+        reasons = record.watcher_result.get('reasons', [])
+        if (record.watcher_result.get('function_gate') != 'repair' or not reasons
+                or any(not reason.startswith('Implement or change the assigned function: ') for reason in reasons)
+                or self._pending_directions() or not self.function_tasks.current
+                or record.verdict.task_id != self.function_tasks.current['id']
+                or record.tree != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                or self._function_scope_problems()):
+            return None
+        path = self.run_dir/f'{record.index:03d}-reviewer-text.md'
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024*1024:
+            return None
+        review = parse_verdict(path.read_text(encoding='utf-8'), function_gate=self._function_gate)
+        if (review.parse_error or review.task_status != 'accepted' or review.task_id != record.verdict.task_id
+                or review.gaps or review.blockers or review.next_actions
+                or self._function_evidence_problems(review, 'reviewer')
+                or self.git_history and self.git_history.review_problems(review.evidence)):
+            return None
+        self._event('function_scope_review_reused', round=record.index, task_id=review.task_id)
         return review
 
     def _saved_approval(self, index, tree):

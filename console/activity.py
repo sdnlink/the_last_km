@@ -60,6 +60,7 @@ EVENT_LABELS = {
     'requirements_review_continued': '复用需求审查记录，仅复核待处理项和输入变化',
     'worker_report_repair': 'Worker 正在只读纠正交付报告，保留现有实现',
     'function_submission_recovered': '恢复已有函数交付，直接交 Reviewer 复核并派发后续任务',
+    'function_scope_review_reused': '函数定位已核对，复用同一候选的 Reviewer 验收结论',
     'function_gate_rejected': '函数验收门禁未通过',
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',

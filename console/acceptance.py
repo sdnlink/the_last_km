@@ -12,6 +12,14 @@ import sys
 KINDS = {'code', 'documentation', 'service', 'other'}
 
 
+def validate_commands(checks):
+    """Reject pasted numbered instructions before approving them as shell checks."""
+    for number, command in enumerate(checks, 1):
+        if re.match(r'^\s*\d+(?:[、．]|\.\s)', command):
+            raise ValueError(f'第 {number} 条验收命令含文字编号，请填写实际可执行命令；'
+                             '测试环境和验收范围说明请填写到需求或补充要求中。')
+
+
 def coverage_warning(checks):
     if not checks or all(re.fullmatch(r'\s*git\s+diff\s+--check\s*', c) for c in checks):
         return '当前验收仅包含格式检查或没有执行检查，不能证明功能可用。请补充与本轮需求对应的行为测试；reviewer 仍需核对未覆盖能力。'

@@ -24,6 +24,7 @@ from auto_moniter.workspace import LockError
 from console.settings import settings, DEFAULTS
 from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
+from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
@@ -573,6 +574,10 @@ class TaskStore:
         checks = data.get('checks', [])
         if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\x00' in c for c in checks):
             raise TaskError('验收命令格式不正确，每行填写一条命令')
+        try:
+            validate_commands([*checks, *_module_check_commands(data.get('modules'))])
+        except ValueError as exc:
+            raise TaskError(str(exc)) from exc
         # Distinguish explicit mode from legacy clients that omit verification_mode.
         mode_explicit = 'verification_mode' in data
         verification_mode = data.get('verification_mode',
@@ -855,6 +860,10 @@ class TaskStore:
                 if (not isinstance(additions, list) or not additions or len(additions) > 20
                         or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\0' in c for c in additions)):
                     raise TaskError('请填写要追加的验收命令，每条最多 2000 字')
+                try:
+                    validate_commands(additions)
+                except ValueError as exc:
+                    raise TaskError(str(exc)) from exc
                 try:
                     with inactive_run(run):
                         state = read_json(run / 'state.json')

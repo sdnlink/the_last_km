@@ -57,6 +57,7 @@ EVENT_LABELS = {
     'business_head_adopted': '识别业务新提交，继续开发并重新验收',
     'function_next_assignment_rejected': '下一函数派单被拒绝',
     'requirements_assignment_repair': '派单编号格式无效，Reviewer 正在修正',
+    'requirements_review_continued': '复用需求审查记录，仅复核待处理项和输入变化',
     'function_gate_rejected': '函数验收门禁未通过',
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',

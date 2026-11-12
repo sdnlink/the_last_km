@@ -66,7 +66,7 @@ from auto_moniter.quality import Quality
 from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
-from auto_moniter import requirements_review
+from auto_moniter import requirements_review, requirement_context
 
 
 LogFn = Callable[[str], None]
@@ -1332,7 +1332,15 @@ class Supervisor:
                 plan = json.loads(turn.text)
                 assignment = plan.get('next_task') if isinstance(plan,dict) else None
                 if isinstance(assignment,dict):
-                    function_tasks.validate_identifiers(assignment)
+                    try:
+                        function_tasks.validate_identifiers(assignment)
+                    except function_tasks.AssignmentIdentifierError:
+                        if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
+                            requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                                len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
+                                self.config.checks,[item for item in self.directions.messages()
+                                                    if item['id'] in self._direction_ids['reviewer']])
+                        raise
             except function_tasks.AssignmentIdentifierError as exc:
                 if not attempt:
                     self._process_control()
@@ -1368,6 +1376,7 @@ class Supervisor:
     def _elaborate_requirement_once(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         previous_brief = self.requirements_review
+        previous_result = self.requirements_review
         if next_function and previous_brief.get('status') != 'ready':
             # Failed planning must not erase the approved criteria on resume.
             # This file is written only after a fully validated planning result.
@@ -1380,10 +1389,25 @@ class Supervisor:
                     requirements_review.parse(json.dumps({k:v for k,v in approved.items()
                                                          if k in requirements_review.SCHEMA['required']}))
                     previous_brief = approved
-        self.requirements_review={**(previous_brief if next_function else {}),'status':'reviewing','summary':'Reviewer is selecting the next function.' if next_function else 'Reviewer is elaborating the next requirement after local commit.' if follow_up else 'Reviewer is elaborating the original requirement before implementation.',
-                                  'cycle': len(self.requirement_cycles) + 1}
         before_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
         before=snapshot_fingerprint(self.config.cwd,before_files)
+        review_index = 910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0
+        continuation = requirement_context.load(self.run_dir,self.config.cwd,self.config.requirement,
+            len(self.requirement_cycles)+1,before_files,self.config.checks,self.directions.messages(),
+            previous=previous_result,output_file=f'{review_index:03d}-reviewer-text.md')
+        if not continuation and next_function and previous_brief.get('status') == 'ready':
+            continuation = {'previous_response':previous_brief,'source':'approved requirement brief',
+                            'workspace_changed':True,'changed_files':None,
+                            'rejection':self._planning_rejection}
+        if continuation:
+            self._event('requirements_review_continued',source=continuation['source'],
+                        changed_files=continuation.get('changed_file_count'),next_function=next_function)
+        self.requirements_review={**(previous_brief if next_function else {}),'status':'reviewing',
+                                  'summary':'Reviewer is continuing the saved requirement analysis.' if continuation else
+                                  'Reviewer is selecting the next function.' if next_function else
+                                  'Reviewer is elaborating the next requirement after local commit.' if follow_up else
+                                  'Reviewer is elaborating the original requirement before implementation.',
+                                  'cycle':len(self.requirement_cycles)+1}
         self._write_state(records,'running',0,'',before)
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
@@ -1391,13 +1415,17 @@ class Supervisor:
             integration=bool(self._integration_scopes())) if self.config.function_dispatch else requirements_review.SCHEMA
         schema.write_text(json.dumps(plan_schema))
         self.schema_path=schema
-        self.log('requirements: reviewer elaborating next requirement; worker has not started' if follow_up else 'requirements: reviewer elaborating original request; worker has not started')
+        self.log('requirements: reviewer continuing saved analysis; checking only pending work and changed inputs' if continuation else
+                 'requirements: reviewer elaborating next requirement; worker has not started' if follow_up else
+                 'requirements: reviewer elaborating original request; worker has not started')
         workspace_changes = None
         output_file = ''
+        review_directions = []
         try:
             if self._stop:
                 return False
-            prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None)
+            prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None,
+                                                continuation=continuation)
             if self.config.function_dispatch:
                 prompt += ('\n\n'+function_tasks.IDENTIFIER_CONTRACT+
                            'You own function decomposition. Propose exactly one next_task, normally for a single named function, '
@@ -1420,8 +1448,9 @@ class Supervisor:
             if self.project:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
-            turn=self._invoke_requirement_review(prompt,
-                index=910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0)
+            turn=self._invoke_requirement_review(prompt,index=review_index)
+            review_directions = [item for item in self.directions.messages()
+                                 if item['id'] in self._direction_ids['reviewer']]
             if turn.session_id:self._active_reviewer_id=turn.session_id
             output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
             after_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
@@ -1453,8 +1482,11 @@ class Supervisor:
                 plan = json.loads(turn.text)
                 if not isinstance(plan, dict) or not {'next_task','modules'} <= plan.keys():
                     raise ValueError('Reviewer must supply a structured function assignment and module plan')
+                response = dict(plan)
                 assignment, modules = plan.pop('next_task'), plan.pop('modules')
                 brief = requirements_review.parse(json.dumps(plan))
+                requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                    len(self.requirement_cycles)+1,response,before_files,self.config.checks,review_directions)
                 brief['cycle'] = len(self.requirement_cycles) + 1
                 if next_function and previous_brief.get('status') == 'ready':
                     previous = previous_brief['acceptance_criteria']
@@ -1499,6 +1531,8 @@ class Supervisor:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
                 brief=requirements_review.parse(turn.text)
+                requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                    len(self.requirement_cycles)+1,brief,before_files,self.config.checks,review_directions)
                 if next_function and previous_brief.get('status') == 'ready':
                     brief['acceptance_criteria'] = list(previous_brief['acceptance_criteria'])
             brief['cycle']=len(self.requirement_cycles) + 1
@@ -3031,9 +3065,13 @@ class Supervisor:
                 "command or assertion. Distinguish a reproduced failure from a code inference. "
                 "Prefix each new scoped finding with its actual known module ID and /, e.g. M2/summary. "
                 "Keep existing AUD IDs. Findings for future modules remain pending under those modules; "
-                "do not assign all findings to the current worker module or block it on unrelated unfinished work. "
-                "Inspect ALL execution entry points and the actual caller/submission path in the first audit; "
-                "return all currently known blockers together, not one new condition on each round. "
+                "do not assign all findings to the current worker module or block it on unrelated unfinished work.",
+                ("Continue the recorded audit. A fresh reviewer session or task resume is not a reason to repeat "
+                 "a full repository review. Inspect the current assignment, changed inputs, affected dependencies "
+                 "and unresolved findings; reuse unchanged verified results. "
+                 if self._audit_feedback or self.config.function_dispatch else
+                 "In the first audit, inspect the execution entry points and caller/submission path relevant to this requirement. ")+
+                "Return all currently known blockers together, not one new condition on each round. "
                 "Do not invent acceptance criteria beyond the original request and human amendments.",
                 "Reuse unchanged verified findings. Recheck the new delta, affected dependencies, open AUD fixes "
                 "and integration. A wording/log-format preference is not a blocking product defect unless it "

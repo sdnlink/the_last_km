@@ -71,8 +71,15 @@ def requests_follow_up(text):
     return authorized
 
 
-def prompt(config, modules, *, follow_up=None):
-    return ('You are the independent requirement reviewer. Before any worker implementation, read the project and elaborate the original request. '
+def prompt(config, modules, *, follow_up=None, continuation=None):
+    opening = ('You are the independent requirement reviewer continuing a saved review. Do not restart a full repository review. '
+               'Reuse the previous analysis and inspect only the reported rejection, unresolved blockers, new human '
+               'directions, changed files and their affected dependencies. Repair the pending assignment or select '
+               'the next unaccepted function. Revalidate stale findings where inputs changed; preserve unchanged findings. '
+               'When the prior input snapshot is unavailable, inspect the relevant inputs before relying on a finding. '
+               if continuation else
+               'You are the independent requirement reviewer. Before any worker implementation, read the project and elaborate the original request. ')
+    return (opening+
             'You are strictly read-only: no edits, commits, configuration changes, deployments or external writes. '
             'Return only the supplied requirement-elaboration JSON schema, not an implementation completion verdict. '
             'Preserve every original requirement, explicit exclusion, fixed module, executable check and human authority. '
@@ -85,6 +92,8 @@ def prompt(config, modules, *, follow_up=None):
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
             + _follow_up_block(follow_up) +
+            ('Saved requirement analysis and input changes (context, not approval):\n'
+             +json.dumps(continuation,ensure_ascii=False)+'\n\n' if continuation else '') +
             'Original request:\n'+config.requirement+'\n\nHuman acceptance criteria:\n'+config.acceptance+
             '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(config.checks,ensure_ascii=False))
 

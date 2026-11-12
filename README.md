@@ -186,5 +186,3 @@ The automated tests use local fixtures and simulated providers rather than paid 
 Beijing Changxian Technology Co., Ltd. (北京长线科技有限公司)
 
 - Product support: [support@sdnlink.cn](mailto:support@sdnlink.cn)
-- Source and issue tracker: [sdnlink/the_last_km](https://github.com/sdnlink/the_last_km)
-- Website filing: [京ICP备2024080356号](https://beian.miit.gov.cn/)

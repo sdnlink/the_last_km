@@ -226,12 +226,14 @@ def module_schema():
     return result
 
 
-def verdict_contract(role, task):
+def verdict_contract(role, task, *, report_only=False):
     group = task.get('kind') == 'integration'
     scope = 'the dispatched integration and all of its listed functions' if group else 'the dispatched function'
     if role=='worker':
         return (
-            ('Verification-only: inspect existing code and evidence, do not edit source or tests or run commands that write files. '
+            ('Correct only the report using existing evidence. Do not edit files or run builds/tests. '
+             if report_only else
+             'Verification-only: inspect existing code and evidence, do not edit source or tests or run commands that write files. '
              'Report concrete defects as incomplete; the watcher executes approved checks. '
              if task.get('kind') == 'verification' else f'Only implement {scope} and its focused verification. Do not start other work. ')+
             'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
@@ -239,7 +241,11 @@ def verdict_contract(role, task):
             'For delivery_scope=function return status=continue even when task_status=done. '
             'For module or requirement delivery, return status=done with scope matching delivery_scope and '
             'module_ids=['+task['module_id']+'] only when that delivery scope is fully verified. '
-            'Give evidence for every target file and behavioral check results; gaps and next_actions are only for this assignment.')
+            'Give evidence for every target file and behavioral check results. '
+            'For task_status=done, evidence must be nonempty and gaps=[], blockers=[], next_actions=[]. '
+            'Watcher checks and independent review are automatic acceptance steps, not unfinished worker actions; '
+            'describe that handoff in summary rather than next_actions. '
+            'For task_status=incomplete, gaps and next_actions describe only this assignment.')
     return (
         IDENTIFIER_CONTRACT + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Accept only after worker task_status=done and current evidence agrees. '

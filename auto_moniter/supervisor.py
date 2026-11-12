@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from auto_moniter.providers import (
+    ConfiguredProvider,
     PreparedCommand,
     Provider,
     ProviderError,
@@ -530,7 +531,7 @@ class Supervisor:
                                       Path(record.output_path), [])
                 if self.git_history:
                     self._git_before = self.git_history.candidate['base']
-                self.log(f"round {round_index}: reusing worker candidate; only the unfinished reviewer will run")
+                self.log(f"round {round_index}: reusing worker candidate; continuing its unfinished report correction or review")
                 last_review = next((r.verdict for r in reversed(records)
                                     if r.role == 'reviewer' and r.index == round_index), last_review)
                 self._event('worker_candidate_reused', round=round_index, tree=tree)
@@ -600,8 +601,14 @@ class Supervisor:
                 elif not self.worker_session_id:
                     self.log(f"round {round_index}: no worker session id; the next round starts a new session")
                 verdict = self._verdict_from_turn(turn, role="worker")
+                report_repair = {}
                 if self.config.function_dispatch and not _failure_reason(turn, verdict) and not turn.interruption:
-                    self._validate_function_worker(verdict)
+                    original_report = verdict.to_dict()
+                    errors = self._validate_function_worker(verdict)
+                    if errors and original_report.get('task_status') == 'done' and not (
+                            original_report['gaps'] or original_report['blockers'] or verdict.parse_error):
+                        report_repair = {'status': 'pending', 'errors': errors, 'original': original_report,
+                                         'task': self.function_tasks.current}
                 self._rounds_since_review += 1
                 self._worker_seconds_since_review += turn.elapsed_s
                 after_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
@@ -610,6 +617,7 @@ class Supervisor:
                     if outside:
                         verdict.status = 'continue'
                         verdict.gaps.append('Edits outside the declared parallel task scope require repair: '+', '.join(outside))
+                        report_repair = {}
                 tree = (snapshot_fingerprint(self.config.cwd, after_files) if track_files else
                         workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 protected_errors = self.quality.baseline_errors(self.config.cwd, after_files) if self.config.quality_policy else []
@@ -638,6 +646,7 @@ class Supervisor:
                     tree=tree,
                     failure=failure,
                     interruption=turn.interruption,
+                    watcher_result={'worker_report': report_repair} if report_repair else {},
                 )
                 records.append(record)
                 if self._sync_business_head(records):
@@ -772,6 +781,7 @@ class Supervisor:
                                      and verdict.done and verdict.evidence
                                      and self.audit.pending(set(verdict.module_ids)))
                 periodic_review |= repair_review or bool(self.config.function_dispatch and verdict.task_status == 'done')
+                periodic_review |= bool(record.watcher_result.get('worker_report'))
                 if not _accepted(verdict) and not verdict.blockers and not periodic_review:
                     # An unfinished worker should keep implementing. A completion
                     # candidate (or an external blocker) is the review checkpoint.
@@ -799,6 +809,23 @@ class Supervisor:
                 last_review = self._audit_feedback
                 stall, previous_gap_key, previous_tree = 0, '', ''
                 continue
+            if record.watcher_result.get('worker_report', {}).get('status') in ('pending', 'attempted', 'rejected', 'stale'):
+                correction = self._repair_function_worker_report(record, records)
+                if correction is None:
+                    if self.project and self.project.needs_review:
+                        self._project_replan = True
+                        last_worker = None
+                        continue
+                    if self._pending_directions() and not self._stop:
+                        last_worker = None
+                        continue
+                    return self._finish('stopped' if self._stop else 'action_required',
+                        record.failure or 'Function completion report needs correction; implementation was preserved.',
+                        records, record.verdict)
+                turn, verdict = correction, record.verdict
+                if verdict.task_status != 'done':
+                    last_worker = verdict
+                    continue
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             self._process_control()
             if self._stop:
@@ -2244,15 +2271,30 @@ class Supervisor:
     def _validate_function_worker(self, verdict):
         task = self.function_tasks.current
         expected = task['delivery_scope']
-        invalid = (verdict.parse_error or verdict.task_id != task['id'] or
-                   verdict.task_status not in ('done', 'incomplete') or
-                   verdict.next_task is not None or verdict.modules or verdict.issue_resolutions or
-                   set(verdict.module_ids) - {task['module_id']} or
-                   (_accepted(verdict) and (expected == 'function' or verdict.scope != expected
-                    or verdict.module_ids != [task['module_id']] or verdict.task_status != 'done')) or
-                   (verdict.task_status == 'done' and (not verdict.evidence or verdict.gaps or
-                    verdict.blockers or verdict.next_actions or (expected != 'function' and not _accepted(verdict)))))
-        if invalid:
+        errors = []
+        for invalid, reason in [
+            (verdict.parse_error, 'Invalid structured report: ' + verdict.parse_error),
+            (verdict.task_id != task['id'], 'task_id must equal ' + task['id']),
+            (verdict.task_status not in ('done', 'incomplete'), 'task_status must be done or incomplete'),
+            (verdict.next_task is not None, 'next_task must be null; only the reviewer assigns the next task'),
+            (verdict.modules, 'modules must be []; the worker cannot redefine modules'),
+            (verdict.issue_resolutions, 'issue_resolutions must be []; independent review closes audit findings'),
+            (set(verdict.module_ids) - {task['module_id']}, 'module_ids may contain only ' + task['module_id']),
+            (_accepted(verdict) and (expected == 'function' or verdict.scope != expected
+                or verdict.module_ids != [task['module_id']] or verdict.task_status != 'done'),
+                'Overall status/scope must match delivery_scope=' + expected + '; function completion uses status=continue'),
+        ]:
+            if invalid:
+                errors.append(reason)
+        if verdict.task_status == 'done':
+            for field in ('gaps', 'blockers', 'next_actions'):
+                if getattr(verdict, field):
+                    errors.append('task_status=done requires ' + field + '=[]; watcher checks and reviewer acceptance belong in summary')
+            if not verdict.evidence:
+                errors.append('task_status=done requires existing completion evidence')
+            if expected != 'function' and not _accepted(verdict):
+                errors.append('Module/requirement completion requires status=done and complete delivery evidence')
+        if errors:
             verdict.status = 'continue'
             verdict.task_status = 'incomplete'
             verdict.task_id = task['id']
@@ -2260,7 +2302,89 @@ class Supervisor:
             verdict.issue_resolutions = []
             verdict.next_task = None
             verdict.module_ids = []
-            verdict.gaps.append('Report only the dispatched function with its exact task ID and verified completion evidence.')
+            verdict.gaps.extend('Function completion report rejected: ' + error for error in errors)
+        return errors
+
+    def _repair_function_worker_report(self, record, records):
+        """Correct one completion report on the saved candidate, without implementation."""
+        report = record.watcher_result['worker_report']
+        if report['status'] != 'pending':
+            record.failure = 'The bounded function report correction did not succeed; inspect the preserved report and errors.'
+            return None
+        self._process_control()
+        if self._stop:
+            return None
+        if (self._pending_directions() or report['task'] != self.function_tasks.current
+                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
+            report['status'] = 'stale'
+            record.failure = 'Inputs changed before function report correction; the candidate requires fresh review.'
+            return None
+        import copy
+        provider = copy.copy(self.config.provider)
+        delegate = provider
+        while isinstance(delegate, ConfiguredProvider):
+            delegate.mode = ''
+            delegate.delegate = copy.copy(delegate.delegate)
+            delegate = delegate.delegate
+        delegate.mode = ''  # Narrow writable modes without changing saved provider settings.
+        try:
+            provider.validate_review(self.config.extra_args)
+        except ProviderError as exc:
+            record.failure = 'Function report correction requires a supported read-only worker: ' + str(exc)
+            return None
+        # Preserve the candidate before a budget interruption can prevent correction.
+        saved = json.loads((self.run_dir/'state.json').read_text())
+        self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
+        self._check_budget(new_call=True)
+        artifact = f'{record.index:03d}-worker-report-original-{self._agent_calls}'
+        for suffix in ('.log', '-text.md', '-prompt.md'):
+            source = self.run_dir / f'{record.index:03d}-worker{suffix}'
+            if source.exists():
+                source.replace(self.run_dir/(artifact+suffix))
+        report.update(status='attempted', original_output=str(self.run_dir/(artifact+'-text.md')),
+                      original_session_id=record.session_id)
+        record.output_path = str(self.run_dir/(artifact+'.log'))
+        self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
+        self._event('worker_report_repair', round=record.index, task_id=self.function_tasks.current['id'],
+                    reasons=report['errors'])
+        prompt = ('Worker report correction only for the SAME saved candidate. Do not implement, edit files, '
+                  'commit, run builds/tests, or repeat repository analysis. Return only the corrected JSON report '
+                  'using existing evidence. Watcher checks and independent review happen automatically. '
+                  'Keep substantive gaps or missing evidence as incomplete; do not invent validation or suppress defects.\n'
+                  + function_tasks.verdict_contract('worker', self.function_tasks.current, report_only=True)
+                  + '\nAssignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
+                  + '\nWatcher report errors:\n' + json.dumps(report['errors'], ensure_ascii=False)
+                  + '\nOriginal worker report:\n' + json.dumps(report['original'], ensure_ascii=False))
+        signature = self.project.signature if self.project else ''
+        turn = self._invoke(provider, prompt, '', role='worker', index=record.index,
+            model=self.config.model, extra_args=self.config.extra_args, read_only=True)
+        self.worker_session_id = ''
+        self._drop_worker_session = True
+        verdict = self._verdict_from_turn(turn, role='worker')
+        failure = _failure_reason(turn, verdict) or turn.interruption or verdict.parse_error
+        errors = self._validate_function_worker(verdict)
+        record.verdict = verdict
+        record.elapsed_s += turn.elapsed_s
+        self._worker_seconds_since_review += turn.elapsed_s
+        record.output_path = str(turn.output_path)
+        record.session_id = turn.session_id
+        record.exit_code, record.timed_out = turn.exit_code, turn.timed_out
+        record.interruption = turn.interruption
+        if (workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree
+                or self._pending_directions() or report['task'] != self.function_tasks.current
+                or self.project and (self.project.needs_review or self.project.signature != signature)):
+            report['status'] = 'stale'
+            record.failure = 'Workspace or instructions changed during read-only function report correction; no approval applied.'
+            verdict.status, verdict.task_status = 'continue', 'incomplete'
+            return None
+        if failure or errors:
+            report.update(status='rejected', correction_errors=errors)
+            record.failure = 'Function report correction failed: ' + (str(failure) if failure else '; '.join(errors))
+            return None
+        report['status'] = 'corrected'
+        record.failure = ''
+        self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
+        return turn
 
     def _review_function(self, worker, review, index, tree):
         task = self.function_tasks.current
@@ -3150,7 +3274,14 @@ class Supervisor:
         if isinstance(self.git_history, ApprovedHistory) and not self.git_history.candidate:
             return None
         worker = next((r for r in reversed(records) if r.role == 'worker'), None)
-        if not worker or worker.failure or worker.interruption:
+        if not worker:
+            return None
+        report = worker.watcher_result.get('worker_report', {})
+        if (report.get('status') in ('pending', 'attempted', 'rejected')
+                and report.get('task') == self.function_tasks.current
+                and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == worker.tree):
+            return worker
+        if worker.failure or worker.interruption:
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
         if review and review.watcher_result.get('function_gate') == 'repair' and not self._check_retry_review(review):
@@ -3376,7 +3507,8 @@ class Supervisor:
             else:
                 prompt += 'When blocked, continue independent modules before repeating the same dependency. '
             prompt += 'Never modify existing protected test assertions.\n'
-        if role == 'worker' and self.config.workflow == 'review-first':
+        if (role == 'worker' and self.config.workflow == 'review-first'
+                and (not read_only or self._verification_only())):
             prompt += (('\nVerification time management: inspect the current assignment without edits; report remaining behavior gaps. '
                         if self._verification_only() else '\nWorker time management: implement one reviewer-approved item or bounded repair at a time. ')+
                        'Complete a coherent change with focused verification and return the required JSON conclusion. '

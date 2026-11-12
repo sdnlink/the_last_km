@@ -58,6 +58,7 @@ EVENT_LABELS = {
     'function_next_assignment_rejected': '下一函数派单被拒绝',
     'requirements_assignment_repair': '派单编号格式无效，Reviewer 正在修正',
     'requirements_review_continued': '复用需求审查记录，仅复核待处理项和输入变化',
+    'worker_report_repair': 'Worker 正在只读纠正交付报告，保留现有实现',
     'function_gate_rejected': '函数验收门禁未通过',
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',

@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_dispatch import FunctionWorker, plan, result, task, verification_task
@@ -95,6 +96,25 @@ class FunctionAcceptanceBlockTests(unittest.TestCase):
         accepted,=self.state()['function_tasks']['accepted']
         self.assertEqual(accepted['task']['id'],'F1')
         self.assertEqual(accepted['verification'],{'check:1':'001-check-01.log'})
+
+    def test_retry_precondition_failure_does_not_relabel_previous_results_as_new(self):
+        self.start()
+        worker=FunctionWorker('worker',[])
+        reviewer=ScriptedProvider('reviewer',[
+            result('F1','accepted',next_task=task('F2','next.py',depends=['F1']))])
+        monitor=self.monitor(worker,reviewer,resume=True)
+        def precondition_failed(index,verdict,**kwargs):
+            verdict.gaps.append('Protected acceptance baseline changed: tests/test_api.py')
+            return False
+        with patch.object(monitor,'_delivery_checks',side_effect=precondition_failed):
+            report=monitor.run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertIn('Protected acceptance baseline changed',report.summary)
+        receipt=self.state()['rounds'][0]['watcher_result']['candidate_checks']
+        self.assertEqual(receipt['checks'],[])
+        self.assertFalse(receipt['complete'])
+        self.assertFalse(worker.calls)
+        self.assertEqual(len(reviewer.calls),1)
 
     def test_module_final_and_verification_failures_never_dispatch_worker_again(self):
         for scope,verification in [('module',False),('requirement',False),('requirement',True)]:

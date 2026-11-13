@@ -25,9 +25,9 @@ class Reviewer(ScriptedProvider):
         self.root = root
 
     def _command(self, session, prompt, read_only):
-        if self.calls:
-            self.scripts[0]['verdict']['evidence'].append(
-                re.search(r'Worker checkpoint: ([0-9a-f]{40,64})', prompt.read_text()).group(1))
+        checkpoint=re.search(r'Worker checkpoint: ([0-9a-f]{40,64})',prompt.read_text())
+        if checkpoint:
+            self.scripts[0]['verdict']['evidence'].append(checkpoint.group(1))
         return super()._command(session, prompt, read_only)
 
 
@@ -96,6 +96,60 @@ class ModuleDeliveryGateTests(unittest.TestCase):
         state = json.loads((self.run / 'state.json').read_text())
         self.assertEqual(state['modules'][0]['status'], 'accepted')
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_module_approval_does_not_run_the_final_requirement_gate(self):
+        worker=ScriptedProvider('worker',[
+            {'verdict':outcome(['A','B'],'requirement'),'touch':'app.py'}])
+        reviewer=Reviewer(self.root,[{'verdict':{},'text':json.dumps(BRIEF)},
+            {'verdict':outcome(['A'])}])
+        monitor=Supervisor(RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',
+            git_history='required',run_dir=self.run,max_rounds=2,retry_delay_s=0,modules=PLAN,
+            checks=['git diff --check'],quality_policy={'requirements':[
+                {'id':'R1','text':'B works','module_ids':['B'],'evidence_paths':['app.py']}]}),log=lambda _:None)
+        monitor.log=lambda message:monitor.request_stop() if 'module accepted;' in message else None
+        report=monitor.run()
+        self.assertEqual(report.status,'stopped',report.summary)
+        self.assertNotEqual(git(self.root,'rev-parse','HEAD'),self.before)
+        self.assertEqual([(item['id'],item['status']) for item in monitor.modules.export()],
+                         [('A','accepted'),('B','pending')])
+        worker=ScriptedProvider('worker',[{'verdict':outcome(['B'],'requirement'),'touch':'app.py'}])
+        reviewer=Reviewer(self.root,[{'verdict':outcome(['B'],'requirement')}])
+        monitor=Supervisor(RunConfig('',self.root,worker,reviewer=reviewer,resume=True,
+            workflow='review-first',git_history='required',run_dir=self.run,max_rounds=2,
+            retry_delay_s=0),log=lambda _:None)
+        report=monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,1))
+        self.assertTrue(all(item['status']=='accepted' for item in monitor.modules.export()))
+
+    def test_final_coverage_citation_failure_can_resume_with_reviewer_only(self):
+        (self.root/'extra.txt').write_text('Requirement evidence\n')
+        submitted=outcome(['A','B'],'requirement')
+        submitted['evidence'].append('extra.txt')
+        worker=ScriptedProvider('worker',[{'verdict':submitted,'touch':'app.py'}])
+        reviewer=Reviewer(self.root,[{'verdict':{},'text':json.dumps(BRIEF)},
+            {'verdict':outcome(['A','B'],'requirement')}])
+        monitor=Supervisor(RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',
+            git_history='required',run_dir=self.run,max_rounds=1,retry_delay_s=0,modules=PLAN,
+            checks=['git diff --check'],quality_policy={'requirements':[
+                {'id':'R1','text':'A and B work','module_ids':['A','B'],'evidence_paths':['extra.txt']}]}),log=lambda _:None)
+        report=monitor.run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertIn('lacks joint cited evidence',report.summary)
+        self.assertEqual(git(self.root,'rev-parse','HEAD'),self.before)
+        approved=outcome(['A','B'],'requirement')
+        approved['evidence'].append('extra.txt')
+        worker=ScriptedProvider('worker',[])
+        reviewer=Reviewer(self.root,[{'verdict':approved}])
+        monitor=Supervisor(RunConfig('',self.root,worker,reviewer=reviewer,resume=True,
+            workflow='review-first',git_history='required',run_dir=self.run,max_rounds=1,
+            retry_delay_s=0),log=lambda _:None)
+        report=monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertFalse(worker.calls)
+        self.assertEqual(len(reviewer.calls),1)
+        events=[json.loads(line) for line in (self.run/'events.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(event['event']=='check_finished' for event in events),1)
 
     def test_timeout_missing_environment_and_source_change_do_not_publish(self):
         cases = [

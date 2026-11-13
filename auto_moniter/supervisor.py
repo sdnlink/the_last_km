@@ -1102,6 +1102,7 @@ class Supervisor:
                             self.requirements_review, self.config.cwd)
                         if missing:
                             review_record.watcher_result.update(status='rejected', reasons=['Missing criteria: ' + ', '.join(missing)])
+                            self._invalidate_candidate_approval(record.index, ['Missing criteria: ' + ', '.join(missing)])
                             return self._finish('action_required',
                                 'Reviewer must dispatch implementation tasks for uncovered criteria before declaring delivery: ' + ', '.join(missing),
                                 records, review)
@@ -1694,7 +1695,8 @@ class Supervisor:
         worker = next((record for record in reversed(self._records)
                        if record.role=='worker' and record.index==reviewer.index),None)
         if worker and self._uses_candidate_checks(worker):
-            final = worker.watcher_result.get('candidate_checks',{}).get('context',{}).get('final',False)
+            final = (worker.watcher_result.get('candidate_checks',{}).get('context',{}).get('final',False)
+                     and reviewer.verdict.scope == 'requirement')
             if not self._candidate_delivery_gate(worker,reviewer.verdict,final=final):
                 return False
             if not self._candidate_approval(reviewer, worker):
@@ -2110,6 +2112,9 @@ class Supervisor:
         snapshot = {'checks':[]}
         passed = False
         scope_gaps = []
+        # Early precondition failures may return without executing a command.
+        # Never attach the preceding attempt's snapshot to this new receipt.
+        self._write_acceptance_snapshot(record.index, record.tree, context['final'], [], [], True, False)
         try:
             # A structural scope defect belongs to the reviewer/worker repair
             # path. Do not run an assignment's tests on an unauthorized edit.
@@ -2164,6 +2169,7 @@ class Supervisor:
             write_json(self.run_dir/'requirement-coverage.json', {'tree':record.tree, 'requirements':rows,
                        'errors':errors, 'complete':not errors}, durable=True)
             if errors:
+                self._invalidate_candidate_approval(record.index, errors)
                 review.status = 'continue'
                 review.gaps.extend(errors)
                 return False
@@ -2177,10 +2183,17 @@ class Supervisor:
             reviewer.watcher_result['candidate_approval'] = {
                 'checks_digest':receipt['digest'], 'context':receipt['context'], 'review':reviewer.verdict.to_dict()}
 
+    def _invalidate_candidate_approval(self, index, reasons):
+        reviewer = next((record for record in reversed(self._records)
+                         if record.role == 'reviewer' and record.index == index), None)
+        approval = reviewer.watcher_result.get('candidate_approval') if reviewer else None
+        if isinstance(approval, dict):
+            approval['invalidated'] = list(reasons)
+
     def _candidate_approval(self, record, worker):
         approval = record.watcher_result.get('candidate_approval')
         receipt = worker.watcher_result.get('candidate_checks')
-        if (not isinstance(approval,dict) or not isinstance(approval.get('review'),dict)
+        if (not isinstance(approval,dict) or approval.get('invalidated') or not isinstance(approval.get('review'),dict)
                 or not candidate_checks.valid(receipt,self.run_dir,self._candidate_check_context(worker))
                 or approval.get('context') != receipt['context'] or approval.get('checks_digest') != receipt['digest']
                 or workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) != worker.tree
@@ -3710,7 +3723,10 @@ class Supervisor:
         publication = getattr(self.git_history, 'last_business_commit', {})
         published = publication.get('round') == worker.index and publication.get('candidate_tree') == self.git_history.candidate.get('commit') if publication else False
         ready = self._saved_approval(worker.index, worker.tree)
-        if published and worker.verdict.module_ids and all(self.modules.items.get(k, {}).get('status') == 'accepted' for k in worker.verdict.module_ids):
+        delivered_ids = set(worker.verdict.module_ids)
+        if review:
+            delivered_ids.intersection_update(review.verdict.module_ids)
+        if published and delivered_ids and all(self.modules.items.get(k, {}).get('status') == 'accepted' for k in delivered_ids):
             return None
         if review and not (review.failure or review.interruption or review.verdict.parse_error or rejected_audit or published or ready):
             return None
@@ -3828,7 +3844,8 @@ class Supervisor:
             return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         ready = self._saved_approval(kwargs['index'], tree)
-        if receipt and ready and ready.get('checks_digest') != receipt['digest']:
+        if receipt and ready and (ready.get('checks_digest') != receipt['digest']
+                or previous and previous.watcher_result.get('candidate_approval',{}).get('invalidated')):
             ready = None
         if (ready and ready.get('provider_config') == self._provider_config()
                 and ready.get('reviewer_model') == self._reviewer_model()):

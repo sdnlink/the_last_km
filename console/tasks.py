@@ -532,6 +532,16 @@ class TaskStore:
         with self._lock:
             return self._view(self._get(ident), self.metrics.sample()['processes'])
 
+    def dispatch_plan(self, ident: str, page: int = 1, page_size: int = 10, status: str = 'all') -> dict:
+        from console.dispatch import page as dispatch_page
+        with self._lock:
+            meta = self._get(ident)
+            try:
+                state = RequirementQueue(Path(meta['run_dir'])).state()
+                return {**dispatch_page(state, page, page_size, status), 'id':ident, 'at':timestamp()}
+            except (ValueError, KeyError, TypeError) as exc:
+                raise TaskError(str(exc), 400 if isinstance(exc, ValueError) else 409) from exc
+
     def git_record(self, ident: str, commit: str) -> dict:
         view = self.detail(ident)
         history = view.get('git_history') or {}
@@ -594,6 +604,9 @@ class TaskStore:
             workflow == 'review-first' and data.get('verification_mode') not in ('review_only', 'planning'))
         if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
             raise TaskError('逐函数下发需要启用先审核需求的流程')
+        full_function_plan = data.get('full_function_plan', function_dispatch)
+        if type(full_function_plan) is not bool or full_function_plan and not function_dispatch:
+            raise TaskError('完整函数计划需要开启逐函数派单')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
             raise TaskError('请选择支持的执行器和审查器')
         guided = None
@@ -689,6 +702,7 @@ class TaskStore:
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
                     'function_dispatch': function_dispatch,
+                    'full_function_plan': full_function_plan,
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
@@ -787,7 +801,10 @@ class TaskStore:
                 raise TaskError('缺少原始启动配置 launch.json，请使用原 CLI 配置恢复', 409)
         try:
             options={'settings_path':self.agents.path} if self.agents.path.exists() else {}
-            return resume_arguments(manifest, run, state, **options)
+            arguments = resume_arguments(manifest, run, state, **options)
+            if state.get('function_dispatch') and state.get('function_gate') and meta.get('full_function_plan', True):
+                arguments.append('--full-function-plan')
+            return arguments
         except (ValueError, ProviderError, TypeError, KeyError, OSError) as exc:
             raise TaskError('无法恢复：' + str(exc), 409) from exc
 
@@ -805,6 +822,8 @@ class TaskStore:
             argv.append('--check=' + check)
         argv.append('--workflow='+meta.get('workflow','legacy'))
         argv.append('--function-dispatch' if meta.get('function_dispatch') else '--no-function-dispatch')
+        if meta.get('full_function_plan'):
+            argv.append('--full-function-plan')
         if meta.get('acceptance'):
             argv.append('--accept=' + meta['acceptance'])
         # Legacy metadata keeps the old provider boundary; new tasks store an

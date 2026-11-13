@@ -106,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--workflow', choices=['review-first','legacy'], help='New reviewed tasks default to requirements review first, then approval-only local commits; old checkpoints retain legacy order')
     run.add_argument('--function-dispatch', action=argparse.BooleanOptionalAction, default=None,
                      help='Reviewer dispatches one verifiable function at a time (default for new review-first tasks; inherited on resume)')
+    run.add_argument('--full-function-plan', action='store_true',
+                     help='Require a complete reviewer function plan before dispatch; inherited on resume')
     run.add_argument('--quality-policy', type=Path, help='Immutable JSON requirements, baseline protection and verified-progress policy')
     run.add_argument("--max-runtime", default="0", help="Total active monitor runtime budget, including resumed runs; 0 disables")
     run.add_argument("--max-agent-calls", type=_nonnegative_int, default=0, help="Total worker/reviewer turns across resumed runs; 0 disables")
@@ -312,6 +314,7 @@ def _run(args: argparse.Namespace) -> int:
         modules=definitions(json.loads(args.modules.expanduser().read_text(encoding="utf-8"))) if args.modules else [],
         quality_policy=json.loads(args.quality_policy.expanduser().read_text()) if args.quality_policy else {},
         workflow=args.workflow or ('auto' if args.resume else 'legacy' if args.no_review else 'review-first'),
+        full_function_plan=args.full_function_plan,
         function_dispatch=args.function_dispatch if args.function_dispatch is not None else (
             not args.resume and not args.no_review and args.workflow != 'legacy'),
         max_runtime_s=_parse_duration(args.max_runtime),

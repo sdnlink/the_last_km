@@ -87,6 +87,7 @@
 | `--reviewer-paseo-backend ID` | 沿用 `--paseo-backend` | reviewer 通过 Paseo 时实际使用的后端；目前只读审核仅支持 Claude 后端，需显式选择 `claude` |
 | `--reviewer-paseo-mode MODE` | 无显式覆盖 | Paseo reviewer 的权限模式兼容入口，只支持 Claude plan |
 | `--fresh-review` | 开启 | 每次审核使用新 reviewer 会话 |
+| `--full-function-plan` | CLI 显式开启；Web 逐函数任务默认开启 | Reviewer 先生成完整函数计划，再串行派单；依赖、范围及验收条目须通过校验，恢复时保留计划与进度 |
 | `--no-fresh-review` | 关闭此功能需显式设置 | 尝试续接 reviewer 独立会话；Paseo reviewer 禁止使用此选项 |
 | `--no-review` | 关闭 | 省略独立审核；只能配 legacy，不能配 review-first；仍验证 worker 结论、证据和配置的检查，不等同于独立验收 |
 | `--extra-arg=ARG` | 无 | 传给 worker CLI，可重复；ARG 以 `--` 开头时用等号，例如 `--extra-arg=--verbose` |

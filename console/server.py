@@ -20,6 +20,7 @@ from auto_moniter.processes import process_identity
 from auto_moniter.storage import write_json
 from console.tasks import TaskError, TaskStore
 from console.pages import page_route, render_page, asset
+from console.localization import select_language, translate_html, localize_response
 
 
 STATIC = Path(__file__).with_name('static')
@@ -50,7 +51,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, value, status=200):
+        value=localize_response(value,self._language(),urlsplit(self.path).path)
         self._send(status, json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8'))
+
+    def _language(self):
+        return select_language(self.headers.get('Cookie',''),self.headers.get('Accept-Language',''))
 
     def _check_host(self):
         port = self.server.server_address[1]
@@ -69,9 +74,12 @@ class Handler(BaseHTTPRequestHandler):
             static = asset(url.path) if route is None else None
             if route:
                 self._send(200, render_page(*route, self.server.store.cwd,
-                           needs_setup=route[0]=='overview' and not self.server.store.agents.initialized()), 'text/html; charset=utf-8')
+                           needs_setup=route[0]=='overview' and not self.server.store.agents.initialized(), language=self._language()), 'text/html; charset=utf-8')
             elif static:
-                self._send(200, static[0].read_bytes(), static[1])
+                body=static[0].read_bytes()
+                if static[1].startswith('text/html'):
+                    body=translate_html(body.decode('utf-8'),self._language()).encode('utf-8')
+                self._send(200, body, static[1])
             elif url.path == '/api/config':
                 self._json({**self.server.store.config(), 'csrf_token': self.server.csrf})
             elif url.path == '/api/agents/setup':
@@ -96,6 +104,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.server.store.progress(parts[2]))
                 elif len(parts) == 4 and parts[3] == 'requirement-queue':
                     self._json(self.server.store.queued_requirements(parts[2]))
+                elif len(parts) == 4 and parts[3] == 'dispatch-plan':
+                    query = parse_qs(url.query)
+                    self._json(self.server.store.dispatch_plan(parts[2], int(query.get('page', ['1'])[0]),
+                        int(query.get('page_size', ['10'])[0]), query.get('status', ['all'])[0]))
                 elif len(parts) == 5 and parts[3] == 'git':
                     self._json(self.server.store.git_record(parts[2], parts[4]))
                 elif len(parts) == 3:

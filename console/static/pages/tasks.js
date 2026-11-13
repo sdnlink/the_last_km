@@ -1,17 +1,18 @@
+import {i18n,i18nHTML,locale} from '../i18n.js';
 import {$,$$,escape,icon,active,attention,phases,duration,percent,bytes,badge,taskButtons} from '/ui.js';
 import {api,watch,refresh,selectNavigation} from '/core.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const state = {tasks:[],search:new URLSearchParams(location.search).get('q') || '',filter:new URLSearchParams(location.search).get('status') || 'all'};
 function syncTaskLocation() {
-  const labels={all:'全部任务',queued:'待启动',active:'运行中',paused:'已暂停',stopped:'已停止',done:'已验收',attention:'需处理'};
+  const labels={all:i18n('全部任务'),queued:i18n('待启动'),active:i18n('运行中'),paused:i18n('已暂停'),stopped:i18n('已停止'),done:i18n('已验收'),attention:i18n('需处理')};
   const url=new URL(location.href);
   if(state.filter==='all')url.searchParams.delete('status');else url.searchParams.set('status',state.filter);
   if(state.search)url.searchParams.set('q',state.search);else url.searchParams.delete('q');
   history.replaceState(null,'',url);
   selectNavigation('tasks',state.filter==='stopped'?'attention':state.filter);
   $('#page-title').textContent=labels[state.filter];
-  $('#breadcrumb').textContent='任务管理 / '+labels[state.filter];
-  document.title=labels[state.filter]+' · Auto Moniter 开发控制台';
+  $('#breadcrumb').textContent=i18n('任务管理 / ')+labels[state.filter];
+  document.title=labels[state.filter]+i18n(' · Auto Moniter 开发控制台');
 }
 function renderTasks() {
   const search = state.search.toLowerCase();
@@ -46,12 +47,12 @@ function renderTasks() {
       const resource = t.resources;
       const phase =
         t.control === "stop" && active(t)
-          ? "正在停止"
+          ? i18n("正在停止")
           : t.control === "pause" && t.status !== "paused"
-            ? "本轮结束后暂停"
+            ? i18n("本轮结束后暂停")
           : phases[t.health.phase] || "";
       const failure = t.failure ? `<small class="phase" title="${escape(t.failure.reason)}">${escape(t.failure.title)}</small>` : '';
-      return `<tr data-task-url="/tasks/${t.id}" tabindex="0" aria-label="查看任务 ${escape(t.title)}"><td><div class="task-name"><span class="task-avatar ${["", "blue", "purple"][index % 3]}">${icon("terminal")}</span><div><a class="task-title" href="/tasks/${t.id}" title="${escape(t.title)}">${escape(t.title)}</a><div class="task-path" title="${escape(t.project_cwd||t.cwd)}">${icon("folder")}<span>${escape(t.project_cwd || t.cwd || "目录未知")}</span></div></div></div></td><td>${badge(t)}${failure}${active(t) && phase ? `<small class="phase">${escape(phase)}</small>` : ""}</td><td><span class="provider-name">${escape(t.provider)}</span><span class="reviewer-name">审查 · ${escape(t.reviewer)}</span></td><td><div class="module-progress"><div>${t.total_modules ? `${t.accepted_modules}<small>/ ${t.total_modules} 模块</small>` : `<small>${t.status === "done" ? "已验收" : "等待模块计划"}</small>`}</div><div class="meter"><span data-width="${progress}"></span></div></div></td><td class="duration">${duration(t.health.usage?.elapsed_s)}</td><td><div class="resource-cell"><span>${resource.process_count ? `CPU ${percent(resource.cpu_percent)}` : "—"}</span><span>${resource.process_count ? bytes(resource.rss_bytes) : "无本地进程"}</span></div></td><td><div class="row-actions">${taskButtons(t, true)}<a class="detail-button" href="/tasks/${t.id}">工作详情 →</a></div></td></tr>`;
+      return i18nHTML`<tr data-task-url="/tasks/${t.id}" tabindex="0" aria-label="查看任务 ${escape(t.title)}"><td><div class="task-name"><span class="task-avatar ${["", "blue", "purple"][index % 3]}">${icon("terminal")}</span><div><a class="task-title" href="/tasks/${t.id}" title="${escape(t.title)}">${escape(t.title)}</a><div class="task-path" title="${escape(t.project_cwd||t.cwd)}">${icon("folder")}<span>${escape(t.project_cwd || t.cwd || i18n("目录未知"))}</span></div></div></div></td><td>${badge(t)}${failure}${active(t) && phase ? `<small class="phase">${escape(phase)}</small>` : ""}</td><td><span class="provider-name">${escape(t.provider)}</span><span class="reviewer-name">审查 · ${escape(t.reviewer)}</span></td><td><div class="module-progress"><div>${t.total_modules ? i18nHTML`${t.accepted_modules}<small>/ ${t.total_modules} 模块</small>` : `<small>${t.status === "done" ? i18n("已验收") : i18n("等待模块计划")}</small>`}</div><div class="meter"><span data-width="${progress}"></span></div></div></td><td class="duration">${duration(t.health.usage?.elapsed_s)}</td><td><div class="resource-cell"><span>${resource.process_count ? `CPU ${percent(resource.cpu_percent)}` : "—"}</span><span>${resource.process_count ? bytes(resource.rss_bytes) : i18n("无本地进程")}</span></div></td><td><div class="row-actions">${taskButtons(t, true)}<a class="detail-button" href="/tasks/${t.id}">工作详情 →</a></div></td></tr>`;
     })
     .join("");
   $$("#task-rows [data-width]").forEach(
@@ -60,14 +61,14 @@ function renderTasks() {
   $("#empty-state").hidden = tasks.length > 0;
   const noTasks = state.tasks.length === 0;
   $("#empty-title").textContent = noTasks
-    ? "下一个交付，从这里开始"
-    : "没有匹配的任务";
+    ? i18n("下一个交付，从这里开始")
+    : i18n("没有匹配的任务");
   $("#empty-description").textContent = noTasks
-    ? "添加一个开发任务，让执行器开始实现，让监督器持续跟进。"
-    : "尝试调整状态筛选或搜索关键词。";
+    ? i18n("添加一个开发任务，让执行器开始实现，让监督器持续跟进。")
+    : i18n("尝试调整状态筛选或搜索关键词。");
   $("#empty-create").hidden = !noTasks;
   $("#table-caption").textContent =
-    `显示 ${page.total?page.start+1:0}–${page.end} 项，筛选 ${tasks.length} 项 / 全部 ${state.tasks.length} 个任务`;
+    i18n`显示 ${page.total?page.start+1:0}–${page.end} 项，筛选 ${tasks.length} 项 / 全部 ${state.tasks.length} 个任务`;
 }
 
 export function mount() {
@@ -79,5 +80,5 @@ export function mount() {
   $$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));
   $('#search').addEventListener('input',e=>{state.search=e.target.value;syncTaskLocation();resetPage('tasks');renderTasks();});
   $('#filters').addEventListener('click',e=>{const el=e.target.closest('[data-filter]');if(!el)return;state.filter=el.dataset.filter;syncTaskLocation();resetPage('tasks');renderTasks();$$('.filter').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.filter));});
-  watch(async()=>{const data=await api('/api/tasks');state.tasks=data.tasks;$('#task-count').textContent=data.tasks.length;$('#filter-active').textContent=data.tasks.filter(t=>['running','starting'].includes(t.status)).length;renderTasks();$('#last-updated').textContent=`更新于 ${new Date(data.at).toLocaleTimeString('zh-CN',{hour12:false})}`;});
+  watch(async()=>{const data=await api('/api/tasks');state.tasks=data.tasks;$('#task-count').textContent=data.tasks.length;$('#filter-active').textContent=data.tasks.filter(t=>['running','starting'].includes(t.status)).length;renderTasks();$('#last-updated').textContent=i18n`更新于 ${new Date(data.at).toLocaleTimeString(locale())}`;});
 }

@@ -2,7 +2,7 @@
       <form id="create-form">
         <div class="dialog-heading">
           <div>
-            <span class="eyebrow">LET’S BUILD SOMETHING</span>
+            <span class="eyebrow">创建开发任务</span>
             <h2>新建开发任务</h2>
             <p>先由 reviewer 完善需求，watcher 交给 worker 实现；审核与检查通过后提交到当前业务分支，审计结论独立保存。</p>
           </div>
@@ -121,7 +121,7 @@
                 /></label>
               </div>
               <label><input type="checkbox" name="function_dispatch" checked /> 由 reviewer 逐函数下发任务
-                <small>用于执行验收模式。每次只下发一个函数；独立审核和已批准的回归通过后再推进。</small>
+                <small>用于执行验收模式。Reviewer 先生成完整函数计划；执行时一次只下发一项，独立审核和回归通过后再推进。完整计划可在派单队列分页查看。</small>
               </label>
               <label>审核频率（worker 轮次）
                 <input name="review_every" type="number" min="0" max="100000" value="5" required />

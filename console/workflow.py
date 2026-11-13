@@ -56,12 +56,14 @@ def review_wait(state: dict, health: dict, status: str, rounds: list, current_ro
         reason = f'每 {every} 轮触发周期审核；等待 worker 本轮结果，完成候选及外部阻塞会立即送审。'
     else:
         reason = '等待 worker 返回可审核的结果；该运行未保存审核频率。'
+    reason_parts = [reason]
     if failures and not disabled and status in {'running', 'starting', 'paused'}:
         names = '、'.join(str(item.get('index')) for item in failures[-5:])
-        reason += f' 第 {names} 轮 worker 超时、停止或执行失败，累计到轮次计数，但未继续进入审核。'
+        reason_parts.append(f'第 {names} 轮 worker 超时、停止或执行失败，累计到轮次计数，但未继续进入审核。')
+        reason = ' '.join(reason_parts)
     return {'every_worker_rounds': every, 'rounds_since_review': elapsed,
             'due': due, 'last_review_round': last_round, 'failed_worker_rounds': [item.get('index') for item in failures],
-            'wait_reason': reason}
+            'wait_reason': reason, 'wait_reason_parts': reason_parts}
 
 
 def work_details(state: dict, health: dict, activity: dict, status: str, heartbeat: dict,
@@ -107,6 +109,7 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
                        'pid': heartbeat.get('child_pid') if executing else None,
                        'current_work': focus or ('正在实现任务' if executing and role == 'worker' else
                                                 '正在核对改动与验收证据' if executing else ''),
+                       'current_work_generated': not bool(focus),
                        'last_conclusion': last, 'events': role_events}
     roles['reviewer'].update(review_wait(state, health, status, rounds, current_round))
     roles['watcher'] = {'role': 'watcher', 'provider': 'auto-moniter',

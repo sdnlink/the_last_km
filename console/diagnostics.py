@@ -142,6 +142,7 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         phase='worker 实现' if role=='worker' else '独立审核'
     result={'code':code,'title':title,'reason':reason,'role':role,'phase':phase,'round':last.get('index'),
             'actions':actions,'raw_summary':redact(raw[:4000]) or '没有保存可确认的具体退出原因。',
+            'raw_summary_generated': not bool(raw),
             'exit_code':meta.get('exit_code'), 'source':source,
             'expected_commit':((state.get('git_history') or {}).get('business_head') or {}).get('commit',''),
             'recent_failures':[{'role':r.get('role'),'round':r.get('index'),

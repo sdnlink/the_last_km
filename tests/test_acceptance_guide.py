@@ -81,6 +81,7 @@ class AcceptanceGuideTests(unittest.TestCase):
   task=self.store.create({'title':'guided','requirement':'implement','acceptance_plan':p,'verification_mode':'executable'})
   meta=self.store._get(task['id']);args=build_parser().parse_args(self.store._new_args(meta))
   self.assertEqual(args.accept,p['criteria']);self.assertIn('unittest',args.check[0])
+  self.assertTrue(args.full_function_plan)
   self.assertEqual(task['acceptance_plan']['selected_ids'],['python-unittest'])
   self.assertEqual(task['acceptance_plan']['selected'][0]['title'],'Python 自动化测试')
  def test_no_selection_cannot_be_executable_review_only_is_explicit(self):
@@ -165,6 +166,7 @@ class AcceptanceGuideTests(unittest.TestCase):
       'objective':'Handle input','inputs':'value','outputs':'value','boundaries':['Only app.py'],
       'verification':['The selected unittest passes'],'depends_on':[],'delivery_scope':'requirement',
       'criterion_ids':['main:1','req:1:1','req:1:2'],'check_ids':['check:1'],'test_files':[]}}
+  brief['function_plan']=[brief['next_task']]
   agent.write_text('#!'+sys.executable+'\nimport sys,json,re\nfrom pathlib import Path\nprompt=sys.stdin.read()\nif any("requirements.schema.json" in a for a in sys.argv):\n print(json.dumps('+repr(brief)+'));sys.exit(0)\nv='+repr(verdict)+'\nif "read-only" not in sys.argv:\n Path("app.py").write_text("def parse_input(value):\\n    return value\\n")\n v["task_status"]="done"\nelse:\n v["task_status"]="accepted"\n m=re.search(r"Worker checkpoint: ([0-9a-f]{40,64})",prompt)\n if m:v["evidence"].append(m[1])\nprint(json.dumps(v))\n')
   agent.chmod(0o700)
   with patch.dict(os.environ,{'PATH':str(binaries)+os.pathsep+os.environ['PATH']}):

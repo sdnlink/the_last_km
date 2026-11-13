@@ -10,6 +10,23 @@
 .detail-metadata .detail-body > h3:first-child { margin-top:0; }
 .requirement-queue-list article { padding:14px 0; border-top:1px solid var(--line); }
 .requirement-queue-list p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; font-size:13px; }
+.dispatch-panel { margin-bottom:22px; }
+.dispatch-notice { margin:0 24px 16px; font-size:12px; line-height:1.7; color:var(--muted); }
+.dispatch-filters { display:flex; flex-wrap:wrap; gap:8px; padding:0 24px 16px; }
+.dispatch-filters button { border:1px solid var(--line); border-radius:6px; background:var(--surface); padding:8px 12px; color:var(--muted); font-size:12px; }
+.dispatch-filters button.active { color:var(--accent); border-color:var(--accent); background:var(--accent-soft); }
+.dispatch-filters span { padding-left:5px; }
+#dispatch-plan { padding:0 24px; }
+.dispatch-task { border-top:1px solid var(--line); }
+.dispatch-task summary { display:flex; align-items:baseline; gap:10px; cursor:pointer; padding:17px 0; font-size:13px; line-height:1.7; }
+.dispatch-task summary > span:last-child { min-width:0; overflow-wrap:anywhere; }
+.dispatch-status { flex-shrink:0; font-size:11px; color:var(--muted); padding:2px 6px; border-radius:4px; background:var(--surface-2); }
+.dispatch-status.active { color:var(--accent); background:var(--accent-soft); }
+.dispatch-status.accepted { color:var(--accent); }
+.dispatch-task-body { padding:0 10px 18px; font-size:13px; line-height:1.8; overflow-wrap:anywhere; }
+.dispatch-task-body p,.dispatch-task-body li { white-space:pre-wrap; }
+.dispatch-task-body h4 { font-size:12px; margin:16px 0 5px; color:var(--muted); }
+#dispatch-pagination > .pagination { padding:16px 24px; }
 
 @media (max-width:640px) {
  .task-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; overflow:visible; }
@@ -17,4 +34,8 @@
  .detail-edit-actions { width:100%; }
  .detail-edit-actions button { flex:1; }
  .detail-git-content { padding:0 16px 16px; }
+ .dispatch-filters,#dispatch-plan { padding-left:16px; padding-right:16px; }
+ .dispatch-notice { margin-left:16px; margin-right:16px; }
+ .dispatch-task summary { flex-wrap:wrap; gap:6px; }
+ .dispatch-task summary > span:last-child { flex-basis:100%; }
 }

@@ -201,6 +201,7 @@ class ActivityReader:
                 text += f"：第 {event.get('round', '?')} 轮 " + ('reviewer' if event.get('role') == 'reviewer' else 'worker')
                 text += '\n' + str(event.get('commit', '')) + '\n' + str(event.get('ref', ''))
             activity.append({'at': event.get('at', ''), 'kind': 'phase', 'text': text,
+                             'console_event': name,
                              'role': event.get('role', ''), 'round': event.get('round', '')})
         activity.sort(key=lambda item: (parse_time(item.get('at', '')) or datetime.min.replace(tzinfo=timezone.utc)))
         current_entries = [e for e in activity if str(e.get('round')) == str(index) and e.get('role') == role]

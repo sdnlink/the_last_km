@@ -1,3 +1,4 @@
+import {i18n,i18nHTML,language} from './i18n.js';
 import {escape} from './ui.js';
 
 export class Pager {
@@ -60,10 +61,11 @@ export function pageView(key,total,options={}){
   }
   return view;
 }
-export function controlsHTML(key,view,{unit='条'}={}){
+export function controlsHTML(key,view,{unit=i18n('条')}={}){
   if(!view.total)return '';
   const pager=getPager(key),escaped=escape(key);
-  return `<nav class="pagination" data-pagination="${escaped}" aria-label="记录分页"><span class="pagination-count">第 ${view.start+1}–${view.end} ${unit} / 共 ${view.total} ${unit}</span><label>每页 <select data-page-size aria-label="每页展示数量">${['auto','10','20','50'].map(mode=>`<option value="${mode}" ${pager.mode===mode?'selected':''}>${mode==='auto'?`随页面（${view.size} ${unit}）`:mode+' '+unit}</option>`).join('')}</select></label><div class="pagination-actions"><button type="button" data-page-number="1" ${view.page===1?'disabled':''} aria-label="第一页">«</button><button type="button" data-page-number="${view.page-1}" ${view.page===1?'disabled':''}>上一页</button><label>第 <input type="number" data-page-jump min="1" max="${view.pages}" value="${view.page}" aria-label="跳转页码" /> / ${view.pages} 页</label><button type="button" data-page-number="${view.page+1}" ${view.page===view.pages?'disabled':''}>下一页</button><button type="button" data-page-number="${view.pages}" ${view.page===view.pages?'disabled':''} aria-label="最后一页">»</button></div></nav>`;
+  if(language()==='en')return `<nav class="pagination" data-pagination="${escaped}" aria-label="Pagination"><span class="pagination-count">Showing ${view.start+1}–${view.end} of ${view.total}</span><label>Per page <select data-page-size aria-label="Items per page">${['auto','10','20','50'].map(mode=>`<option value="${mode}" ${pager.mode===mode?'selected':''}>${mode==='auto'?`Auto (${view.size})`:mode}</option>`).join('')}</select></label><div class="pagination-actions"><button type="button" data-page-number="1" ${view.page===1?'disabled':''} aria-label="First page">«</button><button type="button" data-page-number="${view.page-1}" ${view.page===1?'disabled':''}>Previous</button><label>Page <input type="number" data-page-jump min="1" max="${view.pages}" value="${view.page}" aria-label="Go to page" /> of ${view.pages}</label><button type="button" data-page-number="${view.page+1}" ${view.page===view.pages?'disabled':''}>Next</button><button type="button" data-page-number="${view.pages}" ${view.page===view.pages?'disabled':''} aria-label="Last page">»</button></div></nav>`;
+  return i18nHTML`<nav class="pagination" data-pagination="${escaped}" aria-label="记录分页"><span class="pagination-count">第 ${view.start+1}–${view.end} ${unit} / 共 ${view.total} ${unit}</span><label>每页 <select data-page-size aria-label="每页展示数量">${['auto','10','20','50'].map(mode=>`<option value="${mode}" ${pager.mode===mode?'selected':''}>${mode==='auto'?i18n`随页面（${view.size} ${unit}）`:mode+' '+unit}</option>`).join('')}</select></label><div class="pagination-actions"><button type="button" data-page-number="1" ${view.page===1?'disabled':''} aria-label="第一页">«</button><button type="button" data-page-number="${view.page-1}" ${view.page===1?'disabled':''}>上一页</button><label>第 <input type="number" data-page-jump min="1" max="${view.pages}" value="${view.page}" aria-label="跳转页码" /> / ${view.pages} 页</label><button type="button" data-page-number="${view.page+1}" ${view.page===view.pages?'disabled':''}>下一页</button><button type="button" data-page-number="${view.pages}" ${view.page===view.pages?'disabled':''} aria-label="最后一页">»</button></div></nav>`;
 }
 export function paginate(key,items,options={}){
   const view=pageView(key,items.length,options);

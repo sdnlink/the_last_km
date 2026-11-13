@@ -17,7 +17,7 @@ def parsed_response(value):
     if not isinstance(value, dict):
         raise ValueError('Requirement response must be an object')
     fields = set(requirements_review.SCHEMA['required'])
-    if set(value) not in (fields, fields | {'next_task', 'modules'}):
+    if set(value) not in (fields, fields | {'next_task', 'modules'}, fields | {'next_task', 'modules', 'function_plan'}):
         raise ValueError('Not a requirement-review response')
     requirements_review.parse(json.dumps({k:value[k] for k in fields}))
     return value

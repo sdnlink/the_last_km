@@ -114,6 +114,8 @@ export AUTO_MONITER_AGENT_SETTINGS=/path/to/console-data/agents.json
 ./start.sh
 ```
 
+Web 控制台支持简体中文和英文，首次访问按浏览器语言选择。页面顶部可随时切换，选择会在后续页面及再次访问时保留。菜单、弹窗、状态提示、分页和时间显示使用所选语言；任务名称、需求正文、AI 输出、代码及原始日志保留原文。
+
 打开 `http://127.0.0.1:8765`。也可运行 `python3 -m console`，安装后可使用 `auto-moniter-console`。指定端口、默认项目和外部数据目录：
 
 ```sh
@@ -300,6 +302,8 @@ Web 控制台支持扫描已有测试入口并检查前提，扫描本身不运�
 ### 逐函数派单与质量配置
 
 启用逐函数派单时，Reviewer 指定目标函数、允许文件、验收条目 ID、批准检查 ID 及新增的定向测试文件。Watcher 核对范围并运行所选回归后再推进。需要较大范围的派单时，使用 `--no-function-dispatch`。语言解析器依赖见安装部分。
+
+Web 新任务先生成完整函数派单计划，再逐项执行；“需求队列”页分页展示全部、当前、待派发与已验收项，展开可查看完整范围、依赖和验收要求。CLI 使用 `--function-dispatch --full-function-plan` 开启。计划保存在 `state.json.function_plan`，恢复保留已验收和当前派单；旧任务需停止并恢复加载新版逻辑后，在安全审核边界补齐剩余计划。计划不代表功能已验收。
 
 Reviewer 负责成功、失败和边界断言，Worker 实现测试，Watcher 根据 `test_files` 生成 Python unittest、Node 22 和 Rust Cargo 本地验收命令。可用 `auto:N` 引用第 N 个声明文件；即使只选已有检查，支持的新增回归仍必须执行。空测试、全部跳过或失败不能验收，恢复后仍重建已接受回归并在模块和整份需求交付时重跑。部署、真实设备、凭据和其他环境入口仍需明确配置，详情见[验收职责与自动入口](ACCEPTANCE_GUIDE.md#reviewerworker-和-watcher-的验收职责)。
 

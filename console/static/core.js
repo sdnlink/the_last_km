@@ -1,3 +1,4 @@
+import {i18n,i18nHTML} from './i18n.js';
 import {$,$$,escape,pending} from './ui.js';
 let controller = new AbortController();
 let leaving = false, configPromise, refreshJob, timer, busy = false, toastTimer;
@@ -33,17 +34,17 @@ export async function api(path, body, {signal} = {}) {
   try {
     const response=await fetch(path,{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',signal:scope.signal});
     let value;
-    try{value=await response.json();}catch(error){if(scope.signal.aborted)throw error;throw new Error(`服务返回异常（${response.status}）`);}
-    if(!response.ok){const error=new Error(value.error||`请求失败（${response.status}）`);error.status=response.status;throw error;}
+    try{value=await response.json();}catch(error){if(scope.signal.aborted)throw error;throw new Error(i18n`服务返回异常（${response.status}）`);}
+    if(!response.ok){const error=new Error(value.error||i18n`请求失败（${response.status}）`);error.status=response.status;throw error;}
     return value;
   }catch(error){
-    if(scope.timedOut())throw new Error('请求超时，请稍后重试');
+    if(scope.timedOut())throw new Error(i18n('请求超时，请稍后重试'));
     throw error;
   }finally{scope.dispose();}
 }
 export async function fragment(name){
   const response=await fetch(`/fragments/${name}.html`,{cache:'no-store',signal:controller.signal});
-  if(!response.ok)throw new Error('无法加载操作窗口');
+  if(!response.ok)throw new Error(i18n('无法加载操作窗口'));
   return response.text();
 }
 export async function refresh() {
@@ -53,16 +54,16 @@ export async function refresh() {
   busy=true;
   try {
     await refreshJob();
-    $('#connection').innerHTML='<span class="live-dot"></span>本地服务在线';$('#connection').classList.remove('offline');$('#connection-error').hidden=true;
+    $('#connection').innerHTML=i18nHTML('<span class="live-dot"></span>本地服务在线');$('#connection').classList.remove('offline');$('#connection-error').hidden=true;
   }catch(error){
-    if(!leaving&&error.name!=='AbortError'){$('#connection').textContent='同步失败';$('#connection').classList.add('offline');$('#connection-error').textContent=`无法同步当前页面：${error.message}。正在自动重连…`;$('#connection-error').hidden=false;}
+    if(!leaving&&error.name!=='AbortError'){$('#connection').textContent=i18n('同步失败');$('#connection').classList.add('offline');$('#connection-error').textContent=i18n`无法同步当前页面：${error.message}。正在自动重连…`;$('#connection-error').hidden=false;}
   }finally{busy=false;if(!leaving)timer=setTimeout(refresh,3000);}
 }
 export function watch(job){refreshJob=job;refresh();}
 export async function runAction(id, action) {
   if(pending.has(id))return;
   pending.add(id);$$(`[data-action][data-id="${id}"]`).forEach(el=>el.disabled=true);
-  try {const task=await api(`/api/tasks/${id}/${action}`,{});document.dispatchEvent(new CustomEvent('task-updated',{detail:task}));toast(action==='pause'?'已请求暂停，当前轮次结束后生效':action==='stop'?'已请求停止并保存进度':'操作已提交');await refresh();}
+  try {const task=await api(`/api/tasks/${id}/${action}`,{});document.dispatchEvent(new CustomEvent('task-updated',{detail:task}));toast(action==='pause'?i18n('已请求暂停，当前轮次结束后生效'):action==='stop'?i18n('已请求停止并保存进度'):i18n('操作已提交'));await refresh();}
   catch(error){toast(error.message,true);}
   finally{pending.delete(id);$$(`[data-action][data-id="${id}"]`).forEach(el=>el.disabled=false);}
 }

@@ -68,6 +68,7 @@ from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
+from auto_moniter import function_plan
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 
 
@@ -128,6 +129,7 @@ class RunConfig:
     quality_policy: dict = field(default_factory=dict)
     workflow: str = 'legacy'
     function_dispatch: bool = False
+    full_function_plan: bool = False
 
 
 @dataclass
@@ -238,6 +240,7 @@ class Supervisor:
         self.modules = ModuleLedger(config.modules)
         self.audit = AuditLedger()
         self.function_tasks = function_tasks.FunctionTasks()
+        self.function_plan = None
         self._function_gate = self.config.function_dispatch
         self._function_baseline = None
         self._passed_function_checks = {}
@@ -309,6 +312,8 @@ class Supervisor:
             validate(self.config)
         except (ValueError, ProviderError) as exc:
             return RunReport("invalid", 0, str(exc), "invalid")
+        if self.config.full_function_plan and not self.config.function_dispatch and not self.config.resume:
+            return RunReport('invalid', 0, 'Complete function planning requires function dispatch', 'invalid')
         if (not math.isfinite(self.config.max_runtime_s) or self.config.max_runtime_s < 0
                 or self.config.max_agent_calls < 0 or self.config.max_output_bytes <= 0 or (self.config.keep_rounds is not None and self.config.keep_rounds < 0)):
             return RunReport("invalid", 0, "Resource budgets must be nonnegative and output limit must be positive", "invalid")
@@ -548,6 +553,7 @@ class Supervisor:
                         last_worker,
                     )
                 if self.config.function_dispatch and (not self.function_tasks.current or
+                        self.config.full_function_plan and not self._complete_function_plan_ready() or
                         any(m['id'] not in self._dispatch_directions for m in self.directions.messages())):
                     if not self._elaborate_requirement(records, next_function=True):
                         return self._finish('stopped' if self._stop_requested else 'action_required',
@@ -1366,6 +1372,7 @@ class Supervisor:
         })
         self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
         self.requirements_review = {}
+        self.function_plan = None
         self.active_queued_requirement = ({key: next_queued[key] for key in ('id', 'text', 'at')}
                                           if next_queued else None)
         self.worker_session_id = ''
@@ -1489,7 +1496,7 @@ class Supervisor:
         original_schema=self.schema_path
         schema=self.run_dir/'requirements.schema.json'
         plan_schema = function_tasks.schema(requirements_review.SCHEMA, planning=True, gate=self._function_gate,
-            integration=bool(self._integration_scopes())) if self.config.function_dispatch else requirements_review.SCHEMA
+            integration=bool(self._integration_scopes()), full_plan=self.config.full_function_plan) if self.config.function_dispatch else requirements_review.SCHEMA
         schema.write_text(json.dumps(plan_schema))
         self.schema_path=schema
         self.log('requirements: reviewer continuing saved analysis; checking only pending work and changed inputs' if continuation else
@@ -1509,12 +1516,15 @@ class Supervisor:
                            'with objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
                            'Use delivery_scope=function for intermediate work; module or requirement only for a final function plus the corresponding verification. '
                            'Declare original modules once in modules (files=[]; no commands); use modules=[] when the ledger is already populated. '
-                           'For needs_input use next_task=null. Do not assign the full backlog. '
+                           'For needs_input use next_task=null. '
+                           + (function_plan.planning_contract() if self.config.full_function_plan else 'Do not assign the full backlog. ')+
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
+                if self.config.full_function_plan and self.function_plan:
+                    prompt += '\nPreviously approved function plan (revise remaining entries only with concrete findings):\n'+json.dumps(self.function_plan,ensure_ascii=False)
                 if self._function_gate:
                     prompt += self._function_planning_contract()
                 if next_function:
-                    prompt += ('\nReuse the existing brief; choose only the next unaccepted function. '
+                    prompt += ('\nReuse the existing brief; preserve the current assignment while planning remaining work. '
                                'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
@@ -1561,6 +1571,7 @@ class Supervisor:
                     raise ValueError('Reviewer must supply a structured function assignment and module plan')
                 response = dict(plan)
                 assignment, modules = plan.pop('next_task'), plan.pop('modules')
+                backlog = plan.pop('function_plan', None)
                 brief = requirements_review.parse(json.dumps(plan))
                 requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                     len(self.requirement_cycles)+1,response,before_files,self.config.checks,review_directions)
@@ -1599,12 +1610,15 @@ class Supervisor:
                         self._validate_function_plan(dispatch, staged.items, brief)
                     elif dispatch.current.get('kind') in ('integration','verification'):
                         raise ValueError('Integration and verification assignments require the verified function gate')
+                    complete = (self._validate_complete_function_plan(backlog, dispatch, staged.items, brief)
+                                if self.config.full_function_plan else None)
                     self.function_tasks = dispatch
+                    self.function_plan = complete
                     self._planning_rejection = None
                     self.modules = staged
                     self._dispatch_directions = list(self._direction_ids['reviewer'])
                     self._record_assignment(dispatch.current)
-                elif assignment is not None:
+                elif assignment is not None or backlog:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
                 brief=requirements_review.parse(turn.text)
@@ -2353,6 +2367,25 @@ class Supervisor:
             if missing:
                 raise ValueError('Assign remaining implementation before declaring delivery; uncovered criteria: ' + ', '.join(missing))
 
+    def _complete_function_plan_ready(self):
+        return bool(self.function_plan and self.function_plan['cycle'] == len(self.requirement_cycles) + 1
+                    and self.function_tasks.current in self.function_plan['tasks'])
+
+    def _validate_complete_function_plan(self, backlog, ledger, modules, brief):
+        plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
+        regressions = list(dict.fromkeys(name for item in ledger.accepted for name in item['task'].get('test_files', [])))
+        for task in plan['tasks']:
+            if self.project:
+                from auto_moniter.project_workspace import contains
+                paths = [file for file, _ in function_tasks.targets(task)] + task.get('test_files', [])
+                if any(not contains(self.project.scope, name) for name in paths):
+                    raise ValueError('Complete plan must stay inside the declared parallel task scope')
+            if self._function_gate:
+                function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
+                    approvals=self._integration_scopes(), regressions=regressions, future=True)
+            regressions = list(dict.fromkeys([*regressions, *task.get('test_files', [])]))
+        return plan
+
     def _function_scope_problems(self):
         try:
             gaps, self._function_target_hashes = function_gate.scope_problems(self.config.cwd, self.function_tasks.current,
@@ -2543,24 +2576,34 @@ class Supervisor:
         staged.accept(worker, review, index, tree)
         if expected == 'requirement' and review.next_task is not None:
             raise ValueError('Final delivery cannot include another implementation assignment')
-        if review.next_task is not None:
+        candidate = review.next_task
+        if self.config.full_function_plan:
+            waiting = function_plan.waiting(self.function_plan, staged)
+            planned = waiting[0] if waiting else None
+            if (self.function_plan is None or candidate is not None and candidate != planned
+                    or expected != 'requirement' and planned is None):
+                self._planning_rejection = {'task_id': str((candidate or {}).get('id',''))[:120],
+                    'reason':'Reviewer must supply an updated complete function plan before the next dispatch'}
+                return staged, []
+            candidate = planned
+        if candidate is not None:
             if self._function_gate:
                 try:
-                    staged.assign(review.next_task, self.modules.items)
+                    staged.assign(candidate, self.modules.items)
                     self._validate_function_plan(staged, self.modules.items, self.requirements_review,
                                                  provisional=task)
                 except ValueError as exc:
                     staged.current = None
-                    rejected_id = review.next_task.get('id', '') if isinstance(review.next_task, dict) else ''
+                    rejected_id = candidate.get('id', '') if isinstance(candidate, dict) else ''
                     self._planning_rejection = {'task_id': str(rejected_id)[:120], 'reason': str(exc)[:2000]}
                     self._event('function_next_assignment_rejected', task_id=task['id'],
                                 rejected_task_id=self._planning_rejection['task_id'], reason=str(exc))
                 else:
                     self._planning_rejection = None
             else:
-                if isinstance(review.next_task, dict) and review.next_task.get('kind') in ('integration','verification'):
+                if isinstance(candidate, dict) and candidate.get('kind') in ('integration','verification'):
                     raise ValueError('Integration and verification assignments require the verified function gate')
-                staged.assign(review.next_task, self.modules.items)
+                staged.assign(candidate, self.modules.items)
         return staged, []
 
     def _function_evidence_problems(self, conclusion, role):
@@ -2802,6 +2845,8 @@ class Supervisor:
             "function_dispatch": self.config.function_dispatch,
             "function_gate": self._function_gate,
             "function_tasks": self.function_tasks.export(),
+            "function_plan": self.function_plan,
+            "full_function_plan": self.config.full_function_plan,
             "dispatch_directions": self._dispatch_directions,
             "function_issue_ids": self._function_issue_ids,
             "planning_rejection": self._planning_rejection,
@@ -2924,6 +2969,13 @@ class Supervisor:
             raise ValueError('Invalid saved function gate')
         self._function_baseline = None
         self.function_tasks = function_tasks.FunctionTasks(state.get('function_tasks'))
+        saved_full_plan = state.get('full_function_plan', False)
+        if type(saved_full_plan) is not bool:
+            raise ValueError('Invalid saved complete function planning mode')
+        self.config.full_function_plan = self.config.full_function_plan or saved_full_plan
+        if self.config.full_function_plan and not self._function_gate:
+            raise ValueError('Complete function planning requires the verified function gate')
+        self.function_plan = function_plan.restore(state.get('function_plan'))
         self._local_test_paths = list(dict.fromkeys(name for accepted in self.function_tasks.accepted
                                                    for name in accepted['task'].get('test_files', [])))
         self._dispatch_directions = state.get('dispatch_directions', [])
@@ -3757,6 +3809,13 @@ class Supervisor:
         messages = self.directions.messages()
         if role != 'worker' or not self.config.function_dispatch:
             prompt += queued_requirement_prompt(self.active_queued_requirement)
+        if (role == 'reviewer' and self.config.full_function_plan and self.function_tasks.current
+                and self.requirements_review.get('status') == 'ready'):
+            remaining = function_plan.waiting(self.function_plan, self.function_tasks)
+            prompt += ('\nApproved next assignment after the current one passes watcher acceptance:\n'
+                       +json.dumps(remaining[0] if remaining else None,ensure_ascii=False)
+                       +'\nUse this exact next_task or null. If concrete findings require a different next task, '
+                        'the watcher will request a revised complete plan before another worker starts.\n')
         if self.project:
             prompt += ('\n\nParallel project coordination (watcher-owned task boundary):\n'
                        +json.dumps(self.project.context(),ensure_ascii=False)

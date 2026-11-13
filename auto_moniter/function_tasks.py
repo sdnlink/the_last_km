@@ -25,6 +25,7 @@ INTEGRATION_FIELDS = {'kind', 'integration_scope', 'targets', 'atomic_reason'}
 INTEGRATION_TASK_FIELDS = (FIELDS - {'file', 'symbol'}) | GATE_FIELDS | INTEGRATION_FIELDS
 VERIFICATION_TASK_FIELDS = FIELDS | GATE_FIELDS | {'kind'}
 MAX_INTEGRATION_TARGETS = 4
+MAX_PLAN_TASKS = 200
 
 
 def targets(task):
@@ -183,7 +184,7 @@ class FunctionTasks:
         return True
 
 
-def schema(base, *, planning=False, gate=False, integration=False):
+def schema(base, *, planning=False, gate=False, integration=False, full_plan=False):
     result=copy.deepcopy(base)
     result['properties']['modules'] = module_schema()
     next_schema = copy.deepcopy(NEXT_SCHEMA)
@@ -215,6 +216,9 @@ def schema(base, *, planning=False, gate=False, integration=False):
             next_schema['anyOf'].append(grouped)
     if planning:
         additions={'next_task':next_schema,'modules':module_schema()}
+        if full_plan:
+            additions['function_plan'] = {'type':'array', 'maxItems':MAX_PLAN_TASKS,
+                'items':{'anyOf':copy.deepcopy(next_schema['anyOf'][1:])}}
     else:
         additions={'task_id':{'type':'string'},'task_status':{'type':'string',
                    'enum':['done','incomplete','accepted','changes_required']},'next_task':next_schema}

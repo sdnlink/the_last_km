@@ -1,3 +1,4 @@
+import {i18n} from '../i18n.js';
 import {$,escape,bytes,percent} from '/ui.js';
 import {api,watch} from '/core.js';
 const state={resources:null,tasks:[],history:[]};
@@ -21,14 +22,14 @@ function renderResources() {
     0,
   );
   const detail = [
-    ["CPU 核心数", `${r.cpu_count} 核`],
+    [i18n("CPU 核心数"), i18n`${r.cpu_count} 核`],
     [
-      "1 / 5 / 15 分钟负载",
+      i18n("1 / 5 / 15 分钟负载"),
       r.load_average.map((n) => n.toFixed(2)).join(" / "),
     ],
-    ["任务本地进程内存", bytes(taskMemory)],
+    [i18n("任务本地进程内存"), bytes(taskMemory)],
     [
-      "任务本地进程数",
+      i18n("任务本地进程数"),
       state.tasks.reduce((n, t) => n + t.resources.process_count, 0),
     ],
   ];

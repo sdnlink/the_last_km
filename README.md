@@ -114,6 +114,8 @@ Start from the repository root:
 ./start.sh
 ```
 
+The web console supports English and Simplified Chinese. It initially follows your browser's language; use the language selector in the top bar to switch. Your choice is remembered across pages and visits. Interface labels, dialogs, status messages, pagination, and times follow the selected language. Task names, requirements, AI output, code, and raw logs stay in their original language.
+
 Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-moniter-console` after installation. To choose a port, default project, and external data directory:
 
 ```sh
@@ -300,6 +302,8 @@ Load it with `--modules modules.json`. Module definitions remain fixed during th
 ### Function dispatch and quality settings
 
 With function dispatch enabled, the reviewer selects a named function, its allowed files, acceptance criterion IDs, approved check IDs, and any new focused test files. The watcher checks scope and runs the selected regressions before advancing. Use `--no-function-dispatch` when the task needs broader assignments. Additional parser requirements are listed under installation.
+
+New web tasks generate a complete function plan before serial dispatch. The queue page paginates all assignments and filters current, waiting and accepted work; each entry exposes its full scope, dependencies and verification requirements. CLI users can enable this with `--function-dispatch --full-function-plan`. The plan lives in `state.json.function_plan`; resuming preserves accepted and current work. Existing tasks must stop and resume with the updated supervisor to complete their remaining plan at a safe review boundary. A plan is not acceptance evidence.
 
 The reviewer designs positive, negative and boundary assertions; the worker implements them; the watcher derives local commands from declared `test_files`. Supported runners are Python unittest, Node 22 and Cargo integration tests with locked offline dependencies. `auto:N` refers to the Nth declared test file. Supported declared regressions run even when the reviewer selects only existing check IDs, and accepted regressions run again at final delivery and after resume. Empty or entirely skipped suites fail acceptance. Deployment, real devices, credentials and other environments still need explicitly configured entry points. See [acceptance responsibilities](ACCEPTANCE_GUIDE.md#reviewerworker-和-watcher-的验收职责).
 

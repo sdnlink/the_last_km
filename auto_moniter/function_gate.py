@@ -269,11 +269,11 @@ def verify_integration_approval(task, approvals):
                          + task['integration_scope'])
 
 
-def validate_task(task, root, modules, checks, brief, *, approvals=(), regressions=()):
+def validate_task(task, root, modules, checks, brief, *, approvals=(), regressions=(), future=False):
     if not GATE_FIELDS <= task.keys():
         raise ValueError('Function assignment requires criterion_ids, check_ids and test_files')
     paths = {_target_path(root, file) for file, _ in targets(task)}
-    if task.get('kind') == 'verification' and any(not path.is_file() for path in paths):
+    if not future and task.get('kind') == 'verification' and any(not path.is_file() for path in paths):
         raise ValueError('Verification-only targets must already exist')
     if task.get('kind') == 'integration':
         verify_integration_approval(task, approvals)
@@ -281,7 +281,11 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
     ids = set(task['criterion_ids'])
     if not ids & module_criteria.keys() or not ids <= module_criteria.keys() | requirement_criteria(brief).keys():
         raise ValueError('Function assignment must reference its module criteria and only known requirement criteria')
-    approved = catalog(checks, modules, task['module_id'], root=root, task=task, regressions=regressions)
+    approved = catalog(checks, modules, task['module_id'], root=None if future else root,
+                       task=task, regressions=regressions)
+    if future:
+        approved.update({f'auto:{i}':'planned local behavior check' for i, _ in enumerate(task['test_files'], 1)})
+        approved.update({f'regression:{i}':'accepted/planned regression check' for i, _ in enumerate(regressions, 1)})
     if not set(task['check_ids']) <= approved.keys():
         raise ValueError('Function assignment must select approved check IDs or auto:N for declared local test files, '
                          'or regression:N for accepted tests; no agent commands')

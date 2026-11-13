@@ -3,6 +3,7 @@
 import html
 import re
 from pathlib import Path
+from console.localization import translate, translate_html
 
 
 STATIC = Path(__file__).with_name('static')
@@ -47,7 +48,7 @@ def page_route(path: str) -> tuple[str, str, str] | None:
     return ('detail', match[1], match[2] or 'home') if match else None
 
 
-def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup=False) -> bytes:
+def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup=False, language='zh-CN') -> bytes:
     shell = (STATIC / 'index.html').read_text()
     content = (STATIC / 'pages' / (page + '.html')).read_text()
     title, subtitle = PAGES[page]
@@ -66,19 +67,21 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
     styles = [page]
     if page in {'detail', 'progress'}:
         styles.insert(0, 'work')
-    replacements = {'<!-- PAGE_CONTENT -->': content,
-                    '<!-- SIDE_NAVIGATION -->': navigation(page, task_id, section),
+    shell = shell.replace('<!-- PAGE_CONTENT -->', content).replace('<!-- SIDE_NAVIGATION -->',navigation(page,task_id,section))
+    shell = translate_html(shell,language)
+    replacements = {
                     '<!-- PAGE_STYLES -->': '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles),
                     '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,
                     '__NEEDS_SETUP__': 'true' if needs_setup else 'false',
-                    '__WORKSPACE__': str(cwd), '__PAGE_TITLE__': title, '__PAGE_SUBTITLE__': subtitle}
+                    '__WORKSPACE__': str(cwd), '__PAGE_TITLE__': translate(title,language),
+                    '__PAGE_SUBTITLE__': translate(subtitle,language), '__LANGUAGE__':language}
     for key, value in replacements.items():
         shell = shell.replace(key, value if key.startswith('<!--') else html.escape(value, quote=True))
     return shell.encode()
 
 
 def asset(path: str) -> tuple[Path, str] | None:
-    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'requirement-queue.js', 'style.css', 'dialogs.css', 'favicon.svg'}
+    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'requirement-queue.js', 'dispatch-plan.js', 'i18n.js', 'translations.js', 'style.css', 'dialogs.css', 'favicon.svg'}
     name = path.removeprefix('/')
     allowed = name in common
     if name.startswith('pages/'):

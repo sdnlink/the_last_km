@@ -2,6 +2,8 @@
 
 独立的 `console/` 目录包含 Python HTTP 服务和原生 HTML/CSS/JavaScript 页面，无第三方运行时依赖，无需安装 Node.js 或构建前端。支持 Linux、Python 3.11+。
 
+页面顶部提供“简体中文 / English”语言切换。首次访问按浏览器语言选择，手动选择通过 Cookie 保存一年，并在页面跳转、刷新及再次访问时保留。中英文分别使用对应的界面文案、分页表达和本地时间格式；需求、任务名称、模型输出、代码与原始日志保持原文。新增界面文案统一维护在 `static/translations.js`，前后端共用同一份词典。
+
 在仓库根目录启动：
 
 ```bash
@@ -53,6 +55,12 @@
 
 队列接口：`GET /api/tasks/<id>/requirement-queue` 返回当前 `active`、带 `position` 的 `waiting`、已验收 `completed` 和 `can_append`。向同一路径 POST `{text, position}` 追加，`position` 为 `last`（默认）、`first` 或目标等待需求的 ID（插在该条之前）；目标离队时返回 409，要求重新选择。POST `{action: "remove", id}` 只撤回尚在等待的需求。写请求沿用控制台会话校验。原始需求、队列文本与验收进度分别保存在 `requirement.md`、`requirement-queue.json` 和 `state.json`；领取和需求轮次切换由同一份原子检查点记录，避免重启后重复领取或丢单。
 
+启用逐函数派单的新 Web 任务默认先要求 reviewer 产出完整 `function_plan`，包含当前派单、所有后续函数及最终需求验收。Watcher 检查唯一编号、依赖顺序、固定范围、批准检查及验收条目规划覆盖；缺失或非法计划不会启动 worker。每次仍只执行一项，独立审核与实际检查通过后才领取计划中的下一项，并重新校验该项。Reviewer 提议计划外工作时先保留当前验收，再重新审核剩余计划；计划文本不等于验收证明。
+
+“需求队列”页上方分页展示 reviewer 完整派单，支持“全部、待派发、当前派单、已验收”筛选，以及随页面数量、每页 10/20/50 项和跳页。展开每项可查看目标函数、输入、预期输出、边界、验证要求、前置依赖、验收条目和批准检查。每 3 秒刷新保留当前页和已展开项。用户追加的后续需求保留在下方。完整函数计划保存于 `state.json.function_plan`，已验收和当前派单保存在 `function_tasks`。历史任务未生成完整计划时明确提示“待生成”，不会把未拆分工作显示成零项。
+
+分页接口：`GET /api/tasks/<id>/dispatch-plan?page=1&page_size=10&status=all`，`page_size` 范围 1–100，`status` 支持 `all`、`waiting`、`active`、`accepted`；返回当前页 `items`、总数、页数及全局状态计数。仅返回请求页内容。升级前已运行的监督器需停止并恢复以加载新版逻辑；恢复已有受验证的函数任务时，控制台默认开启完整计划，在安全审核边界保留当前派单并补齐后续计划。CLI 可显式传 `--function-dispatch --full-function-plan`；直接 Python 集成的完整计划模式默认关闭，以兼容已有增量派单。
+
 Web 新建任务使用 `--git-history required`，目标目录须属于 Git 仓库，无法保存 Git 轮次记录时会停止执行。普通目录请先在目标目录执行 `git init`。恢复已有 CLI 任务沿用其原参数；旧版未指定 Git 参数的任务按 `auto` 模式恢复，在 Git 项目中开启后续轮次留痕。
 
 reviewer 按轮次与 worker 串行运行。详情卡片显示最近审核轮次、实际审核频率、间隔计数和等待原因；worker 超时或被停止后会先处理失败，等待后续 worker 正常返回才再次送审。运行中的任务仍使用保存的原配置，新建任务表单不会改变既有运行的频率。Web 与 README 中全部配置的覆盖差异见 [配置核对清单](CONFIGURATION_AUDIT.md)。
@@ -79,7 +87,7 @@ Agent 管理采用紧凑卡片，显示启用状态、CLI 检测结果及默认�
 | 工作概览 | `/overview` 或 `/` | `/api/overview`：统计、运行任务摘要与主机资源 |
 | 开发任务 | `/tasks` | `/api/tasks`：任务列表摘要 |
 | 实时进展 | `/progress?task=<编号>` | 任务列表摘要及所选任务的 `/api/tasks/<编号>/progress` |
-| 任务详情 | `/tasks/<编号>` 及其 `/queue`、`/conclusions`、`/git`、`/requirements`、`/logs` 子页面 | 仅 `/api/tasks/<编号>`；日志子页面额外请求该任务日志 |
+| 任务详情 | `/tasks/<编号>` 及其 `/queue`、`/conclusions`、`/git`、`/requirements`、`/logs` 子页面 | `/api/tasks/<编号>`；队列页额外读取需求队列及分页派单计划，日志页额外请求该任务日志 |
 | 资源监控 | `/resources` | 仅 `/api/resources`：主机与任务资源 |
 
 原始日志 API 支持 `page`（默认 1，0 表示最新一页）和 `page_size`（默认 10，范围 1–100），返回总行数、页数、当前页及行号；文件追加时增量更新行索引，文件轮换或缩短后重建。分页只展示仍保留的运行记录。

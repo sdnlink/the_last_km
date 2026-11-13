@@ -72,6 +72,10 @@ def requests_follow_up(text):
 
 
 def prompt(config, modules, *, follow_up=None, continuation=None, queued_requirement=None):
+    deployment = ''
+    if getattr(config, 'task_type', 'code') == 'deployment':
+        from auto_moniter.deployment import instructions
+        deployment = instructions('requirements', config, config.run_dir)
     opening = ('You are the independent requirement reviewer continuing a saved review. Do not restart a full repository review. '
                'Reuse the previous analysis and inspect only the reported rejection, unresolved blockers, new human '
                'directions, changed files and their affected dependencies. Repair the pending assignment or select '
@@ -91,6 +95,7 @@ def prompt(config, modules, *, follow_up=None, continuation=None, queued_require
             'rather than treating unrelated existing tests or diff formatting as proof of new functionality. '
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
+            + deployment
             + _follow_up_block(follow_up, queued_requirement) +
             ('Saved requirement analysis and input changes (context, not approval):\n'
              +json.dumps(continuation,ensure_ascii=False)+'\n\n' if continuation else '') +

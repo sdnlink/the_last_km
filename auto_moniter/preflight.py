@@ -10,7 +10,21 @@ from auto_moniter import __version__
 from auto_moniter.providers import ProviderError, discover_providers
 
 
+def validate_task_type(config) -> None:
+    from auto_moniter.task_types import TASK_TYPES
+    if config.task_type not in TASK_TYPES and not (config.resume and config.task_type == 'auto'):
+        raise ValueError('Invalid task type')
+    if config.task_type == 'deployment':
+        if config.no_review or config.reviewer is None or config.workflow not in ('review-first', 'auto'):
+            raise ValueError('Deployment requires requirement review and an independent reviewer')
+        if config.function_dispatch or config.full_function_plan:
+            raise ValueError('Deployment uses operational stages, not function dispatch')
+        if config.git_history == 'auto':
+            config.git_history = 'off'
+
+
 def validate(config) -> None:
+    validate_task_type(config)
     if config.workflow not in ('legacy','review-first','auto') or config.workflow=='auto' and not config.resume:
         raise ValueError('Invalid workflow')
     if config.workflow=='review-first' and config.no_review:

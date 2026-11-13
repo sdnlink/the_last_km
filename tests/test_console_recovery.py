@@ -60,6 +60,15 @@ class ResumeArgumentsTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(ValueError):
                 resume_arguments({'argv': argv}, self.root / 'run', self.state)
 
+    def test_deployment_category_is_preserved_and_cannot_be_changed_by_manifest(self):
+        state = {**self.state, 'task_type': 'deployment', 'workflow': 'review-first'}
+        argv = [*self.argv, '--task-type=deployment', '--workflow=review-first']
+        resumed = resume_arguments({'argv': argv}, self.root / 'run', state)
+        self.assertIn('--task-type=deployment', resumed)
+        self.assertNotIn('--function-dispatch', resumed)
+        with self.assertRaisesRegex(ValueError, '任务类型'):
+            resume_arguments({'argv': [*self.argv, '--task-type=code']}, self.root / 'run', state)
+
 
 class ImportedTaskControlTests(unittest.TestCase):
     def setUp(self):

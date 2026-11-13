@@ -112,6 +112,8 @@ function buildCreateDom() {
   add(field('select', 'task_type', 'code'));
   add(field('textarea', 'acceptance_criteria', 'done well'));
   add(field('select', 'verification_mode', 'executable'));
+  add(field('input', 'function_dispatch', 'on', {type: 'checkbox', checked: true}));
+  add(field('input', 'parallel_project', 'on', {type: 'checkbox', checked: false}));
   add(field('input', 'acceptance_python', ''));
   add(field('textarea', 'checks', ''));
   add(field('textarea', 'modules', '[]'));
@@ -251,7 +253,7 @@ beforeEach(() => {
       const seen = new Set();
       for (const child of form.children) {
         const name = child.name;
-        if (!name || seen.has(name)) continue;
+        if (!name || child.disabled || seen.has(name)) continue;
         seen.add(name);
         if (child.type === 'checkbox') {
           if (child.checked) this._pairs.push([name, 'on']);
@@ -410,4 +412,47 @@ test('create-form submit: modules[].checks with review_only blocks POST and keep
   assert.equal(form.elements.modules.value, modulesJson);
   assert.equal(form.elements.verification_mode.value, 'review_only');
   assert.equal(form.elements.title.value, 'demo');
+});
+
+test('deployment selection disables code dispatch and restores previous choices when leaving', async () => {
+  const dialogs = await loadDialogs();
+  dialogs.bindCreateFormForTest();
+  const {form} = globalThis.__testDom;
+  form.elements.verification_mode.value = 'review_only';
+  form.elements.parallel_project.checked = true;
+  form.elements.task_type.value = 'deployment';
+  form.elements.task_type.dispatchEvent({type: 'input'});
+  assert.equal(form.elements.verification_mode.value, 'executable');
+  for (const key of ['verification_mode', 'function_dispatch', 'parallel_project']) assert.equal(form.elements[key].disabled, true);
+  form.elements.task_type.value = 'code';
+  form.elements.task_type.dispatchEvent({type: 'input'});
+  assert.equal(form.elements.verification_mode.value, 'review_only');
+  for (const key of ['verification_mode', 'function_dispatch', 'parallel_project']) assert.equal(form.elements[key].disabled, false);
+  assert.equal(form.elements.parallel_project.checked, true);
+  assert.equal(form.elements.function_dispatch.checked, true);
+});
+
+test('deployment submit carries disabled mode and category without requiring local checks', async () => {
+  const dialogs = await loadDialogs();
+  dialogs.bindCreateFormForTest();
+  const {form} = globalThis.__testDom;
+  form.elements.task_type.value = 'deployment';
+  form.elements.parallel_project.checked = true;
+  dialogs.updateTaskType(form);
+  dialogs.setAcceptanceScanForTest({
+    python: '/usr/bin/python3', signature: 'sig-deployment', checks: [],
+    context: {cwd: '/tmp/proj', task_type: 'deployment', python: ''},
+  });
+  assert.equal([...new FormData(form)].some(([key]) => key === 'verification_mode'), false);
+  await submitForm(form);
+  assert.equal(formErrorText, '', formErrorText);
+  assert.equal(taskPosts.length, 1);
+  const body = taskPosts[0];
+  assert.equal(body.task_type, 'deployment');
+  assert.equal(body.verification_mode, 'executable');
+  assert.equal(body.function_dispatch, false);
+  assert.equal(body.full_function_plan, false);
+  assert.equal(body.parallel_project, false);
+  assert.deepEqual(body.checks, []);
+  assert.deepEqual(body.acceptance_plan.selected_ids, []);
 });

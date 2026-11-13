@@ -68,7 +68,7 @@ from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
-from auto_moniter import function_plan
+from auto_moniter import function_plan, deployment
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 
 
@@ -130,6 +130,7 @@ class RunConfig:
     workflow: str = 'legacy'
     function_dispatch: bool = False
     full_function_plan: bool = False
+    task_type: str = 'code'
 
 
 @dataclass
@@ -2084,6 +2085,8 @@ class Supervisor:
             catalog = self._function_check_catalog(task)
             selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
+                **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
+                   if self.config.task_type == 'deployment' else {}),
                 'module_ids':sorted(ids), 'commands':self._acceptance_commands(final, ids, selected),
                 'configured_checks':list(self.config.checks),
                 'check_timeout_s':self.config.check_timeout_s,
@@ -2218,6 +2221,14 @@ class Supervisor:
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
                          pre_review=False) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
+        if final and self.config.task_type == 'deployment':
+            try:
+                deployment.validate(self.config.cwd, self.run_dir, self.config.requirement)
+            except (OSError, ValueError) as exc:
+                verdict.status = 'continue'
+                verdict.gaps.append('Deployment acceptance blocked: ' + str(exc))
+                verdict.next_actions.append('Complete the deployment evidence report from actual remote results; preserve completed stages.')
+                return False
         if self._pending_directions():
             verdict.status = 'continue'
             verdict.gaps.append('New human instructions arrived after the worker started. Implement and review them before accepting delivery.')
@@ -2956,7 +2967,7 @@ class Supervisor:
                        "at": datetime.now(timezone.utc).isoformat(), "run_dir": str(self.run_dir)}), durable=True)
         write_json(path, safe({**report.to_dict(), "modules": self.modules.export(), "usage": self._usage(),
                                          "quality_policy": self.config.quality_policy, "quality_state": self.quality.state,
-                                         "workflow":self.config.workflow,"requirements_review":self.requirements_review,
+                                         "workflow":self.config.workflow,"task_type":self.config.task_type,"requirements_review":self.requirements_review,
                                          "requirement_cycles": self.requirement_cycles,
                                          "no_progress_turns": self._no_progress, "recovery_count": self._recovery_count, "accepted_tree": self._delivery_tree,
                                          "review_schedule": self._review_schedule(),
@@ -3036,6 +3047,7 @@ class Supervisor:
             "cwd": str(self.config.cwd),
             "state_version": 1,
             "workflow": self.config.workflow,
+            "task_type": self.config.task_type,
             "function_dispatch": self.config.function_dispatch,
             "function_gate": self._function_gate,
             "function_tasks": self.function_tasks.export(),
@@ -3154,6 +3166,11 @@ class Supervisor:
         if self.config.workflow not in ('auto',saved_workflow):
             raise ValueError('Workflow cannot change on resume')
         self.config.workflow=saved_workflow
+        from auto_moniter.task_types import TASK_TYPES
+        saved_task_type = state.get('task_type', 'code')
+        if saved_task_type not in TASK_TYPES or self.config.task_type not in ('auto', saved_task_type):
+            raise ValueError('Task type cannot change on resume; create a new task')
+        self.config.task_type = saved_task_type
         saved_dispatch = state.get('function_dispatch', False)
         if type(saved_dispatch) is not bool or self.config.function_dispatch and not saved_dispatch:
             raise ValueError('Function dispatch mode cannot change on resume')
@@ -3169,6 +3186,8 @@ class Supervisor:
         self.config.full_function_plan = self.config.full_function_plan or saved_full_plan
         if self.config.full_function_plan and not self._function_gate:
             raise ValueError('Complete function planning requires the verified function gate')
+        from auto_moniter.preflight import validate_task_type
+        validate_task_type(self.config)
         self.function_plan = function_plan.restore(state.get('function_plan'))
         self._local_test_paths = list(dict.fromkeys(name for accepted in self.function_tasks.accepted
                                                    for name in accepted['task'].get('test_files', [])))
@@ -3406,6 +3425,20 @@ class Supervisor:
         )
 
     def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None) -> str:
+        if self.config.task_type == 'deployment':
+            return '\n'.join([
+                'You are the deployment execution agent. Carry out the original authorized operational task.',
+                deployment.instructions('worker', self.config, self.run_dir),
+                'Original request:', self.config.requirement,
+                'Human acceptance criteria:', self.config.acceptance,
+                'Reviewed requirement:', json.dumps(self.requirements_review, ensure_ascii=False),
+                'Module ledger:', json.dumps(self.modules.export(), ensure_ascii=False),
+                'Open audit issues:', json.dumps(self.audit.prompt(), ensure_ascii=False),
+                'Previous worker conclusion:', json.dumps(last_worker.to_dict() if last_worker else {}, ensure_ascii=False),
+                'Independent review:', json.dumps(last_review.to_dict() if last_review else {}, ensure_ascii=False),
+                'Fixed supplemental checks:', json.dumps(self.config.checks, ensure_ascii=False),
+                verdict_instructions(),
+            ])
         if self.config.function_dispatch:
             task = self.function_tasks.current
             return '\n'.join([
@@ -3560,6 +3593,8 @@ class Supervisor:
         receipt = candidate.watcher_result.get('candidate_checks') if candidate else None
         return "\n".join(
             [
+                *([deployment.instructions(
+                    'reviewer', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
                 *(['Watcher checks executed BEFORE this review for the exact submitted candidate:',
                    json.dumps(safe(receipt),ensure_ascii=False),
                    'Read the saved check logs and assess the requirement, implementation and observed failures in this review. '

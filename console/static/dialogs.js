@@ -86,6 +86,19 @@ function bindModels(form,cfg){
  });
 }
 function acceptanceContext(){const f=$('#create-form');return {cwd:f.elements.cwd.value.trim(),task_type:f.elements.task_type.value,python:f.elements.acceptance_python.value.trim()};}
+export function updateTaskType(form){
+ const deployment=form.elements.task_type?.value==='deployment';
+ for(const key of ['function_dispatch','parallel_project'])if(form.elements[key])form.elements[key].disabled=deployment;
+ const mode=form.elements.verification_mode;
+ if(mode){
+  if(deployment&&!mode.disabled){mode.deploymentPrevious=mode.value;mode.value='executable';}
+  if(!deployment&&mode.disabled&&mode.deploymentPrevious){mode.value=mode.deploymentPrevious;delete mode.deploymentPrevious;}
+  mode.disabled=deployment;
+  const option=mode.querySelector?.('option[value="executable"]');
+  if(option)option.textContent=deployment?i18n('执行部署并由独立 reviewer 验收'):i18n('选择项目检查，并由独立 reviewer 审核');
+ }
+ const hint=$('#deployment-hint');if(hint)hint.hidden=!deployment;
+}
 function acceptanceChanged(){acceptanceSequence++;acceptanceScan=null;$('#acceptance-options').textContent='';$('#acceptance-notice').textContent=i18n('项目目录、类型或解释器已改变，请重新扫描。');}
 async function scanAcceptance(){
  const context=acceptanceContext(),seq=++acceptanceSequence,windowSequence=createSequence,request=++acceptanceScanRequest;$('#scan-acceptance').disabled=true;
@@ -94,7 +107,7 @@ async function scanAcceptance(){
   const data=await api('/api/acceptance/scan',context);
   if(!currentCreate(windowSequence)||seq!==acceptanceSequence||JSON.stringify(context)!==JSON.stringify(acceptanceContext()))return null;
   acceptanceScan={...data,context};
-  $('#acceptance-options').innerHTML=data.checks.map(c=>i18nHTML`<article class="acceptance-option"><label class="checkbox-label"><input type="checkbox" data-check-id="${escape(c.id)}" ${c.recommended?'checked':''}><span>${escape(c.title)}<small>${escape(c.purpose)}</small></span></label><small>耗时：${escape(c.estimate)}。${escape(c.effects)}</small><details><summary>命令与运行前提</summary><pre>${escape(c.command)}</pre><p>程序：${escape(c.executable)}${c.dependencies.length?i18n('；依赖：')+escape(c.dependencies.join(i18n('、'))):''}</p></details></article>`).join('')||i18nHTML('<p>没有发现可识别的检查入口。可选择“先制定验收方案”，或由熟悉项目的人补充高级命令；不能据此宣称功能已经验证。</p>');
+  $('#acceptance-options').innerHTML=data.checks.map(c=>i18nHTML`<article class="acceptance-option"><label class="checkbox-label"><input type="checkbox" data-check-id="${escape(c.id)}" ${c.recommended?'checked':''}><span>${escape(c.title)}<small>${escape(c.purpose)}</small></span></label><small>耗时：${escape(c.estimate)}。${escape(c.effects)}</small><details><summary>命令与运行前提</summary><pre>${escape(c.command)}</pre><p>程序：${escape(c.executable)}${c.dependencies.length?i18n('；依赖：')+escape(c.dependencies.join(i18n('、'))):''}</p></details></article>`).join('')||(data.task_type==='deployment'?i18nHTML('<p>没有发现本地检查入口；部署任务将核验实际远程执行结果。</p>'):i18nHTML('<p>没有发现可识别的检查入口。可选择“先制定验收方案”，或由熟悉项目的人补充高级命令；不能据此宣称功能已经验证。</p>'));
   $('#acceptance-notice').textContent=i18n`找到 ${data.checks.length} 项检查入口。${data.notice}`;
   return acceptanceScan;
  }catch(error){if(currentCreate(windowSequence)&&seq===acceptanceSequence)$('#acceptance-notice').textContent=error.message;return null;}
@@ -129,6 +142,11 @@ export function moduleExecutionCommands(modules){
  * Mutates and returns data for the /api/tasks body.
  */
 export function applyVerificationModeToCreatePayload(data){
+ const deployment=(data.task_type||data.acceptance_plan?.task_type)==='deployment';
+ if(deployment){
+  if(data.verification_mode!=='executable')throw new Error(i18n('部署任务需要执行部署并验证远程结果'));
+  data.function_dispatch=false;data.full_function_plan=false;
+ }
  const mode=data.verification_mode;
  data.checks=checksForMode(mode,data.checks);
  if(data.acceptance_plan){
@@ -137,7 +155,7 @@ export function applyVerificationModeToCreatePayload(data){
  if(modeOmitsExecution(mode)&&moduleExecutionCommands(data.modules).length){
   throw new Error(i18n('仅语义审核或制定方案不能附带 modules[].checks 执行命令；请清除模块检查或改用执行验收模式'));
  }
- if(mode==='executable'&&!(data.acceptance_plan?.selected_ids||[]).length&&!(data.checks||[]).length){
+ if(mode==='executable'&&!deployment&&!(data.acceptance_plan?.selected_ids||[]).length&&!(data.checks||[]).length){
   throw new Error(i18n('请选择至少一个检查项；没有入口时可以先制定验收方案'));
  }
  return data;
@@ -216,6 +234,7 @@ function configureForm() {
   $("#workspace-name").textContent =
     state.config.cwd.split("/").filter(Boolean).at(-1) || "/";
   updateProviderHint();
+  updateTaskType($('#create-form'));
   acceptanceChanged();
 }
 function updateProviderHint() {
@@ -371,7 +390,7 @@ function bind(name){
    createSequence++;acceptanceSequence++;acceptanceScan=null;
    for(const id of ['refresh-agents','create-submit','scan-acceptance','preflight-acceptance'])$('#'+id).disabled=false;
   });
-  for(const key of ['cwd','task_type','acceptance_python'])$('#create-form').elements[key].addEventListener('input',acceptanceChanged);
+  for(const key of ['cwd','task_type','acceptance_python'])$('#create-form').elements[key].addEventListener('input',()=>{updateTaskType($('#create-form'));acceptanceChanged();});
   $('#scan-acceptance').addEventListener('click',scanAcceptance);
   $('#preflight-acceptance').addEventListener('click',async()=>{
    const sequence=acceptanceSequence,windowSequence=createSequence,request=++preflightRequest;
@@ -406,8 +425,9 @@ function bind(name){
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
    const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
+   data.task_type=form.elements.task_type.value;data.verification_mode=form.elements.verification_mode.value;
    if(form.elements.function_dispatch)data.function_dispatch=data.verification_mode==='executable'&&form.elements.function_dispatch.checked;
-   if(form.elements.parallel_project){data.parallel_project=form.elements.parallel_project.checked;data.task_scope=String(data.task_scope||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);data.task_dependencies=String(data.task_dependencies||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);}
+   if(form.elements.parallel_project){data.parallel_project=data.task_type!=='deployment'&&form.elements.parallel_project.checked;data.task_scope=String(data.task_scope||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);data.task_dependencies=String(data.task_dependencies||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);}
    try{selectedModels(form,data);}catch(error){$('#form-error').hidden=false;$('#form-error').textContent=error.message;return;}
    for(const key of ['max_runtime_minutes','max_agent_calls','max_rounds','review_every','turn_timeout','idle_timeout','check_timeout','keep_rounds','max_run_bytes','max_history_bytes','max_agent_state_bytes'])data[key]=Number(data[key]);
    data.protect_paths=(data.protect_paths||'').split('\n').map(s=>s.trim()).filter(Boolean);
@@ -416,7 +436,7 @@ function bind(name){
    createPending.add(sequence);$('#create-submit').disabled=true;$('#form-error').hidden=true;
    let submitted=false;
    try{
-    if(!acceptanceScan&&data.verification_mode!=='executable')await scanAcceptance();
+    if(!acceptanceScan&&(data.verification_mode!=='executable'||data.task_type==='deployment'))await scanAcceptance();
     if(!currentCreate(sequence))return;
     data.acceptance_plan=acceptancePlan();
     applyVerificationModeToCreatePayload(data);

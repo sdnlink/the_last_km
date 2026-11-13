@@ -36,6 +36,8 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
     args = parser.parse_args(argv)
     if args.workflow and args.workflow!=state.get('workflow','legacy'):
         raise ValueError('原始工作流程与检查点不一致')
+    if args.task_type and args.task_type != state.get('task_type', 'code'):
+        raise ValueError('原始任务类型与检查点不一致')
     if args.run_dir is None or not args.run_dir.is_absolute() or args.run_dir.resolve() != run.resolve():
         raise ValueError('原始启动配置与任务运行目录不一致')
     if not args.cwd.is_absolute() or args.cwd.resolve() != Path(state.get('cwd', '')).resolve():
@@ -95,6 +97,7 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
               '--provider', args.provider, '--worker-isolation', args.worker_isolation,
               '--review-isolation', args.review_isolation, '--git-history', args.git_history]
     result.append('--workflow='+state.get('workflow','legacy'))
+    result.append('--task-type='+state.get('task_type','code'))
     if state.get('function_dispatch'):
         result.append('--function-dispatch')
     if state.get('full_function_plan'):

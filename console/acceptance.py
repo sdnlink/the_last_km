@@ -8,8 +8,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+from auto_moniter.task_types import TASK_TYPES
 
-KINDS = {'code', 'documentation', 'service', 'other'}
+KINDS = set(TASK_TYPES)
 
 
 def validate_commands(checks):
@@ -151,11 +152,15 @@ def scan(cwd, kind='code', python=''):
     if (root / '.git').exists():
         add('git-diff', '改动格式检查', '检查冲突标记及空白错误；不验证业务功能', ['git','diff','--check'],
             effects='只读本地 Git 改动。', estimate='通常数秒', recommended=True)
+    if kind == 'deployment':
+        for check in checks:
+            check['recommended'] = False
     signature = hashlib.sha256(json.dumps({'sources':sources,'python':interpreter,'kind':kind,'checks':checks},sort_keys=True).encode()).hexdigest()
     return {'cwd':str(root),'task_type':kind,'python':interpreter,'checks':checks,'signature':signature,'ci_sources':ci,
             'semantic_review':{'title':'独立语义审核','purpose':'reviewer 核对需求完整性、描述准确性与未覆盖边界；不能代替运行测试。'},
             'unverified':['未声明或未选择的功能、数据库/HTTP/端到端、性能和客户验收均不能由扫描结果推定通过。'],
-            'notice':'扫描只读取有限项目文件，不执行测试、不安装依赖。没有发现入口不代表项目没有验证能力。格式检查或旧测试通过不证明新增功能可用，请选择需求对应的行为验证。'}
+            'notice': ('部署任务由执行器检查远程环境并记录构建、产物和服务运行证据；本地检查可选，不能代替部署验收。扫描不会连接服务器或执行部署。' if kind == 'deployment' else
+                       '扫描只读取有限项目文件，不执行测试、不安装依赖。没有发现入口不代表项目没有验证能力。格式检查或旧测试通过不证明新增功能可用，请选择需求对应的行为验证。')}
 
 
 def select(cwd, plan):

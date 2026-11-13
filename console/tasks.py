@@ -375,6 +375,7 @@ class TaskStore:
                      'acceptance_plan': meta.get('acceptance_plan', {}) if include_details else {},
                      'acceptance_results': acceptance_results,
                      'verification_mode': meta.get('verification_mode', 'legacy'),
+                     'task_type': state.get('task_type', meta.get('task_type', 'code')),
                      'function_dispatch': state.get('function_dispatch', meta.get('function_dispatch', False)),
                      'function_tasks': state.get('function_tasks', {}) if include_details else {},
                      'delivery_diagnosis': delivery_diagnosis if include_details else {},
@@ -595,16 +596,30 @@ class TaskStore:
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
+        from auto_moniter.task_types import TASK_TYPES
+        plan_type = data['acceptance_plan'].get('task_type', 'code') if isinstance(data.get('acceptance_plan'), dict) else 'code'
+        task_type = data.get('task_type', plan_type)
+        if not isinstance(task_type, str) or task_type not in TASK_TYPES:
+            raise TaskError('请选择有效任务类型')
+        deployment = task_type == 'deployment'
+        if deployment and workflow != 'review-first':
+            raise TaskError('部署任务需要先审核需求并进行独立验收')
         parallel = data.get('parallel_project',False)
         if type(parallel) is not bool:
             raise TaskError('parallel_project 必须是布尔值')
         if parallel and workflow != 'review-first':
             raise TaskError('同工程并行任务需要先审核需求的流程')
+        if deployment and parallel:
+            raise TaskError('部署任务不支持同工程并行开发')
         function_dispatch = data.get('function_dispatch',
             workflow == 'review-first' and data.get('verification_mode') not in ('review_only', 'planning'))
         if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
             raise TaskError('逐函数下发需要启用先审核需求的流程')
+        if deployment:
+            function_dispatch = False
         full_function_plan = data.get('full_function_plan', function_dispatch)
+        if deployment:
+            full_function_plan = False
         if type(full_function_plan) is not bool or full_function_plan and not function_dispatch:
             raise TaskError('完整函数计划需要开启逐函数派单')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
@@ -615,6 +630,8 @@ class TaskStore:
                 guided = select_acceptance(cwd, data['acceptance_plan'])
             except (ValueError,OSError) as exc:
                 raise TaskError(str(exc)) from exc
+            if guided['task_type'] != task_type:
+                raise TaskError('任务类型与验收方案不一致，请重新扫描')
         checks = data.get('checks', [])
         if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\x00' in c for c in checks):
             raise TaskError('验收命令格式不正确，每行填写一条命令')
@@ -625,9 +642,11 @@ class TaskStore:
         # Distinguish explicit mode from legacy clients that omit verification_mode.
         mode_explicit = 'verification_mode' in data
         verification_mode = data.get('verification_mode',
-            'executable' if function_dispatch else 'review_only')
+            'executable' if function_dispatch or deployment else 'review_only')
         if verification_mode not in ('executable', 'review_only', 'planning'):
             raise TaskError('验收模式无效')
+        if deployment and verification_mode != 'executable':
+            raise TaskError('部署任务需要执行部署并验证远程结果')
         if function_dispatch and mode_explicit and verification_mode != 'executable':
             raise TaskError('逐函数派单需要执行验收模式及已批准的检查')
         # Module-level checks also schedule sh -lc execution via ModuleLedger; inspect raw
@@ -658,6 +677,7 @@ class TaskStore:
                 guided = {**guided, 'selected_ids': [], 'selected': []}
             checks = []
         if (mode_explicit and verification_mode == 'executable' and not function_dispatch
+                and not deployment
                 and not checks and not module_check_commands and not (guided and guided['selected'])):
             raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
@@ -700,7 +720,7 @@ class TaskStore:
                 except (ValueError, OSError) as exc:
                     raise TaskError(str(exc)) from exc
             meta = {'id': ident, 'managed': True, 'title': title, 'requirement': requirement,
-                    'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow,
+                    'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow, 'task_type':task_type,
                     'function_dispatch': function_dispatch,
                     'full_function_plan': full_function_plan,
                     **models, **backends,
@@ -727,6 +747,8 @@ class TaskStore:
                     raise TaskError('无法创建并行任务：'+str(exc),409) from exc
             from console.acceptance import coverage_warning
             meta['acceptance_warning'] = coverage_warning([*checks, *module_check_commands])
+            if deployment:
+                meta['acceptance_warning'] = '部署成功须有实际远程构建、产物校验和目标服务运行证据；本地测试通过不代表部署成功。'
             if guided:
                 meta['acceptance_plan'] = guided
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']
@@ -811,10 +833,11 @@ class TaskStore:
     def _new_args(self, meta: dict) -> list[str]:
         argv = ['run', '--cwd', meta['cwd'], '--run-dir', meta['run_dir'],
                 '--provider', meta['provider'], '--reviewer', meta['reviewer'],
-                '--git-history', 'required',
+                '--git-history', 'off' if meta.get('task_type') == 'deployment' else 'required',
                 '--review-every', str(meta.get('review_every', 5)),
                 '--max-runtime', str(meta['max_runtime_minutes'] * 60),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
+        argv.append('--task-type=' + meta.get('task_type', 'code'))
         for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend'), ('reviewer_paseo_backend', '--reviewer-paseo-backend')]:
             if meta.get(key):
                 argv.append(flag + '=' + meta[key])

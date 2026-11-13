@@ -74,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
             static = asset(url.path) if route is None else None
             if route:
                 self._send(200, render_page(*route, self.server.store.cwd,
-                           needs_setup=route[0]=='overview' and not self.server.store.agents.initialized(), language=self._language()), 'text/html; charset=utf-8')
+                           needs_setup=url.path=='/' and not self.server.store.agents.initialized(), language=self._language()), 'text/html; charset=utf-8')
             elif static:
                 body=static[0].read_bytes()
                 if static[1].startswith('text/html'):

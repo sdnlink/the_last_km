@@ -245,7 +245,14 @@ print('fixture installation completed')
                 conn.request(method,path,json.dumps(data) if data is not None else None,headers)
                 response=conn.getresponse();result=response.status,response.read().decode();conn.close();return result
             try:
-                self.assertIn('data-needs-setup="true"',request('GET','/overview')[1])
+                self.assertIn('data-needs-setup="true"',request('GET','/')[1])
+                for path in ('/overview','/overview?status=running'):
+                    status,body=request('GET',path)
+                    self.assertEqual(status,200)
+                    self.assertIn('data-page="overview"',body)
+                    self.assertIn('data-needs-setup="false"',body)
+                    self.assertIn('id="task-board"',body)
+                    self.assertIn('href="/overview" data-nav-key="overview"',body)
                 self.assertIn('id="setup-agents"',request('GET','/setup')[1])
                 self.assertEqual(request('GET','/pages/setup.js')[0],200)
                 self.assertEqual(request('POST','/api/agents/save',{'agents':[]})[0],403)
@@ -256,5 +263,6 @@ print('fixture installation completed')
                 for endpoint in ['/api/config','/api/agents/setup','/setup']:
                     self.assertNotIn(secret,request('GET',endpoint)[1])
                 self.assertIn('data-needs-setup="false"',request('GET','/overview')[1])
+                self.assertIn('data-needs-setup="false"',request('GET','/')[1])
                 self.assertEqual(request('POST','/api/agents/install',{'id':'unknown'},token)[0],400)
             finally:server.shutdown();thread.join(3)

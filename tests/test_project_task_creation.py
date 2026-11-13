@@ -1,4 +1,4 @@
-"""Console creation must validate the committed checkout before reserving scope."""
+"""Console tasks automatically branch from a validated committed checkout."""
 import os
 import sys
 import unittest
@@ -25,18 +25,23 @@ class ParallelCreationTests(unittest.TestCase):
         self.store = TaskStore(self.root/'data',self.source)
 
     def create(self,**kwargs):
-        return self.store.create({'title':'parallel fixture','requirement':'Implement scoped behavior',
+        return self.store.create({'title':'parallel fixture','requirement':'Implement task behavior',
             'provider':'codex','reviewer':'codex','review_isolation':'provider','parallel_project':True,
-            'function_dispatch':False,'verification_mode':'review_only','task_scope':['app.py'],**kwargs})
+            'function_dispatch':False,'verification_mode':'review_only',**kwargs})
 
-    def test_create_disjoint_tasks_exposes_scope_branch_and_original_project(self):
+    def test_create_tasks_without_file_scope_automatically_creates_independent_branches(self):
         a = self.create()
-        b = self.create(task_scope=['other.py'])
+        b = self.create(task_scope=[])
         self.assertTrue(a['parallel_project'])
         self.assertEqual(a['project_cwd'],str(self.source))
-        self.assertEqual(a['task_scope'],['app.py'])
+        self.assertEqual(a['task_scope'],[])
+        self.assertEqual(b['task_scope'],[])
         self.assertNotEqual(a['cwd'],b['cwd'])
-        self.assertTrue(a['task_branch'].startswith('refs/heads/auto-moniter-task/'))
+        self.assertNotEqual(a['task_branch'],b['task_branch'])
+        for task in (a,b):
+            self.assertEqual(task['task_branch'],'refs/heads/auto-moniter-task/'+task['id'])
+            self.assertEqual(git(task['cwd'],'symbolic-ref','HEAD'),task['task_branch'])
+            self.assertEqual(git(task['cwd'],'rev-parse','HEAD'),self.baseline)
         self.assertTrue((Path(a['run_dir'])/'project-workspace.json').is_file())
         self.assertEqual(task_status(a['run_dir']),'queued')
         self.assertEqual(git(self.source,'rev-parse','HEAD'),self.baseline)
@@ -60,15 +65,15 @@ class ParallelCreationTests(unittest.TestCase):
         self.create()
 
     def test_overlap_requires_dependency_and_cancel_releases_scope(self):
-        a=self.create()
+        a=self.create(task_scope=['app.py'])
         with self.assertRaisesRegex(TaskError,'重叠'):
-            self.create()
-        b=self.create(task_dependencies=[a['id']])
+            self.create(task_scope=['app.py'])
+        b=self.create(task_scope=['app.py'],task_dependencies=[a['id']])
         self.assertEqual(b['task_dependencies'],[a['id']])
         self.store.action(a['id'],'cancel')
         self.store.action(b['id'],'cancel')
         self.assertEqual(task_status(a['run_dir']),'cancelled')
-        self.create()
+        self.create(task_scope=['app.py'])
 
     def test_existing_same_worktree_lock_policy_is_not_disabled(self):
         a=self.create()
@@ -80,9 +85,9 @@ class ParallelCreationTests(unittest.TestCase):
         self.assertTrue(Path(a['cwd']).exists())
 
     def test_delete_queued_parallel_task_releases_scope_and_preserves_checkout(self):
-        a=self.create()
+        a=self.create(task_scope=['app.py'])
         result=self.store.action(a['id'],'delete',{'confirm':a['id']})
         self.assertTrue(result['deleted'])
         self.assertEqual(task_status(a['run_dir']),'cancelled')
         self.assertTrue((Path(a['cwd'])/'app.py').exists())
-        self.create()
+        self.create(task_scope=['app.py'])

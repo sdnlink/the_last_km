@@ -331,7 +331,7 @@ Token and cost limits require usage reported by the selected backend. Time value
 
 ## Develop one project in parallel
 
-In the console's task form, enable **同工程并行开发** and list the files or directories each task owns, including new tests. End directory names with `/`. Split overlapping ownership or declare an earlier task's full ID as a prerequisite.
+In the console's task form, enable **同工程并行开发**. Each task automatically gets a new development branch and isolated working copy; no file or directory ownership list is required. Develop according to the task requirement. Optionally declare an earlier task's full ID as a prerequisite when its accepted changes are needed.
 
 Each task starts from committed code in a separate Git worktree on an `auto-moniter-task/<task-id>` branch. Prepare the dependencies that worktree needs and use project-relative acceptance commands.
 

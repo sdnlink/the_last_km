@@ -55,10 +55,9 @@
           </div>
           <div id="provider-hint" class="form-hint"></div>
           <details class="advanced">
-            <summary>同工程并行开发<span>工作副本与任务拆分</span></summary>
+            <summary>同工程并行开发<span>自动创建开发分支</span></summary>
             <div class="advanced-body">
-              <label class="checkbox-label"><input type="checkbox" name="parallel_project"><span>为该任务创建独立 Git 工作副本<small>可与同工程其他任务并行运行，保留原工作区。以已提交代码为起点，审核通过后交付到独立任务分支。</small></span></label>
-              <label>本任务负责的文件或目录（每行一项）<textarea name="task_scope" rows="3" placeholder="src/auth/&#10;test/test_auth.py"></textarea><small>目录以 / 结尾；请把实现和新增测试范围都列出。重叠范围应拆开，或设置前置依赖。</small></label>
+              <label class="checkbox-label"><input type="checkbox" name="parallel_project"><span>为该任务自动新建开发分支和独立工作副本<small>从已提交代码创建，可与同工程其他任务并行运行。按任务需求开发，无需填写负责的文件或目录。</small></span></label>
               <label>前置任务 ID（可选，每行一项）<textarea name="task_dependencies" rows="2" placeholder="填写本工程已有并行任务的完整 ID"></textarea><small>Watcher 等待依赖通过验收后合入其分支；检测到共享输入变化时先重新审查，再更新 Worker 任务。</small></label>
             </div>
           </details>

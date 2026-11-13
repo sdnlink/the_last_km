@@ -1626,7 +1626,7 @@ class Supervisor:
                             raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
                         dispatch.current = None
                     dispatch.assign(assignment, staged.items)
-                    if self.project:
+                    if self.project and self.project.scope:
                         from auto_moniter.project_workspace import contains
                         files = [file for file,_ in function_tasks.targets(dispatch.current)] + dispatch.current.get('test_files',[])
                         if any(not contains(self.project.scope,file) for file in files):
@@ -2536,7 +2536,7 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
-        if self.project:
+        if self.project and self.project.scope:
             from auto_moniter.project_workspace import contains
             files = [file for file,_ in function_tasks.targets(task)] + task.get('test_files',[])
             if any(not contains(self.project.scope,file) for file in files):
@@ -2559,7 +2559,7 @@ class Supervisor:
         plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
         regressions = list(dict.fromkeys(name for item in ledger.accepted for name in item['task'].get('test_files', [])))
         for task in plan['tasks']:
-            if self.project:
+            if self.project and self.project.scope:
                 from auto_moniter.project_workspace import contains
                 paths = [file for file, _ in function_tasks.targets(task)] + task.get('test_files', [])
                 if any(not contains(self.project.scope, name) for name in paths):
@@ -4076,11 +4076,15 @@ class Supervisor:
                        +'\nUse this exact next_task or null. If concrete findings require a different next task, '
                         'the watcher will request a revised complete plan before another worker starts.\n')
         if self.project:
+            task_boundary = ('Only edit the declared file or directory scope. ' if self.project.scope else
+                             'Develop according to the task requirement in this task branch and working copy; '
+                             'no file or directory ownership list is required. ')
             prompt += ('\n\nParallel project coordination (watcher-owned task boundary):\n'
                        +json.dumps(self.project.context(),ensure_ascii=False)
                        +'\nInspect changed shared inputs and peer work before selecting or implementing the next task. '
-                       'Preserve the original acceptance criteria and other tasks. Only edit this task scope. '
-                       'Reassess any interrupted_assignment explicitly; its implementation is preserved but unaccepted. '
+                       'Preserve the original acceptance criteria and other tasks. '
+                       +task_boundary
+                       +'Reassess any interrupted_assignment explicitly; its implementation is preserved but unaccepted. '
                        'Use a fresh assignment ID after changed inputs so scope baselines can be reviewed again. '
                        'Identify actual dependencies; never claim a peer delivery is accepted from its text alone. '
                        'Uncommitted source files are observed, not imported or verified. '

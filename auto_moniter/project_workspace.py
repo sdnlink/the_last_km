@@ -41,8 +41,10 @@ def read(path):
 
 
 def validate_scope(scope):
-    if not isinstance(scope, list) or not 1 <= len(scope) <= 50:
-        raise ValueError('并行任务需要填写 1 到 50 个负责的文件或目录，每行一项')
+    # Empty scopes use the task requirement as their boundary in an isolated
+    # branch. Explicit scopes remain enforced for previously saved tasks.
+    if not isinstance(scope, list) or len(scope) > 50:
+        raise ValueError('任务范围须为文件或目录列表，最多 50 项；可留空按任务需求开发')
     result = []
     for name in scope:
         if (not isinstance(name, str) or not name.strip() or len(name) > 1000
@@ -329,11 +331,15 @@ class ProjectWorkspace:
                 'delivery':'Reviewed work is committed to this task branch; source workspaces are never overwritten.'}
 
     def scope_errors(self, before, after):
+        if not self.scope:
+            return []
         return [str(Path(name).relative_to(self.cwd)) for name in before.keys() | after.keys()
                 if before.get(name) != after.get(name) and not contains(self.scope,str(Path(name).relative_to(self.cwd)))]
 
     def pending_scope_errors(self):
         """Check the whole unpublished delta, so a later no-op cannot hide it."""
+        if not self.scope:
+            return []
         names = git(self.cwd,'diff','--no-renames','--relative','--name-only','-z','HEAD','--','.').split('\0')
         names += git(self.cwd,'ls-files','--others','--exclude-standard','-z','--','.').split('\0')
         return sorted({name for name in names if name and not _ignored(self.cwd/name,self.run,cwd=self.cwd)

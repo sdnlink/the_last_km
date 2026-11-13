@@ -44,7 +44,7 @@ class ProjectWorkspaceTests(unittest.TestCase):
         self.count += 1
         ident = f'{self.count:032x}'
         manifest = create(self.source,self.root/('run'+str(self.count)),ident,'task '+str(self.count),
-                          scope or ['app.py'],dependencies or [],['git diff --check'],**options)
+                          ['app.py'] if scope is None else scope,dependencies or [],['git diff --check'],**options)
         return ProjectWorkspace.open(manifest['cwd'],manifest['run_dir'])
 
     def commit(self,root,name,content='external\n'):
@@ -79,9 +79,20 @@ class ProjectWorkspaceTests(unittest.TestCase):
         b=self.workspace(dependencies=[a.manifest['id']])
         b.observe(force=True)
         self.assertEqual(b.waiting(),[a.manifest['id']])
-        for scope in [['.'],['../outside'],['src/*'],['.git/config'],[]]:
+        for scope in [['.'],['../outside'],['src/*'],['.git/config'],None,'app.py']:
             with self.subTest(scope=scope),self.assertRaises(ValueError):
                 validate_scope(scope)
+
+    def test_unscoped_tasks_can_share_files_with_legacy_scoped_tasks(self):
+        legacy = self.workspace()
+        project = self.workspace([])
+        before = file_snapshot(project.cwd)
+        (project.cwd/'app.py').write_text('independent task edit\n')
+        (project.cwd/'new_test.py').write_text('new regression asset\n')
+        self.assertEqual(project.scope_errors(before,file_snapshot(project.cwd)),[])
+        self.assertEqual(project.pending_scope_errors(),[])
+        self.assertEqual(ProjectWorkspace.open(project.cwd,project.run).scope,[])
+        self.assertEqual((legacy.cwd/'app.py').read_text(),'original\n')
 
     def test_existing_linked_source_worktree_uses_repository_relative_ownership(self):
         self.workspace()
@@ -336,6 +347,29 @@ class ProjectWorkspaceTests(unittest.TestCase):
         self.assertEqual(worker.calls,[])
         self.assertEqual(git(a.cwd,'rev-parse','HEAD'),self.baseline)
 
+    def test_function_planning_and_delivery_without_declared_file_scope(self):
+        from tests.test_function_dispatch import FunctionWorker, task, result, plan
+        original = 'def parse_input():\n    return 0\n'
+        self.baseline = self.commit(self.source,'other.py',original)
+        a = self.workspace([])
+        assignment = task('F1','other.py',scope='requirement')
+        assignment['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+        planning = plan(assignment)
+        value = json.loads(planning['text'])
+        value['function_plan'] = [assignment]
+        planning['text'] = json.dumps(value)
+        worker = FunctionWorker('worker',[
+            {**result('F1','done',status='done',file='other.py'),'touch':str(a.cwd/'other.py')}])
+        reviewer = SnapshotReviewer('reviewer',[
+            planning,result('F1','accepted',status='done',file='other.py')])
+        monitor = self.monitor(a,worker,reviewer,function_dispatch=True,full_function_plan=True)
+        monitor.config.checks = ["python3 -c 'from other import parse_input; assert parse_input() == 42'"]
+        report = monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertIn('no file or directory ownership list is required',worker.calls[0]['prompt'])
+        self.assertNotEqual(git(a.cwd,'rev-parse','HEAD'),self.baseline)
+        self.assertEqual((self.source/'other.py').read_text(),original)
+
     def test_function_dispatch_replans_preserved_work_with_fresh_scoped_assignment(self):
         from tests.test_function_dispatch import FunctionWorker, task, result, plan
         a=self.workspace()
@@ -367,7 +401,7 @@ class ProjectWorkspaceTests(unittest.TestCase):
         self.assertEqual([item['task']['id'] for item in state['function_tasks']['accepted']],['F2'])
 
     def test_two_real_supervisors_can_develop_one_project_concurrently(self):
-        a,b=self.workspace(),self.workspace(['other.py'])
+        a,b=self.workspace([]),self.workspace([])
         # Stable observations are pre-reviewed by each monitor; synchronizing
         # here proves worker subprocesses overlap, not merely sequential leases.
         barrier=threading.Barrier(2)
@@ -394,8 +428,10 @@ class ProjectWorkspaceTests(unittest.TestCase):
         # freeze only status to isolate concurrency from the separate recovery tests.
         with patch('auto_moniter.project_workspace.task_status',return_value='running'):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futures=[pool.submit(run,a,'app.py'),pool.submit(run,b,'other.py')]
+                futures=[pool.submit(run,a,'app.py'),pool.submit(run,b,'app.py')]
                 results=[f.result(timeout=40) for f in futures]
         self.assertEqual([r.status for r in results],['done','done'],[r.summary for r in results])
+        self.assertEqual((a.cwd/'app.py').read_text(),'changed\n')
+        self.assertEqual((b.cwd/'app.py').read_text(),'changed\n')
         self.assertEqual((self.source/'app.py').read_text(),'original\n')
         self.assertEqual((self.source/'other.py').read_text(),'original\n')

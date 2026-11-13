@@ -387,6 +387,24 @@ test('create-form submit: residual checks cleared when mode is review_only; rest
   assert.deepEqual(taskPosts[0].checks, ['echo leftover']);
 });
 
+test('parallel create-form submits without asking for file or directory ownership', async () => {
+  const dialogs = await loadDialogs();
+  dialogs.bindCreateFormForTest();
+  const {form} = globalThis.__testDom;
+  form.elements.parallel_project.checked = true;
+  form.elements.verification_mode.value = 'review_only';
+  dialogs.setAcceptanceScanForTest({
+    python: '/usr/bin/python3', signature: 'sig-parallel', checks: [],
+    context: {cwd: '/tmp/proj', task_type: 'code', python: ''},
+  });
+  await submitForm(form);
+  assert.equal(formErrorText, '', formErrorText);
+  assert.equal(taskPosts.length, 1);
+  assert.equal(taskPosts[0].parallel_project, true);
+  assert.equal(Object.hasOwn(taskPosts[0], 'task_scope'), false);
+  assert.deepEqual(taskPosts[0].task_dependencies, []);
+});
+
 test('create-form submit: modules[].checks with review_only blocks POST and keeps user input', async () => {
   const dialogs = await loadDialogs();
   dialogs.bindCreateFormForTest();

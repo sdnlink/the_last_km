@@ -76,7 +76,9 @@ function roleDetailsHTML(t) {
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
   if (showRoles && $("#role-details")) stableHTML($("#role-details"), roleDetailsHTML(t));
   const phase = t.health.phase;
-  const stages = [...(t.workflow==='review-first'?[["reviewer",i18n("reviewer 完善需求"),"refining_requirements"]]:[]),["worker", i18n("worker 实现"), "working"], ["reviewer", i18n("reviewer 审查"), "reviewing"], ["watcher", i18n("watcher 验收与本地提交"), "validating"], ["watcher", i18n("归档交付"), "closing_agents"]];
+  const stages = t.workflow==='review-first'
+    ? [["reviewer",i18n("reviewer 完善需求"),"refining_requirements"],["worker",i18n("worker 实现"),"working"],["watcher",i18n("watcher 运行派单检查"),"validating"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 提交已审核代码"),"publishing"],["watcher",i18n("归档交付"),"closing_agents"]]
+    : [["worker",i18n("worker 实现"),"working"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 验收与本地提交"),"validating"],["watcher",i18n("归档交付"),"closing_agents"]];
   $("#workflow-stages").innerHTML = stages.map(([role,label,stage],i) => {
     const skipped = stage === "reviewing" && t.work?.roles?.reviewer?.status === "disabled";
     const complete = t.status === "done" && !skipped;

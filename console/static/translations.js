@@ -1227,5 +1227,18 @@ export default {
   "。": ". ",
   "：": ": ",
   "）": ")",
-  "；{0}": "; {0}"
+  "；{0}": "; {0}",
+  "派单验收受阻": "Assignment acceptance blocked",
+  "派单验收": "Assignment acceptance",
+  "独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。": "Independent review accepted this assignment, but supervisor acceptance did not pass. The candidate and failure records are saved. Implementation has not been dispatched again.",
+  "核对失败命令和原始日志；需要修改范围外代码、既有测试或生成文档时，先安排明确范围的修复。": "Review the failed commands and original logs. Arrange a bounded repair before changing code outside the assignment, existing tests, or generated documentation.",
+  "恢复时保留当前候选；仅复用与当前版本和检查结果一致的审核结论，检查结果变化后重新审核。检查通过前不会派发下一项。": "Resuming preserves the current candidate. Approval is reused only for the same version and check results; changed results require a new review. The next assignment waits until checks pass.",
+  "派单验收受阻，已保留候选并停止自动重派": "Assignment acceptance blocked; candidate saved and automatic redispatch stopped",
+  "候选检查已完成，交独立审核": "Candidate checks completed; ready for independent review",
+  "复用同一候选的有效检查结果": "Reusing valid check results for the same candidate",
+  "提交已审核代码中": "Committing approved code",
+  "watcher 运行派单检查": "Supervisor runs assignment checks",
+  "watcher 提交已审核代码": "Supervisor commits approved code",
+  "worker 提交候选后，watcher 先执行检查，reviewer 根据代码与检查结果审核；接收后由 watcher 提交并推进下一项。": "After the worker submits a candidate, the supervisor runs checks. The reviewer assesses the code and results, then the supervisor commits approved work and dispatches the next assignment.",
+  "独立审核已接收，watcher 正在提交当前派单。": "Independent review accepted the assignment. The supervisor is committing it."
 };

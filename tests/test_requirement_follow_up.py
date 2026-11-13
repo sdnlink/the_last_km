@@ -153,8 +153,9 @@ class RequirementFollowUpTests(unittest.TestCase):
             self.done(cite=True),
         ], self.root)
         result = self.loop(worker, reviewer, max_rounds=2, checks=['false'])
-        self.assertEqual(result.status, 'max_rounds', result.summary)
-        self.assertEqual(len(reviewer.calls), 3)
+        self.assertEqual(result.status, 'action_required', result.summary)
+        self.assertEqual(len(worker.calls),1)
+        self.assertEqual(len(reviewer.calls), 2)
         self.assertNotIn('Accepted deliveries already committed', reviewer.calls[-1]['prompt'])
         self.assertEqual(_git(self.root, 'rev-parse', 'HEAD'), self.base)
         self.assertNotIn('requirement_follow_up', (self.root / 'run/events.jsonl').read_text())

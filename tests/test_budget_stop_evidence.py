@@ -6,6 +6,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from auto_moniter.providers import PreparedCommand, Provider, TurnResult, resolve_provider
 from auto_moniter.supervisor import BudgetExceeded, RunConfig, Supervisor
 from console.tasks import TaskStore, tail
@@ -223,8 +224,23 @@ class BudgetStopEvidenceTests(unittest.TestCase):
             return original(*args, **kwargs)
 
         monitor._delivery_checks = plant
+        # Start the budget only after the check has emitted its diagnostic.
+        # Worker startup time must not prevent reaching the boundary under test.
+        clock = {'elapsed':0.0}
+        monitor._elapsed = lambda: clock['elapsed']
+        import auto_moniter.supervisor as supervisor_module
+        original_command = supervisor_module.run_command
+        def expire_after_output(prepared, cwd, **kwargs):
+            if prepared.argv[:2] == ['sh','-c']:
+                feed = kwargs['on_output']
+                def output(stream, chunk):
+                    feed(stream,chunk)
+                    clock['elapsed'] = 1.0
+                kwargs['on_output'] = output
+            return original_command(prepared,cwd,**kwargs)
         started = time.monotonic()
-        report = monitor.run()
+        with patch('auto_moniter.supervisor.run_command',side_effect=expire_after_output):
+            report = monitor.run()
         self.assertLess(time.monotonic() - started, 5)
         results = json.loads((run / 'acceptance-results.json').read_text())
         self.assertFalse(results['complete'])

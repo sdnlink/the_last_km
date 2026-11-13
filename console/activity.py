@@ -62,6 +62,9 @@ EVENT_LABELS = {
     'function_submission_recovered': '恢复已有函数交付，直接交 Reviewer 复核并派发后续任务',
     'function_scope_review_reused': '函数定位已核对，复用同一候选的 Reviewer 验收结论',
     'function_gate_rejected': '函数验收门禁未通过',
+    'function_acceptance_blocked': '派单验收受阻，已保留候选并停止自动重派',
+    'candidate_checks_completed': '候选检查已完成，交独立审核',
+    'candidate_checks_reused': '复用同一候选的有效检查结果',
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',
     'acceptance_checks_added': '已追加验收检查',
@@ -188,7 +191,7 @@ class ActivityReader:
                 text += '：' + str(event.get('summary') or event.get('status') or '')
             elif name == 'function_next_assignment_rejected':
                 text += '：' + str(event.get('rejected_task_id') or '') + '\n' + str(event.get('reason') or '')
-            elif name == 'function_gate_rejected':
+            elif name in {'function_gate_rejected', 'function_acceptance_blocked'}:
                 text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('reasons') or '')
             elif name in {'function_assigned', 'function_accepted'}:
                 text += '：' + str(event.get('task_id') or '')

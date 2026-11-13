@@ -13,6 +13,16 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class FailureDiagnosticTests(unittest.TestCase):
+    def test_function_check_failure_preserves_review_instead_of_claiming_a_crash(self):
+        result=self.diagnostic('action_required',
+            'Function acceptance blocked for F6; candidate preserved. Acceptance check failed: node test.js',
+            records=[{'role':'reviewer','index':24,'task_id':'F6','task_status':'accepted'}])
+        self.assertEqual(result['code'],'function_acceptance_blocked')
+        self.assertEqual(result['role'],'watcher')
+        self.assertIn('未自动重新派发',result['reason'])
+        self.assertIn('检查通过前不会派发下一项',''.join(result['actions']))
+        self.assertIn('node test.js',result['raw_summary'])
+
     def test_protected_baseline_stop_is_a_watcher_gate_with_explicit_recovery(self):
         result=self.diagnostic('action_required',
             'Protected acceptance baseline changed; restore original assertions before resuming. Files: .gitignore',

@@ -38,13 +38,14 @@ class ScopeReviewRecoveryTests(unittest.TestCase):
         self.assertEqual(report.status,'stopped',report.summary)
         return monitor,report
 
-    def test_repaired_locator_resumes_watcher_checks_without_worker_or_reviewer_calls(self):
+    def test_repaired_locator_reuses_worker_and_reviews_new_check_results(self):
         self.stopped_scope_review()
         worker=FunctionWorker('worker',[])
-        reviewer=ScriptedProvider('reviewer',[])
+        reviewer=ScriptedProvider('reviewer',[result('F1','accepted',status='done')])
         report=self.monitor(worker,reviewer,resume=True).run()
         self.assertEqual(report.status,'done',report.summary)
-        self.assertFalse(worker.calls or reviewer.calls)
+        self.assertFalse(worker.calls)
+        self.assertEqual(len(reviewer.calls),1)
         self.assertEqual((self.root/'app.py').read_text(),'def parse_input():\n    return 42\n')
         self.assertEqual(report.records[-1].verdict.task_status,'accepted')
 

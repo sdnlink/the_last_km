@@ -131,7 +131,8 @@ class ModuleDeliveryGateTests(unittest.TestCase):
                     self.assertIn('Acceptance environment unavailable', report.summary)
                 else:
                     self.assertTrue(results['source_changed'])
-                    self.assertIn('changed workspace source', ' '.join(report.records[-1].verdict.gaps))
+                    self.assertIn('changed workspace source',report.summary)
+                    self.assertEqual(len(reviewer.calls),1)  # Requirements review only; candidate is stale.
 
     def test_requirement_checks_and_user_module_checks_still_run(self):
         modules = [

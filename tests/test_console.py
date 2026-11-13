@@ -166,6 +166,9 @@ class ConsoleTests(unittest.TestCase):
         self.assertNotIn('monitor.log', logs['files'])
         self.assertLessEqual(len(logs['content'].encode()), 65536)
         self.assertNotIn('secret-value', logs['content'])
+        archived = '001-check-01-attempt-001.log'
+        (run / archived).write_text('original failed check\n')
+        self.assertEqual(self.store.logs(task['id'], archived)['content'], 'original failed check\n')
         with self.assertRaises(TaskError):
             self.store.logs(task['id'], '../../etc/passwd')
 

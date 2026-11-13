@@ -88,7 +88,7 @@ class ContinuousLoopTests(unittest.TestCase):
                 f"print(json.dumps({_verdict('done', evidence=['app.py'])!r}))"
             )
             provider = resolve_provider("command", command=shlex.join([sys.executable, "-c", code]))
-            report = Supervisor(RunConfig("task", root, provider, no_review=True, idle_timeout_s=0.1, retry_delay_s=0, run_dir=root / "run"), log=lambda _: None).run()
+            report = Supervisor(RunConfig("task", root, provider, no_review=True, idle_timeout_s=1, retry_delay_s=0, max_rounds=3, run_dir=root / "run"), log=lambda _: None).run()
             self.assertEqual(report.status, "done")
             self.assertEqual(report.rounds, 2)
             self.assertTrue(report.records[0].timed_out)

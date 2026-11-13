@@ -78,7 +78,12 @@ class HistoryTests(unittest.TestCase):
             target.write_text("keep")
             (run / "001-worker.log").symlink_to(target)
             (run / "001-check-01.log").write_text("old check")
-            self.assertEqual(prune_files(run, 2), 1)
+            (run / "001-check-01-attempt-001.log").write_text("archived old check")
+            (run / "001-checks-attempt-001.json").write_text('{}')
+            recent = run / "002-check-01-attempt-001.log"
+            recent.write_text("retained check")
+            self.assertEqual(prune_files(run, 2), 3)
+            self.assertEqual(recent.read_text(), "retained check")
             self.assertTrue((run / "001-worker.log").is_symlink())
             self.assertEqual(target.read_text(), "keep")
             worker = ScriptedProvider("worker", [{"verdict": _verdict("continue", ["unfinished"])} for _ in range(3)])

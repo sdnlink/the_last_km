@@ -64,6 +64,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         code='supervisor_exception';title='监督器程序异常';role='watcher';phase='监督器执行'
         reason=raw
         actions=['先修复原始程序异常，再恢复原任务；增加运行时间或调用额度不能修复程序错误。']
+    elif text.startswith(('function acceptance blocked for ', 'candidate acceptance blocked for ')):
+        code='function_acceptance_blocked';title='派单验收受阻';role='watcher';phase='派单验收'
+        reason='独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。'
+        actions=['核对失败命令和原始日志；需要修改范围外代码、既有测试或生成文档时，先安排明确范围的修复。',
+                 '恢复时保留当前候选；仅复用与当前版本和检查结果一致的审核结论，检查结果变化后重新审核。检查通过前不会派发下一项。']
     elif 'protected acceptance baseline changed' in text:
         code='protected_baseline_changed';title='受保护的验收资产发生变化';role='watcher';phase='验收基线保护检查'
         reason='Watcher 检测到测试、验收入口或忽略规则与任务启动时不一致，已停止验收；这不代表 Worker 进程异常退出。'

@@ -28,6 +28,7 @@ const phases = {
   reviewing: i18n("独立审查中"),
   refining_requirements: i18n("reviewer 完善需求中"),
   validating: i18n("验收检查中"),
+  publishing: i18n("提交已审核代码中"),
   retry_wait: i18n("等待重试"),
   closing_agents: i18n("结束会话中"),
   paused: i18n("已在轮次边界暂停"),

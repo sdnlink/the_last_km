@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 
-_ARTIFACT = re.compile(r"^(\d+)-(?:worker|reviewer(?:-repair-\d+)?)(?:-prompt\.md|-text\.md|\.log)$|^(\d+)-check-\d+\.log$")
+_ARTIFACT = re.compile(r"^(\d+)-(?:worker|reviewer(?:-repair-\d+)?)(?:-prompt\.md|-text\.md|\.log)$|^(\d+)-(?:check-\d+(?:-attempt-\d+)?\.log|checks-attempt-\d+\.json)$")
 
 
 def prune_files(run_dir: Path, first_round: int) -> int:

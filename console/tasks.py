@@ -1079,7 +1079,7 @@ class TaskStore:
         for path in run.glob('*'):
             if path.is_symlink() or not path.is_file():
                 continue
-            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl', 'requirements-workspace-change.json'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+)?)(-text)?\.(log|md)|check-\d+\.log)', path.name):
+            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl', 'requirements-workspace-change.json'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+)?)(-text)?\.(log|md)|check-\d+(?:-attempt-\d+)?\.log)', path.name):
                 continue
             try:
                 files.append((path.stat().st_mtime, path.name))

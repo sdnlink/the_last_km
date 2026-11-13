@@ -197,6 +197,14 @@ class PublicationBudgetBoundaryTests(unittest.TestCase):
                     return real(cwd, ignore_dir=ignore_dir)
 
                 original_publish = None
+                prepare_checks = monitor._prepare_candidate_checks
+
+                def enter_checks(record):
+                    if boundary == 'fingerprint':
+                        clock.now = 10
+                    if boundary == 'stop-before-start':
+                        (monitor.run_dir/'control.json').write_text(json.dumps({'action':'stop'}))
+                    return prepare_checks(record)
 
                 def wrapped_publish(*args, **kwargs):
                     gate = kwargs.get('boundary')
@@ -218,6 +226,7 @@ class PublicationBudgetBoundaryTests(unittest.TestCase):
                 patches = [
                     patch('auto_moniter.supervisor.run_command', side_effect=counting),
                     patch('auto_moniter.supervisor.workspace_fingerprint', side_effect=fingerprint),
+                    patch.object(monitor, '_prepare_candidate_checks', side_effect=enter_checks),
                 ]
                 if boundary in {'prepare', 'transaction'}:
                     patches.append(patch('auto_moniter.publication.publish', side_effect=wrapped_publish))

@@ -115,7 +115,7 @@ def run_health(run_dir: Path, stale_after: float = 60, *, snapshot: dict | None 
     else:
         health = "active"
     phase = "preparing"
-    for token, name in [("paused", "paused"), ("recovering", "recovering"), ("acceptance check", "validating"), ("retrying", "retry_wait"), ("closing", "closing_agents"), ("review", "reviewing"), ("worker", "working")]:
+    for token, name in [("paused", "paused"), ("recovering", "recovering"), ("acceptance check", "validating"), ("publishing approved", "publishing"), ("retrying", "retry_wait"), ("closing", "closing_agents"), ("review", "reviewing"), ("worker", "working")]:
         if token in note.lower():
             phase = name
             break

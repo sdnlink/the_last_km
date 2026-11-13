@@ -77,7 +77,7 @@ class ReviewFirstTests(unittest.TestCase):
   reviewer=Reviewer('reviewer',[self.brief(),{'verdict':_verdict('done',evidence=['app.py'])}])
   worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
   result=Supervisor(RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',run_dir=self.root/'run',git_history='required',checks=['false'],retry_delay_s=0,max_rounds=1),log=lambda _:None).run()
-  self.assertEqual(result.status,'max_rounds');self.assertEqual(json.loads((self.root/'run/git-history.json').read_text())['head'],'')
+  self.assertEqual(result.status,'action_required');self.assertEqual(json.loads((self.root/'run/git-history.json').read_text())['head'],'')
  def test_legacy_checkpoint_cannot_be_silently_upgraded(self):
   w=ScriptedProvider('worker',[])
   s=Supervisor(RunConfig('task',self.root,w,no_review=True,run_dir=self.root/'run',git_history='off'),log=lambda _:None)

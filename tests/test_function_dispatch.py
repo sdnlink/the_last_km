@@ -151,7 +151,7 @@ class DispatchTests(unittest.TestCase):
                 validate_task(task('F1','app.py'),Path(directory),
                     {'main':{'acceptance':['Correct behavior']}},['git diff --check'],BRIEF)
 
-    def test_operator_appended_check_runs_on_saved_candidate_without_agent_calls(self):
+    def test_operator_appended_check_reuses_candidate_and_reviews_new_results(self):
         from console.tasks import TaskStore
         with tempfile.TemporaryDirectory() as directory:
             parent=Path(directory);root=parent/'project';root.mkdir()
@@ -170,12 +170,13 @@ class DispatchTests(unittest.TestCase):
             with patch.object(store,'_resume_args',return_value=['run','--resume']):
                 store.action(queued['id'],'checks',{'additional_checks':[added]})
             ready.touch()
-            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[result('F1','accepted',status='done')])
             report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
                 git_history='off',run_dir=root/'run',max_rounds=1,retry_delay_s=0),log=lambda _:None).run()
             self.assertEqual(report.status,'done',report.summary)
             self.assertEqual(checked.read_text(),'verified')
-            self.assertFalse(worker.calls or reviewer.calls)
+            self.assertFalse(worker.calls)
+            self.assertEqual(len(reviewer.calls),1)
             saved=json.loads((root/'run/state.json').read_text())
             self.assertEqual(saved['check_changes'][0]['added'],[added])
             self.assertEqual(saved['usage']['agent_calls'],3)
@@ -253,7 +254,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status,'action_required',report.summary)
             self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
             self.assertIn('missing: app.py',report.summary)
-            self.assertFalse((root/'run/001-check-01.log').exists())
+            self.assertTrue((root/'run/001-check-01.log').exists())
 
     def test_resume_after_evidence_rejection_preserves_the_worker_candidate(self):
         from auto_moniter.workspace import evidence_paths
@@ -282,7 +283,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(len(reviewer.calls),1)
             self.assertTrue((root/'run/001-check-01.log').exists())
 
-    def test_environment_repair_retries_checks_without_any_agent_call(self):
+    def test_environment_repair_reuses_worker_and_reviews_results_after_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             parent=Path(directory);root=parent/'project';root.mkdir();dependency=parent/'dependency-ready'
             check="test -f '"+str(dependency)+"' || exit 127"
@@ -294,17 +295,19 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status,'action_required',report.summary)
             state=json.loads((root/'run/state.json').read_text())
             original_calls=state['usage']['agent_calls']
-            self.assertIn('check_retry',state['rounds'][-1]['watcher_result'])
+            self.assertIn('candidate_checks',state['rounds'][-1]['watcher_result'])
+            self.assertEqual(state['rounds'][-1]['role'],'worker')
             dependency.touch()
-            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[result('F1','accepted',next_task=next_task)])
             report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
                 git_history='off',run_dir=root/'run',max_rounds=1,retry_delay_s=0),log=lambda _:None).run()
             self.assertEqual(report.status,'max_rounds',report.summary)
             state=json.loads((root/'run/state.json').read_text())
             self.assertEqual(state['function_tasks']['current']['id'],'F2')
             self.assertEqual(state['function_tasks']['accepted'][0]['task']['id'],'F1')
-            self.assertEqual(state['usage']['agent_calls'],original_calls)
-            self.assertFalse(worker.calls or reviewer.calls)
+            self.assertEqual(state['usage']['agent_calls'],original_calls+1)
+            self.assertFalse(worker.calls)
+            self.assertEqual(len(reviewer.calls),1)
 
     def test_changed_source_prevents_environment_review_reuse(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -320,7 +323,7 @@ class DispatchTests(unittest.TestCase):
                 git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
             self.assertEqual(report.status,'action_required',report.summary)
             self.assertEqual(len(worker.calls),1)
-            self.assertEqual(len(reviewer.calls),1)
+            self.assertEqual(len(reviewer.calls),0)
 
     def test_verification_closes_existing_implementation_without_edits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -381,7 +384,7 @@ class DispatchTests(unittest.TestCase):
             ledger=json.loads((root/'run/state.json').read_text())['function_tasks']
             self.assertEqual([item['task']['id'] for item in ledger['accepted']],['REPAIR'])
 
-    def test_final_verification_environment_retry_never_calls_models_again(self):
+    def test_final_verification_environment_retry_only_reviews_completed_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             parent=Path(directory);root=parent/'project';root.mkdir();dependency=parent/'ready'
             (root/'app.py').write_text('def parse_input(): return 42\n')
@@ -391,25 +394,28 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status,'action_required',report.summary)
             before=json.loads((root/'run/state.json').read_text())
             dependency.touch()
-            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+            worker=FunctionWorker('worker',[]);reviewer=ScriptedProvider('reviewer',[result('VERIFY','accepted',status='done')])
             report=Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
                 git_history='off',run_dir=root/'run',retry_delay_s=0),log=lambda _:None).run()
             self.assertEqual(report.status,'done',report.summary)
-            self.assertFalse(worker.calls or reviewer.calls)
+            self.assertFalse(worker.calls)
+            self.assertEqual(len(reviewer.calls),1)
             after=json.loads((root/'run/state.json').read_text())
-            self.assertEqual(after['usage']['agent_calls'],before['usage']['agent_calls'])
+            self.assertEqual(after['usage']['agent_calls'],before['usage']['agent_calls']+1)
 
     def test_new_human_direction_prevents_reusing_an_environment_review(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'}])
             reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted')])
-            self.run_monitor(root,worker,reviewer,checks=['exit 127'],max_rounds=1)
+            self.run_monitor(root,worker,reviewer,checks=['exit 1'],max_rounds=1)
             state=json.loads((root/'run/state.json').read_text())
             from auto_moniter.supervisor import _record_from_state
             monitor=Supervisor(RunConfig('',root,FunctionWorker('worker',[]),reviewer=ScriptedProvider('reviewer',[]),
                 workflow='review-first',run_dir=root/'run',resume=True),log=lambda _:None)
             monitor._load_resume()
+            monitor._records=[_record_from_state(item) for item in state['rounds']]
+            monitor.config.requirement=(root/'run/requirement.md').read_text().strip()
             record=_record_from_state(state['rounds'][-1])
             self.assertIsNotNone(monitor._check_retry_review(record))
             with patch.object(monitor,'_pending_directions',return_value=True):
@@ -463,7 +469,7 @@ class DispatchTests(unittest.TestCase):
             state=json.loads((root/'run/state.json').read_text())
             self.assertEqual([i['task']['id'] for i in state['function_tasks']['accepted']],['F1','F2'])
             self.assertTrue((root/'run/003-check-01.log').exists())
-            self.assertFalse((root/'run/001-check-01.log').exists())
+            self.assertTrue((root/'run/001-check-01.log').exists())
             self.assertEqual(state['function_tasks']['accepted'][0]['verification'], {'check:1':'002-check-01.log'})
 
     def test_missing_function_or_unaccepted_dependency_never_launches_worker(self):
@@ -523,7 +529,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status,'budget_exceeded',report.summary)
             saved=json.loads((root/'run/report.json').read_text())
             d=saved['delivery_diagnosis']
-            self.assertEqual(d['code'],'function_accepted_remaining_work_pending')
+            self.assertEqual(d['code'],'candidate_delivered_remaining_work_pending')
             self.assertEqual(d['current_function']['id'],'F2')
             self.assertEqual((d['worker']['task_id'],d['reviewer']['task_id']),('F1','F1'))
             self.assertEqual(d['last_call']['role'],'reviewer')
@@ -634,7 +640,7 @@ class DispatchTests(unittest.TestCase):
                     'test_app.py':'import unittest\nfrom app import parse_input\nclass Behavior(unittest.TestCase):\n def test_result(self): self.assertEqual(parse_input(),42)\n'}}])
             reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted')])
             report=self.run_monitor(root,worker,reviewer,max_rounds=1)
-            self.assertEqual(report.status,'max_rounds',report.summary)
+            self.assertEqual(report.status,'action_required',report.summary)
             saved=json.loads((root/'run/state.json').read_text())
             self.assertFalse(saved['function_tasks']['accepted'])
             self.assertEqual(saved['function_tasks']['current']['id'],'F1')
@@ -708,7 +714,7 @@ class DispatchTests(unittest.TestCase):
                 self.assertIn(reason, state['rounds'][-1]['watcher_result']['reasons'][0])
                 self.assertFalse((root/'run/001-check-01.log').exists())
 
-    def test_regression_failure_returns_to_same_assignment(self):
+    def test_regression_failure_requires_explicit_repair_before_same_assignment_runs_again(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             worker = FunctionWorker('worker', [
@@ -716,9 +722,21 @@ class DispatchTests(unittest.TestCase):
                 {**result('F1','done'), 'source': 'def parse_input():\n    return 42\n'}])
             reviewer = ScriptedProvider('reviewer', [plan(task('F1','app.py')),
                 result('F1','accepted'), result('F1','accepted',next_task=task('F2','next.py'))])
-            self.run_monitor(root, worker, reviewer, max_rounds=2,
+            report = self.run_monitor(root, worker, reviewer, max_rounds=2,
                 checks=["python3 -c 'from app import parse_input; assert parse_input() == 42'"])
-            self.assertIn('Acceptance check failed', worker.calls[1]['prompt'])
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            blocked = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(blocked['function_tasks']['current']['id'],'F1')
+            self.assertEqual(blocked['function_tasks']['accepted'],[])
+            # An explicit source repair invalidates the prior approval. Both
+            # implementation assessment and independent review must run again.
+            (root/'app.py').write_text('def parse_input():\n    return 42\n')
+            worker = FunctionWorker('worker',[{**result('F1','done'),'source':(root/'app.py').read_text()}])
+            reviewer = ScriptedProvider('reviewer',[result('F1','accepted',next_task=task('F2','next.py'))])
+            report = Supervisor(RunConfig('',root,worker,reviewer=reviewer,workflow='review-first',resume=True,
+                git_history='off',run_dir=root/'run',max_rounds=2,retry_delay_s=0),log=lambda _:None).run()
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,1))
             state = json.loads((root/'run/state.json').read_text())
             self.assertEqual(state['function_tasks']['current']['id'], 'F2')
             self.assertEqual(state['function_tasks']['accepted'][0]['verification'], {'check:1':'002-check-01.log'})
@@ -816,10 +834,17 @@ class IntegrationDispatchTests(unittest.TestCase):
         reviewer = ScriptedProvider('reviewer', [plan(self.assignment()), self.response('accepted'),
             self.response('accepted'), self.response('accepted'), self.response('accepted', next_task=next_task)])
         report = self.monitor(worker, reviewer, max_rounds=4).run()
-        self.assertEqual(report.status,'max_rounds',report.summary)
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(3,4))
         self.assertIn('assigned source file did not change: client.py',worker.calls[1]['prompt'])
         self.assertIn('Restore changes outside this assignment: third.py',worker.calls[2]['prompt'])
-        self.assertIn('Acceptance check failed',worker.calls[3]['prompt'])
+        self.assertEqual(self.state()['function_tasks']['accepted'],[])
+        self.assertEqual(self.state()['function_tasks']['current']['id'],'I1')
+        (self.root/'client.py').write_text(client)
+        worker = FunctionWorker('worker',[{**self.response('done'),'writes':{'client.py':client}}])
+        reviewer = ScriptedProvider('reviewer',[self.response('accepted',next_task=next_task)])
+        report = self.monitor(worker,reviewer,resume=True,max_rounds=4).run()
+        self.assertEqual(report.status,'max_rounds',report.summary)
         ledger = self.state()['function_tasks']
         self.assertEqual(ledger['current']['id'],'F2')
         self.assertEqual([a['task']['id'] for a in ledger['accepted']],['I1'])

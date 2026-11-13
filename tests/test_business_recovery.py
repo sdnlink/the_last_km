@@ -145,7 +145,13 @@ class BusinessRecoveryTests(unittest.TestCase):
         original = monitor._invoke
         def invoke(*args, **kwargs):
             self.assertFalse((self.run/'approval-ready.json').exists())
-            self.assertTrue(json.loads((self.run/'acceptance-results.json').read_text())['invalidated'])
+            checks=json.loads((self.run/'acceptance-results.json').read_text())
+            if kwargs['role']=='worker' or kwargs['index']==0:
+                self.assertTrue(checks['invalidated'])
+            else:
+                # Fresh input is checked before its reviewer is invoked.
+                self.assertTrue(checks['complete'])
+                self.assertFalse(checks.get('invalidated'))
             return original(*args, **kwargs)
         with patch.object(monitor, '_invoke', invoke):
             self.assertEqual(monitor.run().status, 'done')

@@ -33,9 +33,12 @@ test('requirements include summary, scope, criteria, assumptions, constraints an
   assert.equal(requirementReviewHTML({}),'');
   const nodes=Object.fromEntries(['#workflow-stages','#detail-live'].map(id=>[id,{innerHTML:'',dataset:{},querySelectorAll:()=>[]} ]));
   globalThis.document.querySelector=selector=>nodes[selector]||null;
-  renderWorkflow({id:'task',status:'action_required',health:{phase:'finished'},work:{workflow:[{role:'reviewer',round:0,kind:'message',text:'partial',truncated:true,text_file:'000-reviewer-text.md'}]}},{showRoles:false});
+  renderWorkflow({id:'task',workflow:'review-first',status:'action_required',health:{phase:'finished'},work:{workflow:[{role:'reviewer',round:0,kind:'message',text:'partial',truncated:true,text_file:'000-reviewer-text.md'}]}},{showRoles:false});
   assert.match(nodes['#detail-live'].innerHTML,/进度说明已截断/);
   assert.match(nodes['#detail-live'].innerHTML,/查看本轮完整输出/);
+  const stages=nodes['#workflow-stages'].innerHTML;
+  assert.ok(stages.indexOf('watcher 运行派单检查')<stages.indexOf('reviewer 审查'));
+  assert.ok(stages.indexOf('reviewer 审查')<stages.indexOf('watcher 提交已审核代码'));
  }finally{
   for(const [key,value] of Object.entries(original)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
  }

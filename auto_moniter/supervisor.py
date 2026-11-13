@@ -246,6 +246,7 @@ class Supervisor:
         self._planning_rejection = None
         self._check_changes = []
         self._last_invocation = {}
+        self._last_worker_invocation = {}
         self.project = None
         self._project_replan = False
         self._delivery_diagnosis = {}
@@ -2285,10 +2286,15 @@ class Supervisor:
             return self._function_baseline
         if snapshot is None:
             snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-        previous = self._last_invocation or {}
+        # Requirement reviews carry the pending task ID too. Only worker calls
+        # (including interrupted calls without a result) prohibit a new baseline.
+        started = any(call.get('role') == 'worker' and call.get('task_id') == task['id']
+                      for call in (self._last_worker_invocation, self._last_invocation))
+        started |= any(record.role == 'worker' and record.verdict.task_id == task['id']
+                       for record in self._records)
         self._function_baseline = function_gate.baseline(
             self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,
-            missing_ok=previous.get('task_id') != task['id'], historical_source=self._historical_function_source)
+            missing_ok=not started, historical_source=self._historical_function_source)
         return self._function_baseline
 
     def _historical_function_source(self, file, digest):
@@ -2778,6 +2784,7 @@ class Supervisor:
             "function_issue_ids": self._function_issue_ids,
             "planning_rejection": self._planning_rejection,
             "last_invocation": self._last_invocation,
+            "last_worker_invocation": self._last_worker_invocation,
             "delivery_diagnosis": self._delivery_diagnosis,
             "requirements_review": self.requirements_review,
             "requirement_cycles": self.requirement_cycles,
@@ -2907,6 +2914,18 @@ class Supervisor:
                 or any(not isinstance(x, str) or not re.fullmatch(r'AUD-[1-9][0-9]{0,11}', x) for x in self._function_issue_ids)):
             raise ValueError('Invalid saved function audit references')
         self._last_invocation = state.get('last_invocation') or {}
+        self._last_worker_invocation = state.get('last_worker_invocation') or {}
+        if not isinstance(self._last_worker_invocation, dict) or self._last_worker_invocation and (
+                self._last_worker_invocation.get('role') != 'worker'
+                or type(self._last_worker_invocation.get('round')) is not int
+                or self._last_worker_invocation['round'] < 1
+                or type(self._last_worker_invocation.get('call')) is not int
+                or self._last_worker_invocation['call'] < 1
+                or ('task_id' in self._last_worker_invocation
+                    and not function_tasks.identifier(self._last_worker_invocation['task_id']))):
+            raise ValueError('Invalid saved worker invocation')
+        if self._last_invocation.get('role') == 'worker':
+            self._last_worker_invocation = dict(self._last_invocation)
         if not isinstance(self._dispatch_directions, list) or any(not isinstance(x, str) for x in self._dispatch_directions):
             raise ValueError('Invalid saved function assignment directions')
         self.requirements_review=state.get('requirements_review',{})
@@ -3673,6 +3692,9 @@ class Supervisor:
         if self.function_tasks.current:
             self._last_invocation['task_id'] = self.function_tasks.current['id']
         state['last_invocation'] = self._last_invocation
+        if role == 'worker':
+            self._last_worker_invocation = dict(self._last_invocation)
+        state['last_worker_invocation'] = self._last_worker_invocation
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
         if self.requirements_review.get("status")=="ready" and not (role=='worker' and self.config.function_dispatch):

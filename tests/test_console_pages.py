@@ -75,18 +75,25 @@ class ConsolePageTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE_REQUIREMENT_CONTENT', text)
                 self.assertNotIn('__PAGE__', text)
 
-    def test_sidebar_groups_match_workflow_and_task_context_routes(self):
+    def test_sidebar_contains_global_pages_and_task_tabs_own_local_navigation(self):
         from console.pages import render_page
         home=render_page('overview','','',self.project).decode()
-        for label in ['任务管理','执行监督','系统配置','待启动','需处理','已验收','实时协作','资源与进程','Agent、模型与认证']:
+        for label in ['工作概览','开发任务','实时协作','资源监控','Agent 管理']:
             self.assertIn(label,home)
         self.assertNotIn('>当前任务<',home)
-        self.assertIn('href="/tasks?status=attention"',home)
+        sidebar=home.split('<nav id="primary-navigation"',1)[1].split('</nav>',1)[0]
+        self.assertNotIn('?status=',sidebar)
+        self.assertNotIn('data-nav-key="detail:',sidebar)
+        self.assertNotIn('id="new-task"',home)
         self.assertIn('data-create-task',home)
-        for section in ['home','requirements','conclusions','git','logs']:
+        for section in ['home','queue','requirements','conclusions','git','logs']:
             body=render_page('detail',self.task['id'],section,self.project).decode()
-            self.assertIn('>当前任务<',body)
-            for suffix in ['', '/requirements','/conclusions','/git','/logs']:
+            sidebar=body.split('<nav id="primary-navigation"',1)[1].split('</nav>',1)[0]
+            self.assertNotIn('/tasks/'+self.task['id'],sidebar)
+            self.assertEqual(body.count('id="detail-menu"'),1)
+            tabs=body.split('id="detail-menu"',1)[1].split('</nav>',1)[0]
+            self.assertEqual(tabs.count('aria-current="page"'),1)
+            for suffix in ['', '/queue', '/requirements','/conclusions','/git','/logs']:
                 self.assertIn(f'href="/tasks/{self.task["id"]}{suffix}"',body)
 
     def test_summary_and_resource_apis_never_read_transcripts_or_send_task_bodies(self):
@@ -104,9 +111,9 @@ class ConsolePageTests(unittest.TestCase):
                         self.assertNotIn('directions', task)
 
     def test_detail_menus_have_direct_routes_and_only_render_selected_content(self):
-        markers = {'conclusions': 'detail-conclusions', 'git': 'detail-git',
+        markers = {'queue':'detail-queue', 'conclusions': 'detail-conclusions', 'git': 'detail-git',
                    'requirements': 'detail-body', 'logs': 'log-output'}
-        titles = {'conclusions': '交互结论', 'git': 'Git 追溯',
+        titles = {'queue':'需求队列','conclusions': '交互结论', 'git': 'Git 追溯',
                   'requirements': '需求与验收信息', 'logs': '执行日志 · 原始输出'}
         status, home = self.get(f'/tasks/{self.task["id"]}')
         self.assertEqual(status, 200)
@@ -124,8 +131,9 @@ class ConsolePageTests(unittest.TestCase):
                 self.assertFalse((set(markers.values()) - {marker}) & ids)
                 self.assertIn(f'data-section="{section}"', body)
                 self.assertIn(f'<title>{titles[section]} · Auto Moniter 开发控制台</title>', body)
-                self.assertIn(f'href="/tasks/{self.task["id"]}">← 返回任务详情</a>', body)
-                self.assertFalse({'detail-menu', 'role-details', 'workflow-stages', 'detail-live'} & ids)
+                self.assertIn('href="/tasks">← 返回开发任务</a>', body)
+                self.assertIn('detail-menu',ids)
+                self.assertFalse({'role-details', 'workflow-stages', 'detail-live'} & ids)
                 self.assertNotIn('PRIVATE_RAW_LOG_CONTENT', body)
                 self.assertNotIn('<!-- DETAIL_', body)
         for suffix in ('missing', 'logs/extra', '../logs'):

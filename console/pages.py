@@ -15,6 +15,7 @@ PAGES = {
     'setup': ('初始化 / Agent 管理', '选择执行器、安装 CLI，并配置模型和认证。'),
 }
 DETAIL_SECTIONS = {
+    'queue': ('需求队列', '查看当前需求、等待处理的需求及其执行顺序。'),
     'conclusions': ('交互结论', '按轮次查看 worker 执行结论与 reviewer 审查结论。'),
     'git': ('Git 追溯', '查看项目提交、改动与审计记录。'),
     'requirements': ('需求与验收信息', '查看原始需求、完成标准、验收结果与审计问题。'),
@@ -28,32 +29,13 @@ def navigation(page, task_id, section):
         return (f'<a class="nav-item" href="{href}" data-nav-key="{key}" title="{label}">'
                 f'<svg aria-hidden="true"><use href="#i-{icon}"/></svg><span>{label}</span>{badge}</a>')
 
-    def group(label, links):
-        return f'<details class="nav-group" open><summary>{label}</summary><div class="nav-children">{links}</div></details>'
-
-    tasks = ''.join(link('/tasks' + query, label, icon, 'tasks:' + key, count=key == 'all')
-                    for key, query, label, icon in [
-                        ('all', '', '全部任务', 'task'),
-                        ('queued', '?status=queued', '待启动', 'clock'),
-                        ('active', '?status=active', '运行中', 'terminal'),
-                        ('paused', '?status=paused', '已暂停', 'clock'),
-                        ('attention', '?status=attention', '需处理', 'x'),
-                        ('done', '?status=done', '已验收', 'check')])
-    current = ''
-    if page == 'detail':
-        current = group('当前任务', ''.join(
-            link(f'/tasks/{task_id}' + suffix, label, icon, 'detail:' + key)
-            for key, suffix, label, icon in [
-                ('home', '', '执行与协作', 'terminal'),
-                ('requirements', '/requirements', '需求与验收', 'task'),
-                ('conclusions', '/conclusions', '实现与审核结论', 'check'),
-                ('git', '/git', '交付与 Git 记录', 'folder'),
-                ('logs', '/logs', '执行日志', 'server')]))
-    return (link('/overview', '工作概览', 'grid', 'overview')
-            + group('任务管理', tasks) + current
-            + group('执行监督', link('/progress', '实时协作', 'terminal', 'progress')
-                    + link('/resources', '资源与进程', 'server', 'resources'))
-            + group('系统配置', link('/setup', 'Agent、模型与认证', 'chip', 'setup')))
+    return ('<div class="nav-section"><p>工作空间</p>'
+            + link('/overview', '工作概览', 'grid', 'overview')
+            + link('/tasks', '开发任务', 'task', 'tasks', count=True)
+            + link('/progress', '实时协作', 'terminal', 'progress')
+            + link('/resources', '资源监控', 'server', 'resources') + '</div>'
+            + '<div class="nav-section"><p>配置</p>'
+            + link('/setup', 'Agent 管理', 'chip', 'setup') + '</div>')
 
 
 def page_route(path: str) -> tuple[str, str, str] | None:
@@ -61,7 +43,7 @@ def page_route(path: str) -> tuple[str, str, str] | None:
         return 'overview', '', ''
     if path.strip('/') in PAGES and path.count('/') == 1 and path != '/detail':
         return path[1:], '', ''
-    match = re.fullmatch(r'/tasks/([0-9a-f]{32}|ext-[0-9a-f]{20})(?:/(conclusions|git|requirements|logs))?', path)
+    match = re.fullmatch(r'/tasks/([0-9a-f]{32}|ext-[0-9a-f]{20})(?:/(queue|conclusions|git|requirements|logs))?', path)
     return ('detail', match[1], match[2] or 'home') if match else None
 
 
@@ -69,28 +51,23 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
     shell = (STATIC / 'index.html').read_text()
     content = (STATIC / 'pages' / (page + '.html')).read_text()
     title, subtitle = PAGES[page]
-    page_menu = ''
-    heading_class = ''
     if page == 'detail':
         section_content = (STATIC / 'pages' / f'detail-{section}.html').read_text()
-        if section == 'home':
-            icons = {'conclusions': 'terminal', 'git': 'folder', 'requirements': 'task', 'logs': 'server'}
-            page_menu = '<nav id="detail-menu" class="detail-menu" aria-label="任务详情菜单">' + ''.join(
-                f'<a href="/tasks/{task_id}/{key}" title="{description}"><svg aria-hidden="true"><use href="#i-{icons[key]}"/></svg>'
-                f'<span>{label}</span></a>'
-                for key, (label, description) in DETAIL_SECTIONS.items()) + '</nav>'
-            heading_class = 'detail-heading-with-menu'
-            back = '<a class="detail-back" href="/tasks">← 返回开发任务</a>'
-        else:
+        if section != 'home':
             title, subtitle = DETAIL_SECTIONS[section]
-            back = f'<a class="detail-back" href="/tasks/{task_id}">← 返回任务详情</a>'
-        content = content.replace('<!-- DETAIL_BACK -->', back).replace('<!-- DETAIL_CONTENT -->', section_content)
+        tabs = '<nav id="detail-menu" class="task-tabs" aria-label="当前任务内容">' + ''.join(
+            f'<a href="/tasks/{task_id}{suffix}"' + (' class="active" aria-current="page"' if key == section else '')
+            + f'>{label}</a>' for key, suffix, label in [
+                ('home', '', '概览'), ('queue', '/queue', '需求队列'), ('conclusions', '/conclusions', '交互结论'),
+                ('git', '/git', 'Git 记录'), ('requirements', '/requirements', '需求与验收'),
+                ('logs', '/logs', '原始日志')]) + '</nav>'
+        content = (content.replace('<!-- DETAIL_BACK -->', '<a class="detail-back" href="/tasks">← 返回开发任务</a>')
+                   .replace('<!-- DETAIL_TABS -->', tabs).replace('<!-- DETAIL_CONTENT -->', section_content))
     styles = [page]
     if page in {'detail', 'progress'}:
         styles.insert(0, 'work')
     replacements = {'<!-- PAGE_CONTENT -->': content,
                     '<!-- SIDE_NAVIGATION -->': navigation(page, task_id, section),
-                    '<!-- PAGE_MENU -->': page_menu, '__PAGE_HEADING_CLASS__': heading_class,
                     '<!-- PAGE_STYLES -->': '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles),
                     '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,
                     '__NEEDS_SETUP__': 'true' if needs_setup else 'false',
@@ -101,14 +78,14 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
 
 
 def asset(path: str) -> tuple[Path, str] | None:
-    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'style.css', 'dialogs.css', 'favicon.svg'}
+    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'requirement-queue.js', 'style.css', 'dialogs.css', 'favicon.svg'}
     name = path.removeprefix('/')
     allowed = name in common
     if name.startswith('pages/'):
         base, dot, extension = name[6:].partition('.')
         allowed = base in {*PAGES, 'work'} and extension in {'js', 'css'} and bool(dot)
     if name.startswith('fragments/'):
-        allowed = name[10:] in {'create.html', 'direction.html', 'confirm.html', 'git.html', 'resume.html', 'delete.html', 'roles.html'}
+        allowed = name[10:] in {'create.html', 'direction.html', 'requirement-queue.html', 'confirm.html', 'git.html', 'resume.html', 'delete.html', 'roles.html'}
     target = STATIC / name
     if not allowed or not target.is_file():
         return None

@@ -8,7 +8,8 @@ let task,role='all',log='',logSequence=0,logTotal=0;
 function render(t){
  task=t;$('#detail-title').textContent=t.title;$('#detail-project').textContent=t.project_cwd||t.cwd;
  $('#detail-open-direction').dataset.direction=id;$('#detail-open-direction').disabled=!t.can_direct;
- $('#detail-progress-link').href=`/progress?task=${id}`;
+ $('#detail-open-requirement-queue').dataset.requirementQueue=id;
+ $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
  if(section==='home')renderWorkflow(t,{role});
  if(section==='conclusions')renderConclusions(t,{groupByRound:true});
@@ -81,5 +82,14 @@ export function mount(){
  document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;resetPage('workflow');if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:'smooth',block:'start'});});
  $('#log-select')?.addEventListener('change',e=>{log=e.target.value;resetPage('logs');logTotal=0;loadLogs().catch(e=>toast(e.message,true));});
  $('#log-follow')?.addEventListener('change',()=>loadLogs().catch(e=>toast(e.message,true)));
- watch(async()=>{render(await api(`/api/tasks/${id}`));if(section==='logs')await loadLogs();});
+ watch(async()=>{
+  const queueJob=section==='queue'?api(`/api/tasks/${id}/requirement-queue`).catch(error=>({error:error.message})):null;
+  render(await api(`/api/tasks/${id}`));
+  if(queueJob){
+   const value=await queueJob;
+   if(value.error){$('#detail-queue').textContent=`需求队列读取失败：${value.error}`;$('#queue-count').textContent='—';}
+   else {const {requirementQueueMarkup}=await import('/requirement-queue.js');stableHTML($('#detail-queue'),requirementQueueMarkup(value));$('#queue-count').textContent=`${value.waiting.length} 条等待`;}
+  }
+  if(section==='logs')await loadLogs();
+ });
 }

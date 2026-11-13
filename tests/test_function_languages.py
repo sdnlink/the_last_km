@@ -58,6 +58,33 @@ struct Service { func run() -> Int { return 123 }; func other() -> Int { return 
 @unittest.skipUnless(importlib.util.find_spec('tree_sitter_language_pack'),
                      'Install auto-moniter[languages] to verify optional grammar rules')
 class LanguageScopeTests(unittest.TestCase):
+    def test_rust_raw_identifier_reference_keeps_exact_scope_and_outside_changes(self):
+        source = '// 中文 😀\nfn consume(_: &str) {}\nfn run() { let raw = "input"; consume(&raw); }\nfn other() { let raw = "other"; consume(&raw); }\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sample.rs'
+            path.write_text(source)
+            original = target_state(path, 'run')
+            self.assertIsNotNone(original['body'])
+            path.write_text(source.replace('"input"', '"updated"'))
+            inside = target_state(path, 'run')
+            self.assertNotEqual(original['body'], inside['body'])
+            self.assertEqual(original['outside'], inside['outside'])
+            path.write_text(source.replace('"other"', '"changed"'))
+            outside = target_state(path, 'run')
+            self.assertEqual(original['body'], outside['body'])
+            self.assertNotEqual(original['outside'], outside['outside'])
+
+    def test_rust_reference_fallback_does_not_accept_real_syntax_errors(self):
+        sources = ['fn run() { let raw = "x"; consume(&raw); }\nfn broken( {',
+                   'fn run() { let x = &raw const; }', 'fn run() { consume(&raw unexpected); }']
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sample.rs'
+            for source in sources:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    with self.assertRaisesRegex(ValueError, 'Cannot parse valid Rust.*line'):
+                        target_state(path, 'run')
+
     def test_every_registered_language_preserves_outside_code(self):
         self.assertEqual(set(SAMPLES), set(function_languages.RULES))
         with tempfile.TemporaryDirectory() as directory:

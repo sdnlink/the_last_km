@@ -5,14 +5,19 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import secrets
+import signal
 import sys
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from auto_moniter.redaction import redact
+from auto_moniter.processes import process_identity
+from auto_moniter.storage import write_json
 from console.tasks import TaskError, TaskStore
 from console.pages import page_route, render_page, asset
 
@@ -89,6 +94,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._json(self.server.store.logs(parts[2], name, page, size))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
+                elif len(parts) == 4 and parts[3] == 'requirement-queue':
+                    self._json(self.server.store.queued_requirements(parts[2]))
                 elif len(parts) == 5 and parts[3] == 'git':
                     self._json(self.server.store.git_record(parts[2], parts[4]))
                 elif len(parts) == 3:
@@ -134,6 +141,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise TaskError('接口不存在', 404)
                 if parts[3] == 'directions':
                     self._json(self.server.store.add_direction(parts[2], data), 201)
+                elif parts[3] == 'requirement-queue':
+                    self._json(self.server.store.queued_requirements(parts[2], data), 201)
                 else:
                     self._json(self.server.store.action(parts[2], parts[3], data))
         except (BrokenPipeError, ConnectionResetError):
@@ -154,12 +163,17 @@ class Handler(BaseHTTPRequestHandler):
             super().log_message(format, *args)
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='auto-moniter 本地 Web 控制台（无需额外依赖）')
     parser.add_argument('--port', type=int, default=8765, help='监听端口，默认 8765')
     parser.add_argument('--cwd', type=Path, default=Path.cwd(), help='新建任务的默认项目目录')
     parser.add_argument('--data-dir', type=Path, help='任务定义和运行记录目录，默认 <cwd>/.auto-moniter/console')
     parser.add_argument('--runs-dir', type=Path, action='append', default=[], help='额外扫描的已有运行目录，可重复指定')
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     cwd = args.cwd.expanduser().resolve()
     if not cwd.is_dir() or not 0 <= args.port <= 65535:
@@ -177,9 +191,24 @@ def main(argv=None) -> int:
         store.refresh_agents()
         try:
             with ConsoleServer(('127.0.0.1', args.port), store) as server:
-                print(f'控制台已启动：http://127.0.0.1:{server.server_address[1]}', flush=True)
-                print(f'任务数据：{data_dir}', flush=True)
-                server.serve_forever(poll_interval=0.5)
+                port = server.server_address[1]
+                process_file = data_dir / 'console-process.json'
+                write_json(process_file, {'identity': process_identity(os.getpid()), 'port': port,
+                           'cwd': str(cwd), 'data_dir': str(data_dir),
+                           'runs_dirs': [str(path.expanduser().resolve()) for path in args.runs_dir]}, durable=True)
+                # Finish any current dispatch before shutting down the HTTP loop.
+                previous_term = None
+                if threading.current_thread() is threading.main_thread():
+                    previous_term = signal.signal(signal.SIGTERM, lambda *_:
+                        threading.Thread(target=server.shutdown, daemon=True).start())
+                try:
+                    print(f'控制台已启动：http://127.0.0.1:{port}', flush=True)
+                    print(f'任务数据：{data_dir}', flush=True)
+                    server.serve_forever(poll_interval=0.5)
+                finally:
+                    if previous_term is not None:
+                        signal.signal(signal.SIGTERM, previous_term)
+                    process_file.unlink(missing_ok=True)
         except KeyboardInterrupt:
             print('\n控制台已关闭，已启动的任务继续执行。')
         except OSError as exc:

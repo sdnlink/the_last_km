@@ -136,13 +136,39 @@ def _swift_conditional_tree(engine, data, tree):
     return engine.parse(bytes(masked))
 
 
+def _rust_reference_tree(engine, data, tree):
+    # The pinned grammar interprets `&raw)` as an unfinished raw-pointer
+    # expression, although `raw` is a legal identifier. Mask only this exact
+    # error in reference-expression positions, retaining every byte offset.
+    masked = bytearray(data)
+    changed = False
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if (node.type == 'ERROR' and re.fullmatch(rb'&\s*raw', node.text)
+                and data[node.end_byte:].lstrip().startswith((b')', b',', b';', b']', b'}', b'.', b'?'))):
+            masked[node.end_byte - 3:node.end_byte] = b'r_w'
+            changed = True
+        stack.extend(node.named_children)
+    return engine.parse(bytes(masked)) if changed else tree
+
+
 def spans(source, symbol, name):
     data = source.encode()
     engine = parser(name)
     tree = engine.parse(data)
+    if name == 'rust' and tree.root_node.has_error:
+        tree = _rust_reference_tree(engine, data, tree)
     if name == 'swift' and tree.root_node.has_error:
         tree = _swift_conditional_tree(engine, data, tree)
     if tree.root_node.has_error:
+        stack = [tree.root_node]
+        while stack:
+            node = stack.pop()
+            if node.type == 'ERROR' or node.is_missing:
+                raise ValueError(f'Cannot parse valid {RULES[name].label} source for function scope verification '
+                                 f'at line {node.start_point.row + 1}, column {node.start_point.column + 1}')
+            stack.extend(reversed(node.children))
         raise ValueError(f'Cannot parse valid {RULES[name].label} source for function scope verification')
     wanted = _names(symbol)
     rule = RULES[name]

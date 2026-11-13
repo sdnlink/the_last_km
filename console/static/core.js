@@ -67,11 +67,11 @@ export async function runAction(id, action) {
   finally{pending.delete(id);$$(`[data-action][data-id="${id}"]`).forEach(el=>el.disabled=false);}
 }
 export function selectNavigation(page, filter='all', section='home') {
-  const selected=page==='detail'?`detail:${section}`:page==='tasks'?`tasks:${filter}`:page;
+  const selected=page==='detail'?'tasks':page;
   $$('[data-nav-key]').forEach(el=>{
     const current=el.dataset.navKey===selected;
     el.classList.toggle('active',current);
-    if(current){el.setAttribute('aria-current','page');const group=el.closest('.nav-group');if(group)group.open=true;}
+    if(current)el.setAttribute('aria-current','page');
     else el.removeAttribute('aria-current');
   });
 }
@@ -96,6 +96,7 @@ export function initialize() {
     const gitRecord=e.target.closest('[data-git-record]');if(gitRecord){(await import('./dialogs.js')).openGitRecord(gitRecord.dataset.id,gitRecord.dataset.gitRecord);return;}
     const action=e.target.closest('[data-action]');if(action){if(action.dataset.action==='roles'){(await import('./dialogs.js')).openRoles(action.dataset.id);}else if(action.dataset.action==='delete'){(await import('./dialogs.js')).confirmDelete(action.dataset.id);}else if(action.dataset.action==='stop'){(await import('./dialogs.js')).confirmStop(action.dataset.id);}else if(['resume','checks'].includes(action.dataset.action)){(await import('./dialogs.js')).openResume(action.dataset.id);}else runAction(action.dataset.id,action.dataset.action);return;}
     const direction=e.target.closest('[data-direction]');if(direction){(await import('./dialogs.js')).openDirection(direction.dataset.direction);return;}
+    const requirementQueue=e.target.closest('[data-requirement-queue]');if(requirementQueue){(await import('./requirement-queue.js')).openRequirementQueue(requirementQueue.dataset.requirementQueue);return;}
     if(e.target.closest('#new-task,#empty-create,[data-create-task]')){(await import('./dialogs.js')).openCreate();return;}
     const page=e.target.closest('[data-page]');if(page&&page!==document.body){location.assign('/'+page.dataset.page);return;}
     const row=e.target.closest('[data-task-url]');if(row&&!e.target.closest('a,button,input,select'))location.assign(row.dataset.taskUrl);

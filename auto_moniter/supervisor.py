@@ -68,6 +68,7 @@ from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
+from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 
 
 LogFn = Callable[[str], None]
@@ -272,6 +273,8 @@ class Supervisor:
         self.meter = UsageMeter()
         self.requirements_review = {}
         self.requirement_cycles = []
+        self.requirement_queue = RequirementQueue(self.run_dir)
+        self.active_queued_requirement = None
         self._business_update_count = 0
         self._business_input = {}
 
@@ -1301,45 +1304,25 @@ class Supervisor:
             raise ProjectInputsChanged('Final project inputs need fresh review')
 
     def _begin_follow_up(self, records, review, review_record=None):
-        """Start another reviewed requirement only when the saved request asks for one.
+        """Start an explicitly queued requirement or an authorized automatic follow-up.
 
         A jointly accepted requirement still finishes the run unless the original
-        request asks to continue with the next requirement elaboration. Repair
+        request asks to continue, or the person queued a concrete requirement. Repair
         rounds are not follow-ups: open audit issues stay with the worker.
         """
-        if not requirements_review.requests_follow_up(self.config.requirement):
+        queued = self.requirement_queue.snapshot(self._requirement_queue_state())['waiting']
+        if not queued and not requirements_review.requests_follow_up(self.config.requirement):
             return False
         if self.audit.pending():
             return False
         if self._pending_directions():
             return False
         self._close_follow_up_sessions()
-        handoff = {
-            'cycle': len(self.requirement_cycles) + 1,
-            'round': review_record.index if review_record is not None else next((record.index for record in reversed(records) if record.role == 'reviewer'), 0),
-            'tree': self._delivery_tree,
-            'commit': (self.git_history.last_business_commit or {}).get('commit', '') if self.git_history else '',
-            'ref': (self.git_history.business_head or {}).get('ref', '') if getattr(self.git_history, 'business_commits', False) else (self.git_history.ref if self.git_history else ''),
-            'summary': review.summary,
-            'evidence': list(review.evidence[:4]),
-            'acceptance': self.config.acceptance,
-            'modules': self.modules.export(),
-        }
-        self.requirement_cycles.append({
-            'index': handoff['cycle'],
-            'status': 'committed',
-            'requirements_review': self.requirements_review,
-            'handoff': handoff,
-        })
-        self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
-        self.requirements_review = {}
-        self.worker_session_id = ''
-        self.reviewer_session_id = ''
-        self._active_reviewer_id = ''
-        self._drop_worker_session = False
-        self._audit_feedback = None
-        self._review_feedback = None
-        self._write_state(records, 'running', 0, '', self._delivery_tree)
+        with self.directions.lock():
+            queued = self.requirement_queue.snapshot(self._requirement_queue_state())['waiting']
+            if not queued and not requirements_review.requests_follow_up(self.config.requirement):
+                return False
+            self._save_requirement_handoff(records, review, review_record, queued[0] if queued else None)
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
             self._stop = True
             self._stop_reason = 'Next requirement not ready: requirement cycle limit reached; committed work saved. Start a new run to continue.'
@@ -1355,6 +1338,43 @@ class Supervisor:
             self._stop_reason = self._stop_reason or 'Next requirement review stopped before it was ready'
             return True
         return True
+
+    def _requirement_queue_state(self):
+        return {'requirement_cycles': self.requirement_cycles,
+                'active_queued_requirement': self.active_queued_requirement, 'status': 'running'}
+
+    def _save_requirement_handoff(self, records, review, review_record, next_queued):
+        handoff = {
+            'cycle': len(self.requirement_cycles) + 1,
+            'round': review_record.index if review_record is not None else next((record.index for record in reversed(records) if record.role == 'reviewer'), 0),
+            'tree': self._delivery_tree,
+            'commit': (self.git_history.last_business_commit or {}).get('commit', '') if self.git_history else '',
+            'ref': (self.git_history.business_head or {}).get('ref', '') if getattr(self.git_history, 'business_commits', False) else (self.git_history.ref if self.git_history else ''),
+            'summary': review.summary,
+            'evidence': list(review.evidence[:4]),
+            'acceptance': self.config.acceptance,
+            'modules': self.modules.export(),
+        }
+        if self.active_queued_requirement or next_queued:
+            handoff['queued_requirement'] = self.active_queued_requirement
+            handoff['next_queued_requirement'] = next_queued['id'] if next_queued else None
+        self.requirement_cycles.append({
+            'index': handoff['cycle'],
+            'status': 'committed',
+            'requirements_review': self.requirements_review,
+            'handoff': handoff,
+        })
+        self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
+        self.requirements_review = {}
+        self.active_queued_requirement = ({key: next_queued[key] for key in ('id', 'text', 'at')}
+                                          if next_queued else None)
+        self.worker_session_id = ''
+        self.reviewer_session_id = ''
+        self._active_reviewer_id = ''
+        self._drop_worker_session = False
+        self._audit_feedback = None
+        self._review_feedback = None
+        self._write_state(records, 'running', 0, '', self._delivery_tree)
 
     def _close_follow_up_sessions(self):
         errors = self._close_delivered_sessions()
@@ -1482,7 +1502,7 @@ class Supervisor:
             if self._stop:
                 return False
             prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None,
-                                                continuation=continuation)
+                                                continuation=continuation, queued_requirement=self.active_queued_requirement)
             if self.config.function_dispatch:
                 prompt += ('\n\n'+function_tasks.IDENTIFIER_CONTRACT+
                            'You own function decomposition. Propose exactly one next_task, normally for a single named function, '
@@ -2638,6 +2658,8 @@ class Supervisor:
                        verdict: Verdict | None) -> RunReport:
         if status == 'done' and self._pending_directions():
             status, summary = 'action_required', 'New human instructions arrived during delivery. Resume to implement them.'
+        if status == 'done' and self.requirement_queue.snapshot(self._requirement_queue_state())['waiting']:
+            status, summary = 'action_required', 'A queued requirement arrived during final delivery. Resume to continue the saved requirement queue.'
         self._prune_history(records)
         if status != "done":
             errors = self._stop_external_agent()
@@ -2788,6 +2810,8 @@ class Supervisor:
             "delivery_diagnosis": self._delivery_diagnosis,
             "requirements_review": self.requirements_review,
             "requirement_cycles": self.requirement_cycles,
+            "active_queued_requirement": self.active_queued_requirement,
+            "requirement_queue_version": 1,
             "quality_policy": self.config.quality_policy,
             "quality_state": self.quality.state,
             "acceptance_baseline_paths": list(self.quality.protected(self.config.cwd)),
@@ -2932,6 +2956,8 @@ class Supervisor:
         if not isinstance(self.requirements_review,dict):
             raise ValueError('Invalid saved requirement elaboration')
         self.requirement_cycles = _restore_requirement_cycles(state.get('requirement_cycles', []))
+        self.active_queued_requirement = state.get('active_queued_requirement') or None
+        self.requirement_queue.snapshot(self._requirement_queue_state())
         # read_text normalizes CRLF, which would invalidate legacy hashes made
         # from the original Web form text. Validate exact saved bytes as well as
         # the canonical newline representation; never trust incoming replacement text.
@@ -2941,7 +2967,10 @@ class Supervisor:
             hashes = {hashlib.sha256(original.encode()).hexdigest(), requirements_review.requirement_hash(original)}
             if self.requirements_review.get('original_sha256') not in hashes:
                 raise ValueError('Requirement elaboration belongs to another original request')
-        if self.requirement_cycles and not requirements_review.requests_follow_up(original):
+        queue_ids = {item['id'] for item in self.requirement_queue.items()}
+        if (self.requirement_cycles and not requirements_review.requests_follow_up(original)
+                and any(cycle['handoff'].get('next_queued_requirement') not in queue_ids
+                        for cycle in self.requirement_cycles)):
             raise ValueError('Saved follow-up cycles do not belong to this requirement')
         if not isinstance(saved_policy, dict):
             raise ValueError('Invalid saved quality policy')
@@ -3726,6 +3755,8 @@ class Supervisor:
                        'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')
         messages = self.directions.messages()
+        if role != 'worker' or not self.config.function_dispatch:
+            prompt += queued_requirement_prompt(self.active_queued_requirement)
         if self.project:
             prompt += ('\n\nParallel project coordination (watcher-owned task boundary):\n'
                        +json.dumps(self.project.context(),ensure_ascii=False)

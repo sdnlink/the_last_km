@@ -121,6 +121,8 @@ Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-mo
   --data-dir ~/.local/state/auto-moniter-console
 ```
 
+Run `./restart.sh` to restart the console in the background, or start it if it is stopped. For a custom instance, pass the same `--cwd` / `--data-dir`. Existing port and extra scan directories are retained unless overridden. Running tasks continue and task records and queue order are preserved. The script prints the service URL and log path; refresh the browser after it finishes. See the [console guide](console/README.md).
+
 1. Configure the worker and reviewer in **Agent 管理**.
 2. Create a task with the project path, requirements, and completion criteria.
 3. Scan the project's checks, select the relevant ones, and check their prerequisites. Add custom acceptance commands when needed.
@@ -130,6 +132,8 @@ Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-mo
 The default flow reviews requirements before implementation. Select executable acceptance to run checks, semantic review for review without test execution, or planning to prepare an acceptance plan as a separate task. Function dispatch requires a runnable test plan, which the reviewer can supply without user-written commands.
 
 Use **补充要求 / 调整方向** to update a task. For a resumable stopped task, sending the amendment also attempts to resume execution. Previously saved amendments can be sent with an empty input field. If a budget is exhausted, use the recovery window to increase it explicitly.
+
+Use **追加排队需求** in task details to queue follow-up requirements within the same run. Insert at the tail, head, or before another waiting requirement. The next requirement is reviewed and executed only after the current one passes independent review and watcher acceptance. Pending requests do not enter the current worker prompt. Pause controls, cumulative budgets and recovery remain in effect. Global pages live in the sidebar; task sections use one local tab bar. See the [console guide](console/README.md).
 
 The console listens on loopback. To access a remote instance, open an SSH tunnel:
 

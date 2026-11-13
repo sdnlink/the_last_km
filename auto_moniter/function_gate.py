@@ -171,7 +171,10 @@ def source_state(path, symbol, source):
         spans = _js_spans(source, symbol, suffix in {'.html', '.htm'})
     elif suffix in GRAMMARS:
         resolved = _rust_file_symbol(path, symbol) if suffix == '.rs' else symbol
-        spans = language_spans(source, resolved, GRAMMARS[suffix])
+        try:
+            spans = language_spans(source, resolved, GRAMMARS[suffix])
+        except ValueError as exc:
+            raise ValueError(f'{exc} ({path})') from exc
     else:
         raise ValueError('Function scope verification does not support: ' + suffix)
     if len(spans) > 1:

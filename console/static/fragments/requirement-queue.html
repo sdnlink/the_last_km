@@ -1,0 +1,16 @@
+<dialog id="requirement-queue-dialog" class="direction-dialog">
+  <form id="requirement-queue-form">
+    <div class="dialog-heading"><div><span class="eyebrow">REQUIREMENT QUEUE</span><h2>追加排队需求</h2><p id="requirement-queue-title"></p></div><button type="button" class="icon-button" data-close="requirement-queue-dialog" aria-label="关闭"><svg><use href="#i-x" /></svg></button></div>
+    <div class="form-body">
+      <p id="requirement-queue-notice" role="status">正在读取需求队列…</p>
+      <div id="requirement-queue-current"></div>
+      <section aria-labelledby="requirement-queue-waiting-title"><h3 id="requirement-queue-waiting-title">等待处理</h3><div id="requirement-queue-waiting" class="requirement-queue-list"></div></section>
+      <details><summary id="requirement-queue-completed-title">已验收的后续需求</summary><div id="requirement-queue-completed" class="requirement-queue-list"></div></details>
+      <label>追加的新需求<textarea id="requirement-queue-text" rows="4" maxlength="4000" required placeholder="当前需求验收完成后，再处理这条需求。"></textarea></label>
+      <label>插队位置<select id="requirement-queue-position"><option value="last">队尾（默认）</option><option value="first">队首（当前需求之后）</option></select></label>
+      <p class="form-hint">插队只改变等待顺序，不打断当前需求。每条需求均需独立审核和验收；暂停、停止及累计预算继续生效。</p>
+      <div id="requirement-queue-error" class="form-error" role="alert" hidden></div>
+    </div>
+    <div class="dialog-footer"><button type="button" class="button secondary" data-close="requirement-queue-dialog">关闭</button><button type="submit" class="button primary" id="requirement-queue-submit" disabled>追加到需求队列</button></div>
+  </form>
+</dialog>

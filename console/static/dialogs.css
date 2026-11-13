@@ -180,3 +180,9 @@
 .acceptance-option pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; }
 .acceptance-guide details { min-width:0; }
 .acceptance-guide summary { cursor:pointer; font-size:12px; }
+.direction-dialog .requirement-queue-list { max-height:260px; overflow:auto; }
+.requirement-queue-list article { padding:12px 0; border-top:1px solid var(--line); }
+.requirement-queue-list article > div { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.requirement-queue-list p, .queued-current p { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.7; }
+.queued-current p { max-height:180px; overflow:auto; }
+.queued-current summary { cursor:pointer; font-size:13px; color:var(--accent); }

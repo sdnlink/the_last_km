@@ -71,7 +71,7 @@ def requests_follow_up(text):
     return authorized
 
 
-def prompt(config, modules, *, follow_up=None, continuation=None):
+def prompt(config, modules, *, follow_up=None, continuation=None, queued_requirement=None):
     opening = ('You are the independent requirement reviewer continuing a saved review. Do not restart a full repository review. '
                'Reuse the previous analysis and inspect only the reported rejection, unresolved blockers, new human '
                'directions, changed files and their affected dependencies. Repair the pending assignment or select '
@@ -91,16 +91,24 @@ def prompt(config, modules, *, follow_up=None, continuation=None):
             'rather than treating unrelated existing tests or diff formatting as proof of new functionality. '
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
-            + _follow_up_block(follow_up) +
+            + _follow_up_block(follow_up, queued_requirement) +
             ('Saved requirement analysis and input changes (context, not approval):\n'
              +json.dumps(continuation,ensure_ascii=False)+'\n\n' if continuation else '') +
             'Original request:\n'+config.requirement+'\n\nHuman acceptance criteria:\n'+config.acceptance+
             '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(config.checks,ensure_ascii=False))
 
 
-def _follow_up_block(follow_up):
+def _follow_up_block(follow_up, queued_requirement=None):
     if not follow_up:
         return ''
+    if queued_requirement:
+        return ('The preceding requirement passed joint review and watcher acceptance. '
+                'The person explicitly queued the following next requirement. Refine this request, '
+                'without inventing work for a later queue item or repeating completed work. '
+                'It may extend the original feature scope; preserve accepted behavior, fixed checks and exclusions.\n'
+                + json.dumps(queued_requirement, ensure_ascii=False)
+                + '\n\nAccepted deliveries already committed in this run:\n'
+                + json.dumps(follow_up, ensure_ascii=False) + '\n\n')
     return ('This is the next requirement elaboration after a locally committed, jointly accepted delivery. '
             'Read the current project and name one concrete unfinished capability inside the original request. '
             'Cite files or symbols, expected behavior, failure or boundary conditions, and how to verify it. '

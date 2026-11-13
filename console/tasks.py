@@ -28,6 +28,7 @@ from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
+from auto_moniter.requirement_queue import RequirementQueue
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
 from console.recovery import resume_arguments
@@ -325,6 +326,8 @@ class TaskStore:
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
         can_direct = not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
+        can_queue_requirements = (state.get('workflow', meta.get('workflow')) == 'review-first'
+                                  and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE})
         delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
         if active and state.get('directions_version') != 1:
             delivery = 'restart_required'
@@ -385,6 +388,7 @@ class TaskStore:
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
                      'launch_error': meta.get('error', '') if not live else '',
                      'directions': directions, 'can_direct': can_direct,
+                     'can_queue_requirements': can_queue_requirements,
                      'direction_delivery': delivery, 'direction_error': direction_error,
                      'actions': actions, 'checks': meta.get('checks', state.get('checks', []))})
 
@@ -496,6 +500,33 @@ class TaskStore:
                     submission.update(status='resume_blocked', error=redact(str(exc)),
                                       message='补充要求已保存，但自动恢复受阻；无需重复填写。')
             return {**self.detail(ident), 'direction_submission': submission}
+
+    def queued_requirements(self, ident: str, data: dict | None = None) -> dict:
+        with self._lock:
+            meta = self._get(ident)
+            view = self._view(meta, {}, include_details=False)
+            queue = RequirementQueue(Path(meta['run_dir']))
+            if data is not None:
+                if not view.get('can_queue_requirements'):
+                    raise TaskError('当前任务不能追加排队需求；需要尚未结束的 review-first 任务', 409)
+                try:
+                    if data.get('action', 'append') == 'append':
+                        queue.append(data.get('text'), data.get('position', 'last'))
+                    elif data.get('action') == 'remove':
+                        queue.remove(data.get('id'))
+                    else:
+                        raise ValueError('不支持的需求队列操作')
+                except ValueError as exc:
+                    raise TaskError(str(exc), 409) from exc
+            try:
+                state = queue.state()
+                snapshot = queue.snapshot(state)
+            except ValueError as exc:
+                raise TaskError(str(exc), 409) from exc
+            return {**snapshot, 'id': ident, 'title': view['title'], 'status': view['status'],
+                    'original_requirement': view['requirement'],
+                    'can_append': view.get('can_queue_requirements', False),
+                    'delivery': 'restart_required' if state and state.get('requirement_queue_version') != 1 else 'after_acceptance'}
 
     def detail(self, ident: str) -> dict:
         with self._lock:

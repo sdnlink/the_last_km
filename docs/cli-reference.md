@@ -60,7 +60,7 @@
 | `--run-dir DIR` | 项目外私有状态目录中的时间戳子目录 | 提示词、日志、检查点与报告目录；同目录已有任务时必须 `--resume` |
 | `--workflow review-first` | 新建且有 reviewer 时选用 | 先审核需求，再实现、独立复核、watcher 固定检查与本地提交 |
 | `--workflow legacy` | `--no-review` 新任务选用；也可显式指定 | 保留传统逐轮审计流程。恢复默认沿用检查点流程，不能切换 |
-| `--task-type TYPE` | 新任务 `code`；恢复沿用检查点 | `code/documentation/service/deployment/other`。`deployment` 采用远程预检、构建、打包、部署、运行验证阶段，默认关闭逐函数派单与 Git 自动提交；须独立 reviewer，不可与 `--function-dispatch`、`--full-function-plan` 或 legacy 流程组合。最终检查本次部署证据文件与日志，本地检查可选 |
+| `--task-type TYPE` | 新任务 `code`；恢复沿用检查点 | `code/documentation/service/deployment/other`。`documentation` 按报告或文档改动交付，默认关闭逐函数派单，已有检查可选；`deployment` 采用远程预检、构建、打包、部署、运行验证阶段，默认关闭逐函数派单与 Git 自动提交。两类均不可与 `--function-dispatch`、`--full-function-plan` 组合。部署须独立 reviewer，不可选 legacy 流程，最终检查本次部署证据文件与日志 |
 | `--modules FILE` | 无固定模块 | JSON 数组；每项必填 `id/title/acceptance`，可填 `depends_on/checks/files`。固定验收不可被 agent 改写 |
 | `--quality-policy FILE` | 不启用额外质量策略 | 读取 JSON 质量策略；非空策略会补齐字段默认值；恢复沿用原策略，不能替换 |
 | `--resume` | 否 | 恢复 `--run-dir` 中的任务，不创建新任务；须传原 provider、reviewer 和后端配置 |

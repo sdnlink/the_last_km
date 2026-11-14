@@ -155,11 +155,16 @@ def scan(cwd, kind='code', python=''):
     if kind == 'deployment':
         for check in checks:
             check['recommended'] = False
+    elif kind == 'documentation':
+        for check in checks:
+            if check['id'] in ('python-unittest', 'python-pytest', 'node-test', 'git-diff'):
+                check['recommended'] = False
     signature = hashlib.sha256(json.dumps({'sources':sources,'python':interpreter,'kind':kind,'checks':checks},sort_keys=True).encode()).hexdigest()
     return {'cwd':str(root),'task_type':kind,'python':interpreter,'checks':checks,'signature':signature,'ci_sources':ci,
             'semantic_review':{'title':'独立语义审核','purpose':'reviewer 核对需求完整性、描述准确性与未覆盖边界；不能代替运行测试。'},
             'unverified':['未声明或未选择的功能、数据库/HTTP/端到端、性能和客户验收均不能由扫描结果推定通过。'],
             'notice': ('部署任务由执行器检查远程环境并记录构建、产物和服务运行证据；本地检查可选，不能代替部署验收。扫描不会连接服务器或执行部署。' if kind == 'deployment' else
+                       '文档任务不要求源码函数或预先提供的测试命令。已有检查可选；独立 reviewer 核对文档交付内容与引用，不将本地测试结果视为产品合规证明。' if kind == 'documentation' else
                        '扫描只读取有限项目文件，不执行测试、不安装依赖。没有发现入口不代表项目没有验证能力。格式检查或旧测试通过不证明新增功能可用，请选择需求对应的行为验证。')}
 
 

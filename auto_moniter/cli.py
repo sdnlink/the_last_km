@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--modules", type=Path, help="Optional JSON array of module definitions: id, title, acceptance")
     run.add_argument('--workflow', choices=['review-first','legacy'], help='New reviewed tasks default to requirements review first, then approval-only local commits; old checkpoints retain legacy order')
     from auto_moniter.task_types import TASK_TYPES
-    run.add_argument('--task-type', choices=TASK_TYPES, help='Task category; deployment runs operational stages without function dispatch (inherited on resume)')
+    run.add_argument('--task-type', choices=TASK_TYPES, help='Task category; documentation and deployment do not use function dispatch (inherited on resume)')
     run.add_argument('--function-dispatch', action=argparse.BooleanOptionalAction, default=None,
                      help='Reviewer dispatches one verifiable function at a time (default for new review-first tasks; inherited on resume)')
     run.add_argument('--full-function-plan', action='store_true',
@@ -319,7 +319,8 @@ def _run(args: argparse.Namespace) -> int:
         task_type=args.task_type or ('auto' if args.resume else 'code'),
         full_function_plan=args.full_function_plan,
         function_dispatch=args.function_dispatch if args.function_dispatch is not None else (
-            not args.resume and not args.no_review and args.workflow != 'legacy' and args.task_type != 'deployment'),
+            not args.resume and not args.no_review and args.workflow != 'legacy'
+            and args.task_type not in ('deployment', 'documentation')),
         max_runtime_s=_parse_duration(args.max_runtime),
         max_agent_calls=args.max_agent_calls,
         max_output_bytes=args.max_output_bytes,

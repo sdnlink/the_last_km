@@ -474,3 +474,45 @@ test('deployment submit carries disabled mode and category without requiring loc
   assert.deepEqual(body.checks, []);
   assert.deepEqual(body.acceptance_plan.selected_ids, []);
 });
+
+test('documentation selection disables function dispatch and preserves verification choice', async () => {
+  const dialogs = await loadDialogs();
+  dialogs.bindCreateFormForTest();
+  const {form} = globalThis.__testDom;
+  form.elements.verification_mode.value = 'review_only';
+  form.elements.task_type.value = 'documentation';
+  form.elements.task_type.dispatchEvent({type: 'input'});
+  assert.equal(form.elements.function_dispatch.disabled, true);
+  assert.equal(form.elements.verification_mode.disabled, false);
+  assert.equal(form.elements.verification_mode.value, 'review_only');
+  assert.equal(form.elements.parallel_project.disabled, false);
+  form.elements.task_type.value = 'code';
+  form.elements.task_type.dispatchEvent({type: 'input'});
+  assert.equal(form.elements.function_dispatch.disabled, false);
+  assert.equal(form.elements.function_dispatch.checked, true);
+});
+
+test('documentation submit allows analysis without test IDs and keeps explicit checks', async () => {
+  const dialogs = await loadDialogs();
+  dialogs.bindCreateFormForTest();
+  const {form} = globalThis.__testDom;
+  form.elements.task_type.value = 'documentation';
+  dialogs.updateTaskType(form);
+  dialogs.setAcceptanceScanForTest({
+    python: '/usr/bin/python3', signature: 'sig-documentation', checks: [],
+    context: {cwd: '/tmp/proj', task_type: 'documentation', python: ''},
+  });
+  await submitForm(form);
+  assert.equal(formErrorText, '', formErrorText);
+  assert.equal(taskPosts.length, 1);
+  assert.equal(taskPosts[0].task_type, 'documentation');
+  assert.equal(taskPosts[0].verification_mode, 'executable');
+  assert.equal(taskPosts[0].function_dispatch, false);
+  assert.equal(taskPosts[0].full_function_plan, false);
+  assert.deepEqual(taskPosts[0].checks, []);
+  assert.deepEqual(taskPosts[0].acceptance_plan.selected_ids, []);
+  form.elements.checks.value = 'test -f docs/report.md';
+  await submitForm(form);
+  assert.equal(taskPosts.length, 2);
+  assert.deepEqual(taskPosts[1].checks, ['test -f docs/report.md']);
+});

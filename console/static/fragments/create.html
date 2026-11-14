@@ -79,6 +79,7 @@
             <label>怎样算完成？<textarea name="acceptance_criteria" rows="3" maxlength="8000" required placeholder="例如：文档链接有效，需求与接口说明一致，未实现能力不写成已完成。"></textarea></label>
             <label>验收方式<select name="verification_mode"><option value="executable">选择项目检查，并由独立 reviewer 审核</option><option value="review_only">仅独立语义审核（不证明功能测试通过）</option><option value="planning">先制定验收方案（单独任务，不实施原目标）</option></select></label>
             <p id="deployment-hint" hidden>按远程预检、构建、打包、部署和运行验证推进。请在需求中填写服务器、构建目录、部署目标和认证方式；本地检查可选，完成后由独立 reviewer 核验实际部署证据。</p>
+            <p id="documentation-hint" hidden>文档任务按分析报告或文档改动交付，不要求源码函数。本地检查可选；仅分析时保留原文，另存报告，由独立 reviewer 核对引用、结论和覆盖范围。</p>
             <div class="acceptance-actions"><button type="button" id="scan-acceptance" class="button secondary">扫描项目已有检查</button><button type="button" id="preflight-acceptance" class="button secondary">检查运行前提</button></div>
             <p id="acceptance-notice" role="status">扫描只读项目配置，不执行测试、不安装依赖。选择检查后，watcher 会在验收时实际执行。</p>
             <div id="acceptance-options"></div>

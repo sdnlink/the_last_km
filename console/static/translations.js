@@ -1,4 +1,9 @@
 export default {
+  "文档任务不要求源码函数或预先提供的测试命令。已有检查可选；独立 reviewer 核对文档交付内容与引用，不将本地测试结果视为产品合规证明。": "Document tasks do not require source functions or predefined test commands. Existing checks are optional; an independent reviewer checks the deliverable and references without treating local tests as product compliance evidence.",
+  "没有发现本地检查入口；文档任务由独立 reviewer 核对交付内容与引用。": "No local checks found; an independent reviewer checks the document deliverable and references.",
+  "文档交付与独立审核（检查可选）": "Document delivery and independent review (checks optional)",
+  "文档任务按分析报告或文档改动交付，不要求源码函数。本地检查可选；仅分析时保留原文，另存报告，由独立 reviewer 核对引用、结论和覆盖范围。": "Document tasks deliver analysis reports or document edits without source functions. Local checks are optional. Analysis preserves the original inputs and produces a separate report; an independent reviewer checks references, conclusions and coverage.",
+  "文档交付由独立 reviewer 核对内容、引用和覆盖范围；不代表产品运行验证或合规认证通过。": "An independent reviewer checks document content, references and scope coverage. This does not establish runtime verification or compliance certification.",
   "部署": "Deployment",
   "执行部署并由独立 reviewer 验收": "Execute deployment and verify it with an independent reviewer",
   "按远程预检、构建、打包、部署和运行验证推进。请在需求中填写服务器、构建目录、部署目标和认证方式；本地检查可选，完成后由独立 reviewer 核验实际部署证据。": "Runs remote preflight, build, packaging, deployment and runtime verification. Include servers, build directory, deployment target and authentication method in the request. Local checks are optional; an independent reviewer verifies actual deployment evidence.",

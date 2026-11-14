@@ -596,12 +596,13 @@ class TaskStore:
                     'reviewer_paseo_backend': text('reviewer_paseo_backend', '', 200)}
         workflow=text('workflow','review-first')
         if workflow not in ('review-first','legacy'):raise TaskError('工作流程无效')
-        from auto_moniter.task_types import TASK_TYPES
+        from auto_moniter.task_types import TASK_TYPES, NON_FUNCTION_TASK_TYPES
         plan_type = data['acceptance_plan'].get('task_type', 'code') if isinstance(data.get('acceptance_plan'), dict) else 'code'
         task_type = data.get('task_type', plan_type)
         if not isinstance(task_type, str) or task_type not in TASK_TYPES:
             raise TaskError('请选择有效任务类型')
         deployment = task_type == 'deployment'
+        non_function = task_type in NON_FUNCTION_TASK_TYPES
         if deployment and workflow != 'review-first':
             raise TaskError('部署任务需要先审核需求并进行独立验收')
         parallel = data.get('parallel_project',False)
@@ -615,10 +616,10 @@ class TaskStore:
             workflow == 'review-first' and data.get('verification_mode') not in ('review_only', 'planning'))
         if type(function_dispatch) is not bool or function_dispatch and workflow != 'review-first':
             raise TaskError('逐函数下发需要启用先审核需求的流程')
-        if deployment:
+        if non_function:
             function_dispatch = False
         full_function_plan = data.get('full_function_plan', function_dispatch)
-        if deployment:
+        if non_function:
             full_function_plan = False
         if type(full_function_plan) is not bool or full_function_plan and not function_dispatch:
             raise TaskError('完整函数计划需要开启逐函数派单')
@@ -642,7 +643,7 @@ class TaskStore:
         # Distinguish explicit mode from legacy clients that omit verification_mode.
         mode_explicit = 'verification_mode' in data
         verification_mode = data.get('verification_mode',
-            'executable' if function_dispatch or deployment else 'review_only')
+            'executable' if function_dispatch or non_function else 'review_only')
         if verification_mode not in ('executable', 'review_only', 'planning'):
             raise TaskError('验收模式无效')
         if deployment and verification_mode != 'executable':
@@ -677,7 +678,7 @@ class TaskStore:
                 guided = {**guided, 'selected_ids': [], 'selected': []}
             checks = []
         if (mode_explicit and verification_mode == 'executable' and not function_dispatch
-                and not deployment
+                and not non_function
                 and not checks and not module_check_commands and not (guided and guided['selected'])):
             raise TaskError('独立命令验收模式至少需要一条验收命令；仅文档审核请明确选择仅审核模式')
         numbers = {}
@@ -749,6 +750,8 @@ class TaskStore:
             meta['acceptance_warning'] = coverage_warning([*checks, *module_check_commands])
             if deployment:
                 meta['acceptance_warning'] = '部署成功须有实际远程构建、产物校验和目标服务运行证据；本地测试通过不代表部署成功。'
+            elif task_type == 'documentation':
+                meta['acceptance_warning'] = '文档交付由独立 reviewer 核对内容、引用和覆盖范围；不代表产品运行验证或合规认证通过。'
             if guided:
                 meta['acceptance_plan'] = guided
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']

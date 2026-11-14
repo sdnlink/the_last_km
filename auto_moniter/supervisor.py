@@ -68,7 +68,7 @@ from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
-from auto_moniter import function_plan, deployment
+from auto_moniter import function_plan, deployment, documentation_tasks
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 
 
@@ -3425,10 +3425,12 @@ class Supervisor:
         )
 
     def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None) -> str:
-        if self.config.task_type == 'deployment':
+        if self.config.task_type in ('deployment', 'documentation'):
             return '\n'.join([
-                'You are the deployment execution agent. Carry out the original authorized operational task.',
-                deployment.instructions('worker', self.config, self.run_dir),
+                ('You are the deployment execution agent. Carry out the original authorized operational task.'
+                 if self.config.task_type == 'deployment' else 'You are the document analysis and editing agent.'),
+                (deployment.instructions('worker', self.config, self.run_dir) if self.config.task_type == 'deployment'
+                 else documentation_tasks.instructions('worker')),
                 'Original request:', self.config.requirement,
                 'Human acceptance criteria:', self.config.acceptance,
                 'Reviewed requirement:', json.dumps(self.requirements_review, ensure_ascii=False),
@@ -3595,6 +3597,7 @@ class Supervisor:
             [
                 *([deployment.instructions(
                     'reviewer', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
+                *([documentation_tasks.instructions('reviewer')] if self.config.task_type == 'documentation' else []),
                 *(['Watcher checks executed BEFORE this review for the exact submitted candidate:',
                    json.dumps(safe(receipt),ensure_ascii=False),
                    'Read the saved check logs and assess the requirement, implementation and observed failures in this review. '

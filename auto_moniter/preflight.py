@@ -14,6 +14,8 @@ def validate_task_type(config) -> None:
     from auto_moniter.task_types import TASK_TYPES
     if config.task_type not in TASK_TYPES and not (config.resume and config.task_type == 'auto'):
         raise ValueError('Invalid task type')
+    if config.task_type == 'documentation' and (config.function_dispatch or config.full_function_plan):
+        raise ValueError('Documentation tasks use document deliverables, not function dispatch; create a new documentation task')
     if config.task_type == 'deployment':
         if config.no_review or config.reviewer is None or config.workflow not in ('review-first', 'auto'):
             raise ValueError('Deployment requires requirement review and an independent reviewer')

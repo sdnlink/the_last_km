@@ -55,7 +55,14 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     text=raw.lower()
     role=last.get('role','watcher');phase='监督器结束任务';actions=[]
     code=status;title='任务未完成';reason='任务已经停止，尚未通过完整交付验收。'
-    if state.get('resume_error') or 'cannot resume checkpoint' in text:
+    if 'module report correction' in text and not (state.get('resume_error') or 'cannot resume checkpoint' in text):
+        code='module_report_rejected';title='完成报告修正未通过';phase='完成报告校验';role='worker'
+        reason='候选代码已保存，但执行器的完成报告未通过校验；这不代表应用测试失败。'
+        if 'issue_resolutions' in text:
+            reason='执行器提交了无效的审计关闭条目；重复或非法的 AUD 编号不能被接受，审计问题未被自动关闭。'
+        actions=['格式或调用失败可恢复同一候选的只读报告修正；仍使用原预算，并保留失败记录。',
+                 '执行器应保持 issue_resolutions=[]，由独立审查器核对并关闭审计问题。']
+    elif state.get('resume_error') or 'cannot resume checkpoint' in text:
         code='checkpoint_restore_failed';title='检查点恢复失败';role='watcher';phase='加载原运行记录'
         reason=raw
         source='resume-error.json' if state.get('resume_error') else source

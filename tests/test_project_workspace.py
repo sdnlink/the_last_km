@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from auto_moniter.locking import workspace_lease
-from auto_moniter.project_workspace import ProjectWorkspace, create, git, task_status, validate_scope
+from auto_moniter.project_workspace import ProjectWorkspace, create, dirty_state, git, task_status, validate_scope
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.workspace import file_lock, file_snapshot
@@ -71,6 +71,31 @@ class ProjectWorkspaceTests(unittest.TestCase):
         self.assertNotEqual(a.manifest['branch'],b.manifest['branch'])
         a.observe(force=True)
         self.assertIn('app.py',a.context()['source_dirty'])
+
+    def test_peer_observation_does_not_refresh_or_lock_the_index(self):
+        project = self.workspace([])
+        index = Path(git(project.cwd, 'rev-parse', '--git-path', 'index'))
+        if not index.is_absolute():
+            index = project.cwd/index
+        before = index.read_bytes()
+        stamp = index.stat().st_mtime_ns
+        # Force Git to notice a tracked file's stat change; ordinary status
+        # would optionally refresh the index even though observation is read-only.
+        source = project.cwd/'app.py'
+        info = source.stat()
+        os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+        (project.cwd/'other.py').write_text('peer draft\n')
+        original = subprocess.check_output
+        def observed(*args, **kwargs):
+            self.assertEqual(kwargs.get('env', {}).get('GIT_OPTIONAL_LOCKS'), '0')
+            return original(*args, **kwargs)
+        with patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '1'}), patch(
+                'auto_moniter.project_workspace.subprocess.check_output', side_effect=observed):
+            result = dirty_state(project.cwd)
+        self.assertIn('other.py', result['files'])
+        self.assertEqual(index.read_bytes(), before)
+        self.assertEqual(index.stat().st_mtime_ns, stamp)
+        self.assertFalse(index.with_name('index.lock').exists())
 
     def test_overlapping_tasks_require_dependencies_and_invalid_scope_is_rejected(self):
         a=self.workspace()

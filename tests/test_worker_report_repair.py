@@ -1,5 +1,6 @@
 """Report mistakes must not restart implementation or bypass function acceptance."""
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,13 +170,18 @@ class WorkerReportRepairTests(unittest.TestCase):
     def test_configured_provider_delegate_uses_read_only_mode_without_changing_settings(self):
         worker = FunctionWorker('worker', [invalid_report(final=True), result('F1', 'done', status='done')])
         worker.mode = 'full-access'
-        configured = ConfiguredProvider('codex', worker, None, {})
+        # Scripted commands execute Python, not an installed AI CLI. Configure
+        # that executable explicitly so native-wrapper preflight is deterministic
+        # both on developer machines and CI hosts without Codex.
+        configured = ConfiguredProvider('codex', worker, None, {'executable': sys.executable})
         reviewer = ScriptedProvider('reviewer', [plan(final_task()), result('F1', 'accepted', status='done')])
         report = self.monitor(configured, reviewer).run()
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual(worker.mode, 'full-access')
         self.assertEqual(configured.mode, 'full-access')
-        self.assertTrue(worker.calls[1]['read_only'])
+        self.assertEqual(configured.binary, sys.executable)
+        self.assertEqual(worker.binary, sys.executable)
+        self.assertEqual([call['read_only'] for call in worker.calls], [False, True])
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 import fcntl
 from contextlib import contextmanager
@@ -56,6 +57,27 @@ class Directions:
                 raise ValueError('本任务补充要求已达到容量，请创建后续任务')
             write_json(self.run / 'directions.json', value, durable=True)
             return item
+
+    def revision(self, requirement: str, messages: list[dict] | None = None) -> dict:
+        """Derive an append-only version history, including legacy amendments.
+
+        This describes user input, not an agent's approval. Existing requirements
+        and immutable module/check definitions are never rewritten.
+        """
+        from auto_moniter.requirements_review import requirement_hash
+        original = requirement_hash(requirement)
+        digest = original
+        revisions = []
+        for index, item in enumerate(self.messages() if messages is None else messages, 2):
+            parent = digest
+            text_digest = requirement_hash(item['text'])
+            digest = hashlib.sha256(json.dumps([parent, item['id'], text_digest],
+                                               separators=(',', ':')).encode()).hexdigest()
+            revisions.append({'version': index, 'direction_id': item['id'],
+                              'at': item.get('at', ''), 'text_sha256': text_digest,
+                              'parent_sha256': parent, 'sha256': digest})
+        return {'version': len(revisions) + 1, 'original_sha256': original,
+                'sha256': digest, 'amendments': revisions}
 
     @contextmanager
     def lock(self):

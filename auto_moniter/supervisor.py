@@ -231,6 +231,7 @@ class Supervisor:
         self._stop_requested = False
         self._active_reviewer_id = ""
         self._records: list[RoundRecord] = []
+        self._module_report_attempts: set[tuple[int, str]] = set()
         self._review_feedback: Verdict | None = None
         self._audit_feedback: Verdict | None = None
         self._rounds_since_review = 0
@@ -836,6 +837,22 @@ class Supervisor:
                 if verdict.task_status != 'done':
                     last_worker = verdict
                     continue
+            if (self.config.workflow == 'review-first' and not self.config.function_dispatch
+                    and _accepted(verdict) and verdict.scope == 'module'):
+                report_errors = self._module_report_errors(verdict)
+                if report_errors:
+                    correction = self._repair_module_worker_report(record, records, report_errors)
+                    if correction is None:
+                        if self._pending_directions() and not self._stop:
+                            last_worker = None
+                            continue
+                        return self._finish('stopped' if self._stop else 'action_required',
+                            record.failure or 'Module completion report needs correction; candidate preserved.',
+                            records, record.verdict)
+                    turn, verdict = correction, record.verdict
+                    if not _accepted(verdict):
+                        last_worker = verdict
+                        continue
             if self._uses_candidate_checks(record):
                 self._prepare_candidate_checks(record)
                 self._write_state(records, 'running', stall, previous_gap_key, tree)
@@ -1954,7 +1971,11 @@ class Supervisor:
         self._event('git_checkpoint', role=record.role, round=record.index,
                     commit=record.git_checkpoint['commit'], ref=self.git_history.ref)
 
-    def _merge_modules(self, verdict: Verdict, *, reviewer=False) -> None:
+    def _merge_modules(self, verdict: Verdict, *, reviewer=False, apply=True) -> ModuleLedger | None:
+        import copy
+        # Preflight uses the identical rules as acceptance, without changing the
+        # live ledger. An invalid scope must not partially register new modules.
+        staged = copy.deepcopy(self.modules)
         try:
             proposals = []
             scopes = []
@@ -1969,13 +1990,131 @@ class Supervisor:
                 if isinstance(item, dict) and item.get("checks") and (item.get("id") not in self.modules.items or item["checks"] != self.modules.items[item["id"]].get("checks")):
                     raise ValueError("Executable module checks must be supplied by the user in --modules, not by an agent")
                 proposals.append(item)
-            self.modules.merge(proposals)
+            staged.merge(proposals)
             for key, paths in scopes:
-                self.modules.review_scope(key, paths)
+                staged.review_scope(key, paths)
         except ValueError as exc:
             verdict.status = "continue"
             verdict.parse_error = "invalid module plan"
             verdict.gaps.append(f"Module plan rejected: {exc}")
+        else:
+            if apply:
+                self.modules = staged
+            return staged
+
+    def _module_report_errors(self, verdict):
+        errors = [error for error in self.modules.coverage(verdict)
+                  if 'requires accepted dependencies:' in error]
+        if not self._verification_only():
+            errors.extend(acceptance_problems(self.config.cwd, verdict.evidence,
+                baseline=self._baseline_files, ignore_dir=self.run_dir,
+                git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else ''))
+        return errors
+
+    def _repair_module_worker_report(self, record, records, errors):
+        """One read-only report correction; acceptance still needs checks and review."""
+        import copy
+        previous = record.watcher_result.get('module_report')
+        retryable = (previous and (previous.get('failure_kind') in ('format', 'transport')
+                     or previous.get('status') == 'attempted'
+                     or record.failure.startswith('Module report correction failed: invalid ')
+                     or record.failure == 'Module report correction failed: timed out'))
+        key = (record.index, record.tree)
+        if previous and (not self.config.resume or not retryable or key in self._module_report_attempts):
+            record.failure = 'Module report correction did not succeed; candidate and report are preserved.'
+            return None
+        if self._pending_directions() or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree:
+            record.failure = 'Inputs changed before module report correction; fresh assessment required.'
+            return None
+        provider = copy.copy(self.config.provider)
+        delegate = provider
+        while isinstance(delegate, ConfiguredProvider):
+            delegate.mode = ''
+            delegate.delegate = copy.copy(delegate.delegate)
+            delegate = delegate.delegate
+        delegate.mode = ''
+        try:
+            provider.validate_review(self.config.extra_args)
+        except ProviderError as exc:
+            record.failure = 'Module report correction requires a read-only worker: ' + str(exc)
+            return None
+        self._process_control()
+        if self._stop:
+            return None
+        self._check_budget(new_call=True)
+        self._module_report_attempts.add(key)
+        saved = json.loads((self.run_dir/'state.json').read_text())
+        report = {'status': 'attempted', 'errors': errors, 'original': record.verdict.to_dict()}
+        previous_failure = record.failure
+        if previous:
+            report['attempt_history'] = [*previous.get('attempt_history', []), {
+                'status': previous['status'], 'failure': previous_failure,
+                'failure_kind': previous.get('failure_kind', ''),
+                'original_output': previous.get('original_output', '')}]
+        record.watcher_result['module_report'] = report
+        artifact = f'{record.index:03d}-worker-report-original-{self._agent_calls}'
+        for suffix in ('.log', '-text.md', '-prompt.md'):
+            source = self.run_dir / f'{record.index:03d}-worker{suffix}'
+            if source.exists():
+                source.replace(self.run_dir/(artifact+suffix))
+        record.output_path = str(self.run_dir/(artifact+'.log'))
+        report['original_output'] = previous.get('original_output', record.output_path) if previous else record.output_path
+        if previous:
+            report['attempt_history'][-1]['output'] = record.output_path
+        self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
+        self._event('module_report_repair', round=record.index, tree=record.tree, reasons=errors)
+        prompt = ('Worker report correction only for the SAME saved candidate. Do not implement, edit files, '
+                  'commit or rerun builds/tests. Read only the files needed to substantiate the report. '
+                  'Correct cited file paths and explicitly list any prerequisite modules you can actually '
+                  'revalidate on this candidate. Missing acceptance state is not evidence of a code defect. '
+                  'If a prerequisite is incomplete, return continue with the actual gap; do not invent completion. '
+                  'Do not expand the original module milestone to unrelated modules or the entire requirement. '
+                  'You are the worker: issue_resolutions MUST be [], even for known AUD IDs. '
+                  'Only the independent reviewer may propose audit closures; do not create or duplicate audit IDs. '
+                  'Independent review and watcher checks awaiting execution are not implementation gaps. '
+                  'Describe known platform limits in summary/evidence, preserving actual unresolved behavior as gaps. '
+                  'Return corrected JSON; watcher checks and independent review still follow.\n'
+                  'Report errors:\n' + json.dumps(errors, ensure_ascii=False)
+                  + '\nPrevious report failure (if any):\n' + previous_failure
+                  + '\nOriginal report:\n' + json.dumps(report['original'], ensure_ascii=False)
+                  + '\nAuthoritative module ledger:\n' + json.dumps(self.modules.export(), ensure_ascii=False))
+        signature = self.project.signature if self.project else ''
+        turn = self._invoke(provider, prompt, '', role='worker', index=record.index,
+            model=self.config.model, extra_args=self.config.extra_args, read_only=True, report_only=True)
+        self.worker_session_id = ''
+        self._drop_worker_session = True
+        verdict = self._verdict_from_turn(turn, role='worker')
+        record.elapsed_s += turn.elapsed_s
+        self._worker_seconds_since_review += turn.elapsed_s
+        if (workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree
+                or self._pending_directions()
+                or self.project and (self.project.needs_review or self.project.signature != signature)):
+            report['status'] = 'stale'
+            record.failure = 'Inputs changed during read-only module report correction; no approval applied.'
+            return None
+        failure = _failure_reason(turn, verdict) or turn.interruption
+        staged = self._merge_modules(verdict, apply=False) if not failure and not verdict.parse_error else None
+        problems = self._module_report_errors(verdict) if _accepted(verdict) else []
+        if verdict.issue_resolutions:
+            problems.append('Worker report correction must leave issue_resolutions=[]; only the reviewer may close audit issues.')
+        if _accepted(verdict) and (verdict.scope != 'module'
+                or not set(report['original']['module_ids']) <= set(verdict.module_ids)):
+            problems.append('Correction must retain the original module milestone and its module IDs.')
+        if failure or verdict.parse_error or problems:
+            kind = 'transport' if failure else ('format' if verdict.parse_error else 'validation')
+            report.update(status='rejected', correction_errors=problems, failure_kind=kind)
+            record.failure = 'Module report correction failed: ' + str(failure or verdict.parse_error or '; '.join(problems))
+            return None
+        self.modules = staged
+        report['status'] = 'corrected'
+        record.verdict = verdict
+        record.output_path = str(turn.output_path)
+        record.session_id = turn.session_id
+        record.exit_code, record.timed_out = turn.exit_code, turn.timed_out
+        record.interruption = turn.interruption
+        record.failure = ''
+        self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
+        return turn
 
     def _reviewer_model(self):
         # Different providers have different model namespaces.
@@ -2712,7 +2851,7 @@ class Supervisor:
                        + json.dumps(safe(self._function_check_catalog(self.function_tasks.current)), ensure_ascii=False))
         signature = self.project.signature if self.project else ''
         turn = self._invoke(provider, prompt, '', role='worker', index=record.index,
-            model=self.config.model, extra_args=self.config.extra_args, read_only=True)
+            model=self.config.model, extra_args=self.config.extra_args, read_only=True, report_only=True)
         self.worker_session_id = ''
         self._drop_worker_session = True
         verdict = self._verdict_from_turn(turn, role='worker')
@@ -3061,6 +3200,7 @@ class Supervisor:
             "delivery_diagnosis": self._delivery_diagnosis,
             "requirements_review": self.requirements_review,
             "requirement_cycles": self.requirement_cycles,
+            "requirement_revision": self.directions.revision(self.config.requirement),
             "active_queued_requirement": self.active_queued_requirement,
             "requirement_queue_version": 1,
             "quality_policy": self.config.quality_policy,
@@ -3522,6 +3662,11 @@ class Supervisor:
                 "and the repaired module_ids now. Pending unrelated modules or reviewer approval are not "
                 "implementation gaps in this module. Do not expand to other modules while this handoff is ready.",
                 "Make concrete progress or verify the deliverable; avoid unnecessary edits to already completed work.",
+                "A pending module with historical acceptance needs revalidation, not automatic reimplementation. "
+                "Prioritize unfinished implementation over alternating already-verified modules. Do not create new "
+                "verification documents solely to resubmit unchanged code: that changes the candidate and can "
+                "invalidate other modules. Cite existing current source and logs, confirm necessary dependencies "
+                "jointly in module_ids, and keep the final integration review responsible for the whole request.",
                 "If the review is wrong, fix the evidence and say why in summary. If it is right, do the work.",
                 "A person is not available. Decide and proceed.",
                 "Continue the authorized task now. Questions or requests for permission to continue do not suspend this task.",
@@ -3737,6 +3882,12 @@ class Supervisor:
                 and report.get('task') == self.function_tasks.current
                 and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == worker.tree):
             return worker
+        module_report = worker.watcher_result.get('module_report', {})
+        if (module_report.get('status') in ('attempted', 'rejected')
+                and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == worker.tree):
+            # Resuming an exhausted report correction is not authorization to
+            # repeat implementation. Preserve the candidate until input changes.
+            return worker
         if worker.failure or worker.interruption:
             return None
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
@@ -3920,6 +4071,20 @@ class Supervisor:
             if (not failure and not review.parse_error and not turn.interruption
                     and self.config.workflow == 'review-first'
                     and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
+                # Module definition errors belong to the existing read-only
+                # report-repair loop, before acceptance applies any proposal.
+                staged_modules = self._merge_modules(review, reviewer=True, apply=False)
+                if staged_modules is not None and _accepted(review):
+                    worker = next((r.verdict for r in reversed(self._records) if r.role=='worker'), Verdict('continue'))
+                    dependency_errors = [error for error in staged_modules.coverage(worker, review)
+                                         if 'requires accepted dependencies:' in error]
+                    if dependency_errors:
+                        review.status = 'continue'
+                        review.parse_error = 'invalid module dependency confirmation'
+                        review.gaps.extend(dependency_errors)
+            if (not failure and not review.parse_error and not turn.interruption
+                    and self.config.workflow == 'review-first'
+                    and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
                 # Validate ledger operations inside the existing reviewer-only
                 # repair loop, not after its retry opportunity has already passed.
                 import copy
@@ -4023,15 +4188,27 @@ class Supervisor:
         model: str,
         extra_args: list[str],
         read_only: bool,
+        report_only: bool = False,
     ) -> "_CompletedTurn":
+        schema_path = self.schema_path
+        if report_only:
+            if role != 'worker' or not read_only:
+                raise RecoveryError('Report-only invocation requires a read-only worker')
+            schema = json.loads(self.schema_path.read_text())
+            schema['properties']['issue_resolutions']['maxItems'] = 0
+            schema_path = self.run_dir / f'{index:03d}-worker-report-schema.json'
+            write_json(schema_path, schema, durable=True)
         self._event("agent_start", role=role, round=index, provider=provider.name)
         self._check_budget(new_call=True)
         self._agent_calls += 1
+        messages = self.directions.messages()
+        revision = self.directions.revision(self.config.requirement, messages)
         # Persist the call before launch so interruption cannot reset its budget.
         state_path = self.run_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["usage"] = self._usage()
-        self._last_invocation = {'role': role, 'round': index, 'call': self._agent_calls}
+        self._last_invocation = {'role': role, 'round': index, 'call': self._agent_calls,
+                                 'requirement_revision': revision}
         if self.function_tasks.current:
             self._last_invocation['task_id'] = self.function_tasks.current['id']
         state['last_invocation'] = self._last_invocation
@@ -4041,7 +4218,9 @@ class Supervisor:
         write_json(state_path, state, durable=True)
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
         if self.requirements_review.get("status")=="ready" and not (role=='worker' and self.config.function_dispatch):
-            prompt += "\n\nWatcher-approved requirement elaboration (supplements, never replaces, the original request):\n"+json.dumps(self.requirements_review,ensure_ascii=False)
+            prompt += ("\n\nWatcher-approved requirement elaboration (historical reviewed snapshot; "
+                       "later explicit user amendments take precedence where they conflict):\n"
+                       +json.dumps(self.requirements_review,ensure_ascii=False))
         if self.config.quality_policy:
             prompt += '\n\nMonitor-owned quality policy (immutable):\n' + json.dumps(self.quality.config, ensure_ascii=False)
             prompt += '\nMap each named requirement to actual file evidence and its modules. File edits alone are not verified progress. '
@@ -4068,7 +4247,6 @@ class Supervisor:
                           else 'Continue independent implementation and focused runnable checks; ') +
                        'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')
-        messages = self.directions.messages()
         if role != 'worker' or not self.config.function_dispatch:
             prompt += queued_requirement_prompt(self.active_queued_requirement)
         if (role == 'reviewer' and self.config.full_function_plan and self.function_tasks.current
@@ -4112,6 +4290,15 @@ class Supervisor:
                        'Report changed files, actual validation results, remaining gaps and failures precisely.\n')
         if not (role=='worker' and self.config.function_dispatch):
             self._direction_ids[role] = [item['id'] for item in messages]
+        prompt += ("\n\nRequirement version for this invocation (watcher-owned input history, not approval):\n"
+                   +json.dumps(revision, ensure_ascii=False)
+                   +"\nLater explicit user amendments supersede earlier conflicting product or technology decisions. "
+                    "Preserve all unrelated requirements and approved checks. Old elaborations are snapshots, "
+                    "not grounds for restoring a superseded technology stack. Do not rewrite immutable module "
+                    "definitions; append new modules for authorized changes and report their version linkage. ")
+        if role=='worker' and self.config.function_dispatch:
+            prompt += ("This worker may implement only its dispatched assignment and the reviewer-approved "
+                       "direction IDs; pending amendments require reviewer replanning, not an expanded worker scope.\n")
         if messages:
             prompt += "\n\nLatest instructions from the human managing this task (in chronological order):\n"
             prompt += json.dumps(messages, ensure_ascii=False, indent=2)
@@ -4133,12 +4320,12 @@ class Supervisor:
         try:
             if session_id and provider.resume_supported:
                 prepared = provider.resume_command(
-                    session_id, prompt_path, self.config.cwd, self.schema_path,
+                    session_id, prompt_path, self.config.cwd, schema_path,
                     model=model, extra_args=extra_args, read_only=read_only,
                 )
             else:
                 prepared = provider.start_command(
-                    prompt_path, self.config.cwd, self.schema_path,
+                    prompt_path, self.config.cwd, schema_path,
                     model=model, extra_args=extra_args, read_only=read_only,
                 )
             if read_only and role == 'reviewer' and self.quality.config.get('review_tools') == 'files_only':

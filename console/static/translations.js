@@ -1257,5 +1257,13 @@ export default {
   "watcher 运行派单检查": "Supervisor runs assignment checks",
   "watcher 提交已审核代码": "Supervisor commits approved code",
   "worker 提交候选后，watcher 先执行检查，reviewer 根据代码与检查结果审核；接收后由 watcher 提交并推进下一项。": "After the worker submits a candidate, the supervisor runs checks. The reviewer assesses the code and results, then the supervisor commits approved work and dispatches the next assignment.",
-  "独立审核已接收，watcher 正在提交当前派单。": "Independent review accepted the assignment. The supervisor is committing it."
+  "独立审核已接收，watcher 正在提交当前派单。": "Independent review accepted the assignment. The supervisor is committing it.",
+  "完成报告修正未通过": "Completion report correction rejected",
+  "完成报告校验": "Completion report validation",
+  "候选代码已保存，但执行器的完成报告未通过校验；这不代表应用测试失败。": "The candidate code is saved, but its completion report failed validation. This does not establish an application test failure.",
+  "执行器提交了无效的审计关闭条目；重复或非法的 AUD 编号不能被接受，审计问题未被自动关闭。": "The worker submitted invalid audit closures. Duplicate or invalid AUD IDs were rejected; no audit issue was automatically closed.",
+  "格式或调用失败可恢复同一候选的只读报告修正；仍使用原预算，并保留失败记录。": "After a format or invocation failure, resume to retry a read-only report correction on the same candidate within the existing budget, retaining failed records.",
+  "执行器应保持 issue_resolutions=[]，由独立审查器核对并关闭审计问题。": "Workers must leave issue_resolutions=[]; only the independent reviewer assesses and closes audit issues.",
+  "当前需求版本": "Current requirement version",
+  "后续明确的用户变更覆盖此前冲突的要求；其他要求和验收检查继续保留。": "Later explicit user amendments supersede earlier conflicting requirements; other requirements and acceptance checks remain in force."
 };

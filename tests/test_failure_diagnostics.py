@@ -13,6 +13,17 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class FailureDiagnosticTests(unittest.TestCase):
+    def test_duplicate_worker_audit_closures_show_report_failure_not_application_failure(self):
+        result = self.diagnostic('action_required',
+            'Module report correction failed: invalid issue_resolutions: Issue resolution IDs must be unique monitor-assigned AUD numbers')
+        self.assertEqual(result['code'], 'module_report_rejected')
+        self.assertEqual(result['role'], 'worker')
+        self.assertIn('AUD', result['reason'])
+        self.assertIn('issue_resolutions=[]', ' '.join(result['actions']))
+        result = self.diagnostic('recovery_failed',
+            'Module report correction failed: invalid issue_resolutions', resume_error=True)
+        self.assertEqual(result['code'], 'checkpoint_restore_failed')
+
     def test_function_check_failure_preserves_review_instead_of_claiming_a_crash(self):
         result=self.diagnostic('action_required',
             'Function acceptance blocked for F6; candidate preserved. Acceptance check failed: node test.js',

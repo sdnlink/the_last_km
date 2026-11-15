@@ -84,7 +84,10 @@ def task_status(run):
 
 
 def dirty_state(root):
-    raw = subprocess.check_output(['git','-C',str(root),'status','--porcelain=v1','-z','--untracked-files=all'],timeout=10)
+    # Peer observation must not refresh another worktree's index. Git status
+    # normally takes an optional index.lock, racing that peer's publication.
+    raw = subprocess.check_output(['git','-C',str(root),'status','--porcelain=v1','-z','--untracked-files=all'],
+                                  timeout=10, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
     dirty, digest, count = {}, hashlib.sha256(), 0
     entries = iter(raw.split(b'\0'))
     for entry in entries:

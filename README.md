@@ -135,6 +135,8 @@ The default flow reviews requirements before implementation. Select executable a
 
 Use **补充要求 / 调整方向** to update a task. For a resumable stopped task, sending the amendment also attempts to resume execution. Previously saved amendments can be sent with an empty input field. If a budget is exhausted, use the recovery window to increase it explicitly.
 
+The requirements page shows the current input version and amendment history. Later explicit user changes supersede earlier conflicting product or technology decisions; other requirements and approved checks remain in force, and historical requirements and reviews are retained. Immutable module conflicts receive field-level feedback and one read-only reviewer correction of the same candidate within the existing budget. See [report recovery and requirement versions](docs/module-report-recovery.md).
+
 Use **追加排队需求** in task details to queue follow-up requirements within the same run. Insert at the tail, head, or before another waiting requirement. The next requirement is reviewed and executed only after the current one passes independent review and watcher acceptance. Pending requests do not enter the current worker prompt. Pause controls, cumulative budgets and recovery remain in effect. Global pages live in the sidebar; task sections use one local tab bar. See the [console guide](console/README.md).
 
 The console listens on loopback. To access a remote instance, open an SSH tunnel:

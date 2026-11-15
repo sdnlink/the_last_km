@@ -8,6 +8,27 @@ import re
 import fnmatch
 
 
+def definition_changes(old: dict, proposed: dict) -> list[str]:
+    """Describe immutable-field conflicts without replacing the saved definition."""
+    changes = []
+    for field in ("title", "acceptance", "depends_on", "checks", "files"):
+        if field not in proposed or old.get(field, []) == proposed[field]:
+            continue
+        before, after = old.get(field, []), proposed[field]
+        location = field
+        if isinstance(before, list) and isinstance(after, list):
+            index = next((i for i in range(min(len(before), len(after)))
+                          if before[i] != after[i]), min(len(before), len(after)))
+            location += f"[{index}]"
+            before = before[index] if index < len(before) else "<absent>"
+            after = after[index] if index < len(after) else "<absent>"
+        def excerpt(value):
+            text = json.dumps(value, ensure_ascii=False)
+            return text[:180] + ("…" if len(text) > 180 else "")
+        changes.append(f"{location}: saved={excerpt(before)}, proposed={excerpt(after)}")
+    return changes
+
+
 def definitions(value: object) -> list[dict]:
     if not isinstance(value, list) or len(value) > 200:
         raise ValueError("modules must be an array of at most 200 module definitions")
@@ -47,8 +68,12 @@ class ModuleLedger:
         proposed = definitions(proposal)
         for item in proposed:
             old = self.items.get(item["id"])
-            if old and any(old.get(key, []) != item.get(key, []) for key in ("title", "acceptance", "depends_on", "checks", "files") if key in item):
-                raise ValueError(f"module {item['id']} definition cannot change; preserve its original acceptance criteria")
+            changes = definition_changes(old, item) if old else []
+            if changes:
+                raise ValueError(f"module {item['id']} definition cannot change; preserve its original acceptance criteria. "
+                                 + "; ".join(changes)
+                                 + ". Omit existing definitions from modules, or copy them exactly. "
+                                 "Declare authorized requirement changes as new modules with new IDs.")
         if len(self.items.keys() | {item['id'] for item in proposed}) > 200:
             raise ValueError("module ledger cannot exceed 200 entries")
         combined = {key: {field: item.get(field, []) for field in ("id", "title", "acceptance", "depends_on", "checks", "files")} for key, item in self.items.items()}

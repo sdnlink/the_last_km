@@ -322,9 +322,11 @@ class TaskStore:
                                              'round': health.get('rounds', 0), 'focus': ''})
         try:
             directions = Directions(run).snapshot() if include_details else []
+            requirement_revision = Directions(run).revision(requirement, directions) if include_details else {}
             direction_error = ''
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
+            requirement_revision = {}
         can_direct = not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
         can_queue_requirements = (state.get('workflow', meta.get('workflow')) == 'review-first'
                                   and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE})
@@ -381,6 +383,7 @@ class TaskStore:
                      'delivery_diagnosis': delivery_diagnosis if include_details else {},
                      'workflow':state.get('workflow',meta.get('workflow','legacy')),
                      'requirements_review':state.get('requirements_review',{}) if include_details else {},
+                     'requirement_revision': requirement_revision,
                      'quality_policy': state.get('quality_policy', meta.get('quality_policy', {})) if include_details else {},
                      'quality_state': state.get('quality_state', {}) if include_details else {},
                      'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},

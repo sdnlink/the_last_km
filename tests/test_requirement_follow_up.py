@@ -136,6 +136,8 @@ class RequirementFollowUpTests(unittest.TestCase):
                     self.done(cite=True),
                     {'verdict': {}, 'text': json.dumps(value) if value else '{}'},
                 ], self.root)
+                if value.get('status') == 'needs_input':
+                    reviewer.scripts.append({'verdict': {}, 'text': json.dumps(value)})
                 result = self.loop(worker, reviewer, max_rounds=2)
                 self.assertEqual(result.status, 'action_required', result.summary)
                 self.assertEqual(len(worker.calls), 1)

@@ -13,10 +13,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project', type=Path, required=True)
     parser.add_argument('--path', required=True)
-    parser.add_argument('--runner', choices=['unittest', 'node', 'cargo'], required=True)
+    parser.add_argument('--runner', choices=['unittest', 'node', 'cargo', 'swift', 'xcode'], required=True)
     parser.add_argument('--executable')
     parser.add_argument('--manifest')
     parser.add_argument('--target')
+    parser.add_argument('--scheme')
     args = parser.parse_args()
     root = args.project.resolve()
     path = root / args.path
@@ -24,6 +25,9 @@ def main():
         print('Declared local regression is missing or is not a regular project file: ' + args.path, flush=True)
         return 1
     os.chdir(root)
+    if args.runner in {'swift', 'xcode'}:
+        from native_test_runner import run
+        return run(args, root, path)
     if args.runner == 'unittest':
         sys.path.insert(0, str(root))
         # Never load timestamp-cached code from a previous fast repair turn.

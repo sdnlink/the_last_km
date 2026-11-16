@@ -91,6 +91,7 @@ class RequirementQueueTests(unittest.TestCase):
         reviewer = self.reviewer(1)
         reviewer.scripts.append({'verdict': {}, 'text': json.dumps({**BRIEF, 'status': 'needs_input',
             'blockers': ['Missing required environment'], 'summary': 'Keep this requirement pending'})})
+        reviewer.scripts.append(dict(reviewer.scripts[-1]))
         report = self.monitor(worker, reviewer).run()
         self.assertEqual(report.status, 'action_required', report.summary)
         self.assertEqual(len(worker.calls), 1)

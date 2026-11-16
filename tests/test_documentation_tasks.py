@@ -117,6 +117,8 @@ class DocumentationTaskTests(unittest.TestCase):
         worker = Worker('worker', [{'verdict': _verdict('done', evidence=['docs/analysis.md'])}])
         reviewer = Reviewer('reviewer', [{'verdict': {}, 'text': json.dumps(brief)},
                                         {'verdict': _verdict('done', evidence=['docs/analysis.md'])}])
+        if brief_status == 'needs_input':
+            reviewer.scripts.insert(1, {'verdict': {}, 'text': json.dumps(brief)})
         result = Supervisor(RunConfig(self.payload['requirement'], self.project, worker, reviewer=reviewer,
             task_type='auto' if resume else 'documentation', workflow='auto' if resume else 'review-first',
             run_dir=self.run, git_history=history, resume=resume,

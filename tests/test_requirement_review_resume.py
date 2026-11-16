@@ -89,7 +89,7 @@ class RequirementReviewResumeTests(unittest.TestCase):
         blocked={**BRIEF,'status':'needs_input','blockers':['Confirm the test environment'],
                  'summary':'Inspect only the remaining environment prerequisite'}
         worker=ScriptedProvider('worker',[])
-        reviewer=ScriptedProvider('reviewer',[{'verdict':{},'text':json.dumps(blocked)}])
+        reviewer=ScriptedProvider('reviewer',[{'verdict':{},'text':json.dumps(blocked)} for _ in range(2)])
         report=self.monitor(worker,reviewer,function_dispatch=False).run()
         self.assertEqual(report.status,'action_required',report.summary)
         direction=Directions(self.run).append('The isolated test environment is ready.')

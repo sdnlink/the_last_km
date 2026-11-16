@@ -33,7 +33,7 @@ class ReviewFirstTests(unittest.TestCase):
  def test_invalid_or_blocked_requirement_never_launches_worker(self):
   for value in ({}, {**BRIEF,'status':'needs_input','blockers':['External authority must confirm scope']}):
    with self.subTest(value=value),tempfile.TemporaryDirectory() as d:
-    root=Path(d);worker=ScriptedProvider('worker',[]);reviewer=ScriptedProvider('reviewer',[self.brief(value) if value else {'verdict':{},'text':'{}'}])
+    root=Path(d);worker=ScriptedProvider('worker',[]);reviewer=ScriptedProvider('reviewer',[self.brief(value),self.brief(value)] if value else [{'verdict':{},'text':'{}'}])
     result=Supervisor(RunConfig('task',root,worker,reviewer=reviewer,workflow='review-first',run_dir=root/'run',git_history='off'),log=lambda _:None).run()
     self.assertEqual(result.status,'action_required');self.assertEqual(worker.calls,[])
  def test_resume_reuses_ready_requirement_and_rejects_workflow_change(self):

@@ -1452,12 +1452,20 @@ class Supervisor:
                 model=self._reviewer_model(),extra_args=self.config.reviewer_extra_args,read_only=True)
             if turn.session_id:
                 self._active_reviewer_id = turn.session_id
-            if not self.config.function_dispatch or turn.exit_code or turn.timed_out or turn.interruption:
+            if turn.exit_code or turn.timed_out or turn.interruption:
                 return turn
             try:
                 plan = json.loads(turn.text)
                 assignment = plan.get('next_task') if isinstance(plan,dict) else None
-                if isinstance(assignment,dict):
+                if isinstance(plan, dict) and plan.get('status') == 'needs_input' and not attempt:
+                    brief = requirements_review.parse(json.dumps({key:plan[key] for key in requirements_review.SCHEMA['required'] if key in plan}))
+                    if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
+                        requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                            len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
+                            self.config.checks,[item for item in self.directions.messages()
+                                                if item['id'] in self._direction_ids['reviewer']])
+                    raise requirements_review.NeedsInputReassessment(brief['summary'])
+                if self.config.function_dispatch and isinstance(assignment,dict):
                     try:
                         function_tasks.validate_identifiers(assignment)
                     except function_tasks.AssignmentIdentifierError:
@@ -1467,7 +1475,7 @@ class Supervisor:
                                 self.config.checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise
-            except function_tasks.AssignmentIdentifierError as exc:
+            except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment) as exc:
                 if not attempt:
                     self._process_control()
                 if (attempt or self._stop or self._stop_requested
@@ -1488,6 +1496,10 @@ class Supervisor:
                     source = self.run_dir / f'{index:03d}-reviewer{suffix}'
                     if source.exists():
                         source.replace(self.run_dir / (artifact+suffix))
+                if isinstance(exc, requirements_review.NeedsInputReassessment):
+                    self._event('requirements_blocker_reassessment',reason=str(exc),output_file=artifact+'-text.md')
+                    prompt += requirements_review.reassessment_prompt(plan)
+                    continue
                 self._event('requirements_assignment_repair',reason=str(exc),output_file=artifact+'-text.md')
                 prompt += ('\n\nReviewer-only repair of the requirement plan. No worker has started for this plan. '
                            'Correct identifier syntax and corresponding references in the previous response. '
@@ -2611,7 +2623,8 @@ class Supervisor:
                 'You own acceptance design: specify positive, negative and boundary assertions for the worker. '
                 'Watcher automatically derives and executes local tests declared in test_files, even if not selected. '
                 'Supported: Python unittest test_*.py or *_test.py; Node *.js/*.cjs/*.mjs; '
-                'Rust Cargo package tests/name.rs or tests/name/main.rs with an existing Cargo.toml. '
+                'Rust Cargo package tests/name.rs or tests/name/main.rs with an existing Cargo.toml; '
+                'Swift XCTest files under a test target with an existing shared Xcode scheme, or Swift package Tests with Package.swift. '
                 'Use auto:N in check_ids for the Nth test_files entry (one-based); no shell commands or test installation. '
                 'For verification-only delivery with test_files=[], select regression:N from previously accepted tests. '
                 'Current test files become eligible for regression:N only after this assignment is accepted. '
@@ -2619,8 +2632,9 @@ class Supervisor:
                 'show failure before the fix and success after; reviewer independently checks the behavior and test relevance. '
                 'Watcher rejects missing, empty or entirely skipped test suites and reruns accepted regressions at delivery. '
                 'Select behavioral checks relevant to the target; git diff --check alone is insufficient. '
-                'If the catalog lacks the required platform or language check, request operator input to append it; '
-                'do not substitute unrelated checks or generate executable commands. '
+                'Missing native tools are verification limitations, not a request for the person to invent check IDs. '
+                'Plan independent authorized increments first; stop for an unavailable indispensable gate only when no such work remains. '
+                'Do not substitute unrelated checks, claim unavailable tests passed or generate executable commands. '
                 'Only declare module or requirement delivery once accepted tasks plus the current task map to every '
                 'criterion in the delivery scope. Approved check IDs: '
                 + json.dumps(function_gate.catalog(self.config.checks, modules), ensure_ascii=False)

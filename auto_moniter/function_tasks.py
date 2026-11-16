@@ -192,7 +192,7 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
         task = next_schema['anyOf'][1]
         task['properties'].update({k: {'type': 'array', 'items': {'type': 'string'}} for k in GATE_FIELDS})
         task['properties']['check_ids']['description'] = (
-            'Approved check IDs, auto:N for the Nth declared Python unittest, Node or Cargo integration test file, '
+            'Approved check IDs, auto:N for the Nth declared Python unittest, Node, Cargo integration or native Swift test file, '
             'or regression:N from the watcher catalog of already accepted tests. '
             'Watcher derives the local test command; do not provide shell commands.')
         task['required'].extend(sorted(GATE_FIELDS))

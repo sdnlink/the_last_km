@@ -307,7 +307,7 @@ Web 控制台支持扫描已有测试入口并检查前提，扫描本身不运�
 
 Web 新任务先生成完整函数派单计划，再逐项执行；“需求队列”页分页展示全部、当前、待派发与已验收项，展开可查看完整范围、依赖和验收要求。CLI 使用 `--function-dispatch --full-function-plan` 开启。计划保存在 `state.json.function_plan`，恢复保留已验收和当前派单；旧任务需停止并恢复加载新版逻辑后，在安全审核边界补齐剩余计划。计划不代表功能已验收。
 
-Reviewer 负责成功、失败和边界断言，Worker 实现测试，Watcher 根据 `test_files` 生成 Python unittest、Node 22 和 Rust Cargo 本地验收命令。可用 `auto:N` 引用第 N 个声明文件；即使只选已有检查，支持的新增回归仍必须执行。空测试、全部跳过或失败不能验收，恢复后仍重建已接受回归并在模块和整份需求交付时重跑。部署、真实设备、凭据和其他环境入口仍需明确配置，详情见[验收职责与自动入口](ACCEPTANCE_GUIDE.md#reviewerworker-和-watcher-的验收职责)。
+Reviewer 负责成功、失败和边界断言，Worker 实现测试，Watcher 根据 `test_files` 生成 Python unittest、Node 22、Rust Cargo 与已有工程中的原生Swift测试命令。可用 `auto:N` 引用第 N 个声明文件；即使只选已有检查，支持的新增回归仍必须执行。空测试、全部跳过或失败不能验收，恢复后仍重建已接受回归并在模块和整份需求交付时重跑。部署、真实设备、凭据和其他环境入口仍需明确配置，详情见[验收职责与自动入口](ACCEPTANCE_GUIDE.md#reviewerworker-和-watcher-的验收职责)。
 
 可将可选配置保存为 `quality-policy.json`：
 
@@ -399,3 +399,6 @@ auto-moniter history list --cwd /path/to/project
 Review-first 任务将审核通过的代码提交到当前检出的本地业务分支，审计记录另存，Watcher 不自动推送远程；并行任务提交到各自任务分支。同一工作树的锁阻止多个任务同时写入同一副本。
 
 部署与恢复见 [运维说明](OPERATIONS.md)，全部参数见 [CLI 参考](docs/cli-reference.md)，检查选择见 [验收指南](ACCEPTANCE_GUIDE.md)，页面操作见 [控制台使用说明](console/README.md)。
+
+
+开发任务默认推进可逆的实现与相关验证，常规方案记录为假设。需求评审第一次要求输入时，Watcher在原预算内再只读复核一次能否先做独立工作；真正缺少决定、授权或不可替代环境时仍停止，不会伪造批准或测试结果。Swift/XCTest可使用现有工程自动生成`auto:N`检查，无需人工注册命令。详见[自主执行与阻塞](docs/autonomous-execution.md)。

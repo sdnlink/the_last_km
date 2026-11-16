@@ -56,7 +56,7 @@ class ReviewProgressTests(unittest.TestCase):
                  'blockers':['Human must confirm the standard'], 'constraints':['Keep the complete scope']}
         text = json.dumps(brief, ensure_ascii=False)
         worker = ScriptedProvider('worker', [])
-        reviewer = ScriptedProvider('reviewer', [{'verdict':{}, 'text':text}])
+        reviewer = ScriptedProvider('reviewer', [{'verdict':{}, 'text':text} for _ in range(2)])
         result = Supervisor(RunConfig('task', self.root, worker, reviewer=reviewer,
             workflow='review-first', run_dir=self.run, git_history='off'), log=lambda _:None).run()
         self.assertEqual(result.status, 'action_required')

@@ -44,6 +44,9 @@ def command(root, name):
             raise ValueError('Local Rust test must belong to a Cargo package: ' + name)
         return shlex.join([*prefix, '--runner', 'cargo', '--executable', shutil.which('cargo') or 'cargo',
                            '--manifest', str(manifest.relative_to(root)), '--target', target])
+    if path.suffix == '.swift':
+        from auto_moniter.native_tests import command as native_command
+        return native_command(root, name, prefix)
     return None
 
 

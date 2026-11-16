@@ -71,6 +71,41 @@ def requests_follow_up(text):
     return authorized
 
 
+class NeedsInputReassessment(ValueError):
+    """A valid blocked brief gets one independent reconsideration, never auto-approval."""
+
+
+def autonomy_guidance():
+    return (
+        'Execution autonomy: a request to develop authorizes ordinary reversible implementation, '
+        'focused tests, local fixes and reasonable product/engineering defaults within its scope. '
+        'Record reversible choices in assumptions; do not ask the person to manage routine details. '
+        'Your read-only restriction applies to this reviewer turn, not to the later worker. '
+        'A missing compiler, a temporarily failed public search or a later external approval does not '
+        'block independent authorized work: order the plan so executable work comes first and record '
+        'the actual remaining platform/evidence gate explicitly without claiming it passed. '
+        'Do not strengthen acceptance by requiring remote publication, guaranteed App Store approval '
+        'or credentials before local development unless the person explicitly required that dependency. '
+        'Do not weaken an explicit acceptance requirement either: preserve it as an unresolved final '
+        'gate, while identifying independent deliverable work that can proceed. '
+        'Use needs_input only when no useful authorized next increment can proceed without a specific '
+        'human decision, missing authorization/credential or indispensable external capability. '
+        'State the exact decision, why existing instructions cannot settle it, and what independent work '
+        'has already been exhausted. Never fabricate decisions, test results or access. '
+        'Watcher-generated auto:N tests do not require the operator to register shell commands or check IDs. '
+    )
+
+
+def reassessment_prompt(previous):
+    return ('\n\nBefore stopping, reassess this needs_input conclusion once. No worker has been authorized '
+            'by this response, and you remain read-only. '+autonomy_guidance()+
+            'Preserve all original requirements, checks and genuine unresolved decisions. '
+            'If an independent increment is possible, return a valid ready plan whose assumptions '
+            'separate deferred final verification from the next implementation. Otherwise confirm '
+            'needs_input with concrete blockers. Do not start work or silently accept an external gate. '
+            'Previous blocked analysis:\n'+json.dumps(previous,ensure_ascii=False))
+
+
 def prompt(config, modules, *, follow_up=None, continuation=None, queued_requirement=None):
     task_guidance = ''
     if getattr(config, 'task_type', 'code') == 'deployment':
@@ -97,6 +132,7 @@ def prompt(config, modules, *, follow_up=None, continuation=None, queued_require
             'Fixed checks are a minimum: identify focused behavioral checks for the requested changes, '
             'rather than treating unrelated existing tests or diff formatting as proof of new functionality. '
             'Never invent approvals or credentials, remove requirements or expand authorization. Mark genuine external decisions as needs_input. '
+            + autonomy_guidance() +
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
             + task_guidance
             + _follow_up_block(follow_up, queued_requirement) +

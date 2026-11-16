@@ -34,10 +34,16 @@ def targets(task):
     return ((task['file'], task['symbol']),)
 
 
+def writable_files(task):
+    return list(dict.fromkeys([*(file for file, _ in targets(task)),
+                               *task.get('edit_files', []), *task.get('test_files', [])]))
+
+
 def identity(task):
     return (task['id'], task['module_id'], task['delivery_scope'], task['depends_on'],
             task.get('kind'), task.get('integration_scope'), sorted(targets(task)),
-            sorted(task['test_files']) if task.get('kind') == 'integration' else None)
+            sorted(task['test_files']) if task.get('kind') == 'integration' else None,
+            sorted(task.get('edit_files', [])))
 
 
 def validate_target(file, symbol):
@@ -81,13 +87,13 @@ def validate_identifiers(value):
 
 
 def validate(value, modules=None):
-    if not isinstance(value,dict) or set(value) not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
+    if not isinstance(value,dict) or set(value) - {'edit_files'} not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
     validate_identifiers(value)
     for key in ['objective','inputs','outputs']:
         if not isinstance(value[key],str) or not value[key].strip() or len(value[key])>2000 or '\0' in value[key]:
             raise ValueError('Missing precise function assignment '+key)
-    if set(value) == INTEGRATION_TASK_FIELDS:
+    if set(value) - {'edit_files'} == INTEGRATION_TASK_FIELDS:
         reason = value['atomic_reason']
         if (value['kind'] != 'integration' or not identifier(value['integration_scope'])
                 or not isinstance(reason, str) or not reason.strip() or len(reason) > 1500 or '\0' in reason):
@@ -95,10 +101,21 @@ def validate(value, modules=None):
         validate_targets(value['targets'])
     else:
         validate_target(value['file'], value['symbol'])
-        if set(value) == VERIFICATION_TASK_FIELDS and (
+        if set(value) - {'edit_files'} == VERIFICATION_TASK_FIELDS and (
                 value['kind'] != 'verification' or value['delivery_scope'] not in ('module', 'requirement')
                 or value['test_files']):
             raise ValueError('Verification-only tasks must close a module or requirement without test file writes')
+    edits = value.get('edit_files', [])
+    if (not isinstance(edits, list) or len(edits) > 20
+            or any(not isinstance(name, str) or not name or len(name) > 512 for name in edits)
+            or len(set(edits)) != len(edits)):
+        raise ValueError('edit_files must contain at most 20 distinct exact project-relative paths')
+    if edits and (not GATE_FIELDS <= value.keys() or value.get('kind') in ('integration', 'verification')):
+        raise ValueError('edit_files requires a verified implementation assignment, not integration or verification')
+    for name in edits:
+        validate_target(name, 'file')
+        if str(Path(name)) != name or any(ord(c) < 32 for c in name) or name in ('.', ''):
+            raise ValueError('edit_files must use canonical exact paths')
     for key in ['boundaries','verification','depends_on']:
         v=value[key]
         if not isinstance(v,list) or len(v)>20 or any(not isinstance(s,str) or not s.strip() or len(s)>1500 for s in v):
@@ -131,7 +148,7 @@ class FunctionTasks:
         self.accepted=copy.deepcopy(saved['accepted'])
         seen=set()
         for item in self.accepted:
-            if not isinstance(item,dict) or set(item) not in (
+            if not isinstance(item,dict) or set(item) - {'file_hashes'} not in (
                     {'task','round','tree','evidence'}, {'task','round','tree','evidence','verification','symbol_hash'},
                     {'task','round','tree','evidence','verification','target_hashes'}):
                 raise ValueError('Invalid accepted function checkpoint')
@@ -142,6 +159,11 @@ class FunctionTasks:
             if not isinstance(item['evidence'],list) or any(not isinstance(e,str) for e in item['evidence']) or len(json.dumps(item).encode())>24000:
                 raise ValueError('Invalid accepted function evidence')
             if 'verification' in item:
+                files = item.get('file_hashes', {})
+                if (not isinstance(files, dict) or set(files) != set(task.get('edit_files', []))
+                        or any(h is not None and (not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h))
+                               for h in files.values())):
+                    raise ValueError('Invalid accepted assignment file verification')
                 checks = item['verification']
                 if task.get('kind') == 'integration':
                     hashes = item.get('target_hashes')
@@ -196,6 +218,11 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
             'or regression:N from the watcher catalog of already accepted tests. '
             'Watcher derives the local test command; do not provide shell commands.')
         task['required'].extend(sorted(GATE_FIELDS))
+        task['properties']['edit_files'] = {'type': 'array', 'maxItems': 20, 'items': {'type': 'string'},
+            'description': 'Exact files for one atomic change, including resources, project registration, helpers or docs. '
+                           'Listed source files permit whole-file edits. Use [] for strict single-function work. '
+                           'Never list existing tests, unneeded files or patterns. Prose boundaries grant no extra writes.'}
+        task['required'].append('edit_files')
         verification = copy.deepcopy(task)
         verification['properties']['kind'] = {'type': 'string', 'enum': ['verification']}
         verification['properties']['delivery_scope']['enum'] = ['module', 'requirement']
@@ -212,7 +239,7 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
                             'properties': {k: {'type': 'string'} for k in ('file', 'symbol')},
                             'required': ['file', 'symbol']}},
             })
-            grouped['required'] = sorted(INTEGRATION_TASK_FIELDS)
+            grouped['required'] = sorted(INTEGRATION_TASK_FIELDS | {'edit_files'})
             next_schema['anyOf'].append(grouped)
     if planning:
         additions={'next_task':next_schema,'modules':module_schema()}
@@ -236,7 +263,11 @@ def module_schema():
 
 def verdict_contract(role, task, *, report_only=False):
     group = task.get('kind') == 'integration'
-    scope = 'the dispatched integration and all of its listed functions' if group else 'the dispatched function'
+    scope = ('the dispatched atomic change, its named primary function and exact edit_files' if task.get('edit_files')
+             else 'the dispatched integration and all of its listed functions' if group else 'the dispatched function')
+    manifest = ('The edit_files manifest grants whole-file edits at exactly those paths, including necessary helper '
+                'declarations, resources and registration. Preserve existing tests and all other file/function scopes. '
+                'Cite every manifest file in evidence. ' if task.get('edit_files') else '')
     if role=='worker':
         return (
             ('Correct only the report using existing evidence. Do not edit files or run builds/tests. '
@@ -244,7 +275,7 @@ def verdict_contract(role, task, *, report_only=False):
              'Verification-only: inspect existing code and evidence, do not edit source or tests or run commands that write files. '
              'Report concrete defects as incomplete; the watcher executes approved checks. '
              if task.get('kind') == 'verification' else f'Only implement {scope} and its focused verification. Do not start other work. ')+
-            'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
+            manifest + 'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
             'otherwise task_status=incomplete. Return next_task=null and modules=[]. '
             'For delivery_scope=function return status=continue even when task_status=done. '
             'For module or requirement delivery, return status=done with scope matching delivery_scope and '
@@ -257,7 +288,7 @@ def verdict_contract(role, task, *, report_only=False):
             'describe that handoff in summary rather than next_actions. '
             'For task_status=incomplete, gaps and next_actions describe only this assignment.')
     return (
-        IDENTIFIER_CONTRACT + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
+        IDENTIFIER_CONTRACT + manifest + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Accept after worker task_status=done and current evidence agrees. '
         'Independently assess the worker concerns and test evidence. Nonempty worker gaps/next_actions, '
         'or waiting for automatic watcher checks or review, are not by themselves implementation defects. '

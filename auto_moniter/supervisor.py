@@ -515,6 +515,30 @@ class Supervisor:
                 break
             if self.project:
                 self._sync_business_head(records)
+            scope_candidate = self._scope_replan_candidate(records)
+            if scope_candidate is not None:
+                recovery_path = self.run_dir / 'scope-recovery.json'
+                key = {'task_id': self.function_tasks.current['id'], 'tree': scope_candidate.tree}
+                if recovery_path.exists() and json.loads(recovery_path.read_text()).get('candidate') == key:
+                    return self._finish('action_required',
+                        'Assignment scope repair did not resolve the monitor gate; candidate preserved. '
+                        'No further unchanged worker/reviewer rounds will be started.', records, last_worker)
+                write_json(recovery_path, {'candidate': key, 'status': 'planning'}, durable=True)
+                reasons = scope_candidate.watcher_result['candidate_checks']['scope_gaps']
+                self._planning_rejection = {'task_id': key['task_id'], 'scope_repair': True,
+                    'reason': 'Repeated scope rejection on the same candidate: ' + '; '.join(reasons)}
+                self._event('assignment_scope_replanning', **key, reasons=reasons)
+                if not self._elaborate_requirement(records, next_function=True):
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                        self.requirements_review.get('summary', 'Assignment scope needs correction'), records, last_worker)
+                gaps = self._function_scope_problems()
+                if gaps:
+                    return self._finish('action_required',
+                        'Assignment scope repair still rejects the preserved candidate: ' + '; '.join(gaps),
+                        records, last_worker)
+                scope_candidate.watcher_result['scope_replan'] = {'task': self.function_tasks.current, 'pending': True}
+                write_json(recovery_path, {'candidate': key, 'status': 'review_pending'}, durable=True)
+                self._write_state(records, 'running', stall, previous_gap_key, scope_candidate.tree)
             if self.project and self.requirements_review.get('status') == 'ready' and (self.project.needs_review or self._project_replan):
                 self.project.retain_assignment(self.function_tasks.current)
                 self.function_tasks.current = None
@@ -1462,12 +1486,16 @@ class Supervisor:
         if next_function and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
-                raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
+                repairing_scope = bool((self._planning_rejection or {}).get('scope_repair'))
+                if (not repairing_scope or function_tasks.identity(revised)[:-1] != function_tasks.identity(dispatch.current)[:-1]
+                        or any(revised.get(key) != dispatch.current.get(key)
+                               for key in ('test_files', 'criterion_ids', 'check_ids'))):
+                    raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
             dispatch.current = None
         dispatch.assign(assignment, staged.items)
         if self.project and self.project.scope:
             from auto_moniter.project_workspace import contains
-            files = [file for file,_ in function_tasks.targets(dispatch.current)] + dispatch.current.get('test_files',[])
+            files = function_tasks.writable_files(dispatch.current)
             if any(not contains(self.project.scope,file) for file in files):
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
@@ -1661,6 +1689,8 @@ class Supervisor:
                                'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
+                    if self.function_tasks.current:
+                        prompt += '\nExact unfinished assignment (preserve identity and checks):\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
             elif next_function:
                 prompt += ('\nAssess the changed project inputs against the existing brief and update the implementation plan. '
                            'Preserve its original acceptance criteria and all outstanding work: '
@@ -2666,6 +2696,8 @@ class Supervisor:
                   if task.get('kind') == 'integration' else {'file': task['file'], 'symbol': task['symbol']})
         if task.get('kind') == 'verification':
             fields['task_kind'] = 'verification'
+        if task.get('edit_files'):
+            fields['edit_files'] = task['edit_files']
         self._event('function_assigned', task_id=task['id'], **fields)
 
     def _function_planning_contract(self):
@@ -2691,6 +2723,13 @@ class Supervisor:
                 'Use the same indices for new module definitions or a new brief returned in this response. Select check_ids from the '
                 'approved catalog; never write an executable command in a task. Include test_files=[] or exact paths '
                 'for new focused test files. Preserve existing tests and all code outside the assigned targets. '
+                'For one atomic increment that also needs imports, helper declarations, model properties, resource files, '
+                'project registration or docs, list every necessary exact path in edit_files. A listed source path allows '
+                'whole-file edits; keep the named function as the primary implementation and verify the complete change. '
+                'Use edit_files=[] for strict single-function work. Boundaries prose does not grant extra file permissions. '
+                'Existing tests and test configuration remain protected. Do not list directories, patterns or unrelated files. '
+                'A scope_repair rejection authorizes reviewer-only correction of edit_files for the SAME unfinished task, '
+                'preserving its ID, primary function, tests, criteria and dependencies; do not redo the implementation. '
                 'You own acceptance design: specify positive, negative and boundary assertions for the worker. '
                 'Watcher automatically derives and executes local tests declared in test_files, even if not selected. '
                 'Supported: Python unittest test_*.py or *_test.py; Node *.js/*.cjs/*.mjs; '
@@ -2762,7 +2801,7 @@ class Supervisor:
         task = ledger.current
         if self.project and self.project.scope:
             from auto_moniter.project_workspace import contains
-            files = [file for file,_ in function_tasks.targets(task)] + task.get('test_files',[])
+            files = function_tasks.writable_files(task)
             if any(not contains(self.project.scope,file) for file in files):
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
@@ -2786,7 +2825,7 @@ class Supervisor:
         for task in plan['tasks']:
             if self.project and self.project.scope:
                 from auto_moniter.project_workspace import contains
-                paths = [file for file, _ in function_tasks.targets(task)] + task.get('test_files', [])
+                paths = function_tasks.writable_files(task)
                 if any(not contains(self.project.scope, name) for name in paths):
                     problems.append('Complete plan must stay inside the declared parallel task scope: '+task['id'])
             if self._function_gate:
@@ -3047,7 +3086,8 @@ class Supervisor:
             ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '') if not verification else []
         cited = set(evidence_paths(self.config.cwd, conclusion.evidence,
             baseline=None if verification else self._baseline_files, ignore_dir=self.run_dir))
-        missing = [file for file, _ in function_tasks.targets(self.function_tasks.current)
+        task = self.function_tasks.current
+        missing = [file for file in dict.fromkeys([*(f for f, _ in function_tasks.targets(task)), *task.get('edit_files', [])])
                    if (self.config.cwd / file).resolve() not in cited]
         errors = [role + ': ' + problem for problem in problems]
         if missing:
@@ -3064,6 +3104,10 @@ class Supervisor:
                 staged.accepted[-1]['target_hashes'] = self._function_target_hashes
             else:
                 staged.accepted[-1]['symbol_hash'] = self._function_target_hashes[task['file']]
+            if task.get('edit_files'):
+                snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+                staged.accepted[-1]['file_hashes'] = {name: snapshot.get(str(self.config.cwd / name))
+                                                     for name in task['edit_files']}
             local = self._local_test_commands(task.get('test_files', []))
             if local:
                 review_record.watcher_result['local_tests'] = {
@@ -3956,6 +4000,29 @@ class Supervisor:
             ]
         )
 
+    def _scope_replan_candidate(self, records):
+        """Route repeated permission failures to planning, rather than another writer."""
+        task = self.function_tasks.current
+        if (not self._function_gate or not task or self._pending_directions()
+                or self.project and (self.project.needs_review or self._project_replan)):
+            return None
+        workers = [r for r in records if r.role == 'worker' and r.verdict.task_id == task['id']]
+        if len(workers) < 2:
+            return None
+        latest = workers[-1]
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != latest.tree:
+            return None
+        for record in workers[-2:]:
+            receipt = record.watcher_result.get('candidate_checks', {})
+            gaps = receipt.get('scope_gaps', [])
+            if (record.tree != latest.tree or record.verdict.task_status != 'done'
+                    or record.failure or record.interruption or record.exit_code or record.timed_out
+                    or not gaps or any(not g.startswith(('Restore changes outside this assignment: ',
+                                                       'Restore edits outside the assigned function: ')) for g in gaps)
+                    or not candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(record))):
+                return None
+        return latest
+
     def _pending_review(self, records):
         """Resume an exact submitted candidate after review transport/format failure."""
         if self.config.workflow != 'review-first' or self.config.no_review or self._pending_directions():
@@ -3981,6 +4048,12 @@ class Supervisor:
             return worker
         if worker.failure or worker.interruption:
             return None
+        rescope = worker.watcher_result.get('scope_replan', {})
+        if (rescope.get('pending') and rescope.get('task') == self.function_tasks.current
+                and worker.tree == workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                and not self._function_scope_problems()):
+            rescope['pending'] = False
+            return worker  # Checks and independent review must run under the new manifest.
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
         if review and review.watcher_result.get('function_gate') == 'repair' and not self._check_retry_review(review):
             # Older monitors mislabeled failed checks as implementation repair.

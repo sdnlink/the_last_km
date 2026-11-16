@@ -372,6 +372,17 @@ class ProjectWorkspaceTests(unittest.TestCase):
         self.assertEqual(worker.calls,[])
         self.assertEqual(git(a.cwd,'rev-parse','HEAD'),self.baseline)
 
+    def test_edit_manifest_cannot_expand_the_human_declared_project_scope(self):
+        from tests.test_function_dispatch import task, plan
+        a=self.workspace()
+        assignment=task('ATOMIC','app.py');assignment['edit_files']=['app.py','other.py']
+        worker=ScriptedProvider('worker',[])
+        reviewer=SnapshotReviewer('reviewer',[plan(assignment) for _ in range(2)])
+        report=self.monitor(a,worker,reviewer,function_dispatch=True).run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertIn('declared task scope',report.summary)
+        self.assertEqual(worker.calls,[])
+
     def test_function_planning_and_delivery_without_declared_file_scope(self):
         from tests.test_function_dispatch import FunctionWorker, task, result, plan
         original = 'def parse_input():\n    return 0\n'

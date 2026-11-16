@@ -10,9 +10,10 @@ import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 
-from auto_moniter.function_tasks import GATE_FIELDS, targets
+from auto_moniter.function_tasks import GATE_FIELDS, targets, writable_files
 from auto_moniter.function_languages import GRAMMARS, parser as language_parser, spans as language_spans
 from auto_moniter.quality import test_asset
+from auto_moniter.workspace import file_snapshot
 
 
 SUFFIXES = {'.py', '.js', '.mjs', '.cjs', '.html', '.htm', *GRAMMARS}
@@ -280,6 +281,10 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
     if not GATE_FIELDS <= task.keys():
         raise ValueError('Function assignment requires criterion_ids, check_ids and test_files')
     paths = {_target_path(root, file) for file, _ in targets(task)}
+    for name in task.get('edit_files', []):
+        path = _path(root, name)
+        if test_asset(name) or name in task['test_files'] or path.is_dir():
+            raise ValueError('edit_files cannot grant directory or regression/test configuration edits: ' + name)
     if not future and task.get('kind') == 'verification' and any(not path.is_file() for path in paths):
         raise ValueError('Verification-only targets must already exist')
     if task.get('kind') == 'integration':
@@ -356,7 +361,7 @@ def _write_baseline(path, saved):
 def scope_problems(root, task, saved, snapshot):
     before = saved['files']
     target_paths = {file: _path(root, file) for file, _ in targets(task)}
-    allowed = {str(path) for path in target_paths.values()} | {str(_path(root, name)) for name in task['test_files']}
+    allowed = {str(_path(root, name)) for name in writable_files(task)}
     changed = {p for p in before.keys() | snapshot.keys() if before.get(p) != snapshot.get(p)}
     if task.get('kind') == 'verification':
         if changed:
@@ -387,7 +392,7 @@ def scope_problems(root, task, saved, snapshot):
         label = file + '::' + symbol
         if new['body'] is None or new['body'] == old['body']:
             gaps.append('Implement or change the assigned function: ' + label)
-        elif (old['outside'] is not None and old['outside'] != new['outside']
+        elif file not in task.get('edit_files', []) and (old['outside'] is not None and old['outside'] != new['outside']
                 or old['outside'] is None and old['whole'] not in new['without']):
             gaps.append('Restore edits outside the assigned function: ' + label)
         else:
@@ -417,6 +422,9 @@ def coverage(ledger, modules, task, brief, root, *, provisional=None):
         if not item.get('verification') or not required.intersection(old['criterion_ids']) - covered:
             continue
         accepted = item.get('target_hashes') if old.get('kind') == 'integration' else {old['file']: item['symbol_hash']}
-        if all(body(file, symbol) == accepted[file] for file, symbol in targets(old)):
+        files = item.get('file_hashes', {})
+        snapshot = file_snapshot(root) if files else {}
+        if (all(body(file, symbol) == accepted[file] for file, symbol in targets(old))
+                and all(snapshot.get(str(root / name)) == digest for name, digest in files.items())):
             covered.update(old['criterion_ids'])
     return sorted(required - covered)

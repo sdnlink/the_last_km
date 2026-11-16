@@ -19,7 +19,7 @@ def parsed_response(value):
     fields = set(requirements_review.SCHEMA['required'])
     if set(value) not in (fields, fields | {'next_task', 'modules'}, fields | {'next_task', 'modules', 'function_plan'}):
         raise ValueError('Not a requirement-review response')
-    requirements_review.parse(json.dumps({k:value[k] for k in fields}))
+    requirements_review.parse(json.dumps({k:value[k] for k in fields}), context_only=True)
     return value
 
 
@@ -90,6 +90,16 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
                    'source':'legacy reviewer artifact; prior input snapshot unavailable'}
     except (OSError,ValueError,TypeError,KeyError):
         return None
+    name = previous.get('output_file')
+    if (previous.get('status') == 'failed' and isinstance(name,str)
+            and re.fullmatch(r'\d+-reviewer(?:-repair-\d+)?-text\.md',name)):
+        try:
+            latest = parsed_response(read(run/name, 1024*1024))
+            if latest != context['previous_response']:
+                context['previous_response'] = latest
+                context['source'] = 'latest rejected reviewer artifact with retained input context'
+        except (OSError,ValueError,TypeError):
+            pass
     context['previous_status'] = previous.get('status','unknown')
     context['rejection'] = previous.get('summary','') if previous.get('status') == 'failed' else ''
     context['approval'] = 'Context only. Validate the revised plan; this cache grants no acceptance or implementation permission.'

@@ -10,16 +10,16 @@ def requirement_hash(text):
     return hashlib.sha256(text.replace('\r\n', '\n').replace('\r', '\n').strip().encode()).hexdigest()
 
 SCHEMA = {'type':'object','additionalProperties':False,'properties':{
-    'status':{'type':'string','enum':['ready','needs_input']},
+    'status':{'type':'string','enum':['ready','needs_input'],'description':'ready means the next authorized increment can proceed, not final delivery acceptance.'},
     'summary':{'type':'string'},'refined_requirement':{'type':'string'},
     'acceptance_criteria':{'type':'array','items':{'type':'string'}},
     'constraints':{'type':'array','items':{'type':'string'}},
     'assumptions':{'type':'array','items':{'type':'string'}},
-    'blockers':{'type':'array','items':{'type':'string'}}},
+    'blockers':{'type':'array','items':{'type':'string'},'description':'Only problems preventing the next increment now. Must be [] for ready. Record later verification/external gates in constraints.'}},
     'required':['status','summary','refined_requirement','acceptance_criteria','constraints','assumptions','blockers']}
 
 
-def parse(text):
+def parse(text, *, context_only=False):
     value=json.loads(text)
     if not isinstance(value,dict) or set(value)!=set(SCHEMA['required']):
         raise ValueError('Requirement elaboration has missing or unknown fields')
@@ -31,7 +31,7 @@ def parse(text):
     for key in ('acceptance_criteria','constraints','assumptions','blockers'):
         if not isinstance(value[key],list) or len(value[key])>60 or any(not isinstance(v,str) or not v.strip() or len(v)>2000 for v in value[key]):
             raise ValueError('Invalid '+key)
-    if value['status']=='ready' and (not value['acceptance_criteria'] or value['blockers']):
+    if not context_only and value['status']=='ready' and (not value['acceptance_criteria'] or value['blockers']):
         raise ValueError('Ready elaboration needs acceptance criteria and no unresolved blockers')
     return value
 
@@ -71,6 +71,10 @@ def requests_follow_up(text):
     return authorized
 
 
+class RequirementReportRepair(ValueError):
+    """A typed report is inconsistent and must be corrected by its reviewer."""
+
+
 class NeedsInputReassessment(ValueError):
     """A valid blocked brief gets one independent reconsideration, never auto-approval."""
 
@@ -92,6 +96,9 @@ def autonomy_guidance():
         'human decision, missing authorization/credential or indispensable external capability. '
         'State the exact decision, why existing instructions cannot settle it, and what independent work '
         'has already been exhausted. Never fabricate decisions, test results or access. '
+        'Report contract: for ready, blockers MUST be []; keep future native verification, final owner acceptance '
+        'and external release gates in constraints. For needs_input name only current blocking decisions. '
+        'Do not declare ready while retaining a list of current blockers. '
         'Watcher-generated auto:N tests do not require the operator to register shell commands or check IDs. '
     )
 

@@ -1435,7 +1435,12 @@ class Supervisor:
     def _elaborate_requirement(self,records, *, next_function=False):
         while True:
             self._project_review_changed = False
+            self._requirement_input_changed = False
             result = self._elaborate_requirement_once(records,next_function=next_function)
+            if self._requirement_input_changed and not self._stop:
+                self._event('requirements_input_retry',reason='New user directions arrived during review; stale plan was not dispatched')
+                self._check_budget()
+                continue
             if not self._project_review_changed or self._stop:
                 return result
             self._event('project_review_retry', reason='Concurrent changes invalidated the review; preserving work and reviewing current inputs')
@@ -1444,7 +1449,7 @@ class Supervisor:
             self._sync_business_head(records)
 
     def _invoke_requirement_review(self, prompt, index):
-        """Repair malformed assignment IDs once, keeping implementation stopped."""
+        """Repair one typed report/assignment contradiction without dispatching work."""
         tree = workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         signature = self.project.signature if self.project else ''
         for attempt in range(2):
@@ -1454,8 +1459,24 @@ class Supervisor:
                 self._active_reviewer_id = turn.session_id
             if turn.exit_code or turn.timed_out or turn.interruption:
                 return turn
+            if any(item['id'] not in self._direction_ids['reviewer'] for item in self.directions.messages()):
+                return turn  # Rebuild the review with the latest user input first.
             try:
                 plan = json.loads(turn.text)
+                if isinstance(plan,dict):
+                    typed = {key:plan[key] for key in requirements_review.SCHEMA['required'] if key in plan}
+                    try:
+                        requirements_review.parse(json.dumps(typed))
+                    except ValueError as error:
+                        # Repair only a typed requirement report here. Arbitrary invalid
+                        # output does not acquire an approved plan or an infinite retry.
+                        requirements_review.parse(json.dumps(typed),context_only=True)
+                        if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
+                            requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                                len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
+                                self.config.checks,[item for item in self.directions.messages()
+                                                    if item['id'] in self._direction_ids['reviewer']])
+                        raise requirements_review.RequirementReportRepair(str(error))
                 assignment = plan.get('next_task') if isinstance(plan,dict) else None
                 if isinstance(plan, dict) and plan.get('status') == 'needs_input' and not attempt:
                     brief = requirements_review.parse(json.dumps({key:plan[key] for key in requirements_review.SCHEMA['required'] if key in plan}))
@@ -1475,7 +1496,8 @@ class Supervisor:
                                 self.config.checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise
-            except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment) as exc:
+            except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment,
+                    requirements_review.RequirementReportRepair) as exc:
                 if not attempt:
                     self._process_control()
                 if (attempt or self._stop or self._stop_requested
@@ -1499,6 +1521,15 @@ class Supervisor:
                 if isinstance(exc, requirements_review.NeedsInputReassessment):
                     self._event('requirements_blocker_reassessment',reason=str(exc),output_file=artifact+'-text.md')
                     prompt += requirements_review.reassessment_prompt(plan)
+                    continue
+                if isinstance(exc, requirements_review.RequirementReportRepair):
+                    self._event('requirements_report_repair',reason=str(exc),output_file=artifact+'-text.md')
+                    prompt += ('\n\nReviewer-only report repair; no worker has started. Correct only the report contradiction: '
+                               +str(exc)+'. For ready, blockers must be []. Move genuinely deferred validation gates '
+                               'into constraints without deleting or marking them satisfied. If the next step is genuinely '
+                               'blocked, return needs_input instead. Preserve substantive criteria, completed research, '
+                               'the function plan and target scope; do not repeat repository research or implementation. '
+                               'Previous report:\n'+turn.text)
                     continue
                 self._event('requirements_assignment_repair',reason=str(exc),output_file=artifact+'-text.md')
                 prompt += ('\n\nReviewer-only repair of the requirement plan. No worker has started for this plan. '
@@ -1619,6 +1650,20 @@ class Supervisor:
                                  'Change source is unknown; concurrent writes are possible. Files: '+preview+'. See '+report)
             if turn.exit_code or turn.timed_out or turn.interruption:
                 raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
+            if any(item['id'] not in self._direction_ids['reviewer'] for item in self.directions.messages()):
+                try:
+                    requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                        len(self.requirement_cycles)+1,json.loads(turn.text),before_files,self.config.checks,review_directions)
+                except (ValueError,TypeError):
+                    pass
+                artifact = f'{review_index:03d}-reviewer-repair-{self._agent_calls}'
+                for suffix in ['.log','-text.md','-prompt.md']:
+                    source = self.run_dir / f'{review_index:03d}-reviewer{suffix}'
+                    if source.exists():
+                        source.replace(self.run_dir / (artifact+suffix))
+                output_file = artifact+'-text.md'
+                self._requirement_input_changed = True
+                raise ValueError('New user directions arrived during requirement review; revalidation required before dispatch')
             if self.config.function_dispatch:
                 plan = json.loads(turn.text)
                 if not isinstance(plan, dict) or not {'next_task','modules'} <= plan.keys():
@@ -1696,7 +1741,8 @@ class Supervisor:
                                       'cycle': len(self.requirement_cycles) + 1,
                                       **({'output_file':output_file} if output_file else {}),
                                       **({'workspace_changes':workspace_changes} if workspace_changes else {})}
-            if follow_up and not self._stop_requested and not self._project_review_changed:
+            if (follow_up and not self._stop_requested and not self._project_review_changed
+                    and not self._requirement_input_changed):
                 self._stop = True
                 self._stop_reason = 'Next requirement not ready: ' + self.requirements_review['summary']
             return False
@@ -2610,6 +2656,7 @@ class Supervisor:
             'integration. Every target must change, and each role must cite every target file. Approved integration scopes: '
             + json.dumps(scopes, ensure_ascii=False)) if scopes else ''
         return ('\nFunction gate: use a supported source language and identify one exact qualified symbol. '
+                'Python symbols are source-local: use a top-level function name or Class.method, not a filename/module prefix. '
                 'When implementation is already correct and only module/final acceptance remains, use kind=verification, '
                 'delivery_scope=module or requirement, test_files=[] and an existing function; no source edits are required '
                 'or allowed. The worker and reviewer inspect read-only, and the watcher runs the fixed checks. '

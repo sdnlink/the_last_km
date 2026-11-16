@@ -214,6 +214,13 @@ def requirement_criteria(brief):
             for i, text in enumerate(brief.get('acceptance_criteria', []), 1)}
 
 
+def known_criteria(modules, brief):
+    # A shared function can substantiate multiple existing modules. References
+    # describe evidence; they never expand its assigned file/symbol permissions.
+    return requirement_criteria(brief) | {key:text for module_id in modules
+                                          for key,text in criteria(modules,module_id).items()}
+
+
 def catalog(checks, modules, module_id=None, *, root=None, task=None, regressions=()):
     result = {f'check:{i}': command for i, command in enumerate(checks, 1)}
     for key, item in modules.items():
@@ -279,8 +286,8 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
         verify_integration_approval(task, approvals)
     module_criteria = criteria(modules, task['module_id'])
     ids = set(task['criterion_ids'])
-    if not ids & module_criteria.keys() or not ids <= module_criteria.keys() | requirement_criteria(brief).keys():
-        raise ValueError('Function assignment must reference its module criteria and only known requirement criteria')
+    if not ids & module_criteria.keys() or not ids <= known_criteria(modules,brief).keys():
+        raise ValueError('Function assignment must reference its module criteria and only known acceptance criteria')
     approved = catalog(checks, modules, task['module_id'], root=None if future else root,
                        task=task, regressions=regressions)
     if future:

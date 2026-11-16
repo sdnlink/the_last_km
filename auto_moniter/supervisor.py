@@ -1448,8 +1448,38 @@ class Supervisor:
             self._retry_pause(1,'coalescing concurrent project changes')
             self._sync_business_head(records)
 
-    def _invoke_requirement_review(self, prompt, index):
-        """Repair one typed report/assignment contradiction without dispatching work."""
+    def _stage_requirement_plan(self, assignment, modules, backlog, brief, *, next_function=False):
+        """Validate on cloned ledgers: no accepted state changes or worker dispatch."""
+        from auto_moniter.modules import definitions
+        proposed = definitions(modules)
+        if any(m.get('files') or m.get('checks') for m in proposed):
+            raise ValueError('Planning cannot supply executable checks or override fixed file scopes')
+        if self.modules.items and any(m['id'] not in self.modules.items for m in proposed):
+            raise ValueError('Function planning cannot expand fixed module scope')
+        staged = ModuleLedger.restore(self.modules.export())
+        staged.merge(proposed)
+        dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
+        if next_function and dispatch.current:
+            revised = function_tasks.validate(assignment, staged.items)
+            if function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
+                raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
+            dispatch.current = None
+        dispatch.assign(assignment, staged.items)
+        if self.project and self.project.scope:
+            from auto_moniter.project_workspace import contains
+            files = [file for file,_ in function_tasks.targets(dispatch.current)] + dispatch.current.get('test_files',[])
+            if any(not contains(self.project.scope,file) for file in files):
+                raise ValueError('Parallel assignment targets must stay inside the declared task scope')
+        if self._function_gate:
+            self._validate_function_plan(dispatch, staged.items, brief)
+        elif dispatch.current.get('kind') in ('integration','verification'):
+            raise ValueError('Integration and verification assignments require the verified function gate')
+        complete = (self._validate_complete_function_plan(backlog, dispatch, staged.items, brief)
+                    if self.config.full_function_plan else None)
+        return staged, dispatch, complete
+
+    def _invoke_requirement_review(self, prompt, index, *, next_function=False, previous_brief=None):
+        """Repair one typed report or plan validation failure without dispatching work."""
         tree = workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         signature = self.project.signature if self.project else ''
         for attempt in range(2):
@@ -1496,6 +1526,23 @@ class Supervisor:
                                 self.config.checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise
+                if self.config.function_dispatch and isinstance(plan,dict) and plan.get('status') == 'ready':
+                    try:
+                        brief = requirements_review.parse(json.dumps(typed))
+                        brief['cycle'] = len(self.requirement_cycles)+1
+                        if next_function and (previous_brief or {}).get('status') == 'ready':
+                            previous = previous_brief['acceptance_criteria']
+                            if brief['acceptance_criteria'][:len(previous)] != previous:
+                                brief['acceptance_criteria'] = list(previous)
+                        self._stage_requirement_plan(assignment,plan.get('modules'),plan.get('function_plan'),brief,
+                                                     next_function=next_function)
+                    except ValueError as error:
+                        if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
+                            requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                                len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
+                                self.config.checks,[item for item in self.directions.messages()
+                                                    if item['id'] in self._direction_ids['reviewer']])
+                        raise requirements_review.RequirementReportRepair(str(error))
             except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment,
                     requirements_review.RequirementReportRepair) as exc:
                 if not attempt:
@@ -1524,11 +1571,12 @@ class Supervisor:
                     continue
                 if isinstance(exc, requirements_review.RequirementReportRepair):
                     self._event('requirements_report_repair',reason=str(exc),output_file=artifact+'-text.md')
-                    prompt += ('\n\nReviewer-only report repair; no worker has started. Correct only the report contradiction: '
+                    prompt += ('\n\nReviewer-only report repair; no worker has started. Correct only the report contradiction or plan validation errors: '
                                +str(exc)+'. For ready, blockers must be []. Move genuinely deferred validation gates '
                                'into constraints without deleting or marking them satisfied. If the next step is genuinely '
                                'blocked, return needs_input instead. Preserve substantive criteria, completed research, '
-                               'the function plan and target scope; do not repeat repository research or implementation. '
+                               'authorized scope and valid plan entries; correct invalid assignment fields without '
+                               'expanding permissions. Do not repeat repository research or implementation. '
                                'Previous report:\n'+turn.text)
                     continue
                 self._event('requirements_assignment_repair',reason=str(exc),output_file=artifact+'-text.md')
@@ -1620,7 +1668,7 @@ class Supervisor:
             if self.project:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
-            turn=self._invoke_requirement_review(prompt,index=review_index)
+            turn=self._invoke_requirement_review(prompt,index=review_index,next_function=next_function,previous_brief=previous_brief)
             review_directions = [item for item in self.directions.messages()
                                  if item['id'] in self._direction_ids['reviewer']]
             if turn.session_id:self._active_reviewer_id=turn.session_id
@@ -1685,32 +1733,8 @@ class Supervisor:
                         self._event('requirement_criteria_preserved',
                                     reason='Planning response rewrote approved criteria; original IDs and text retained')
                 if brief['status']=='ready':
-                    from auto_moniter.modules import definitions
-                    proposed = definitions(modules)
-                    if any(m.get('files') or m.get('checks') for m in proposed):
-                        raise ValueError('Planning cannot supply executable checks or override fixed file scopes')
-                    if self.modules.items and any(m['id'] not in self.modules.items for m in proposed):
-                        raise ValueError('Function planning cannot expand fixed module scope')
-                    staged = ModuleLedger.restore(self.modules.export())
-                    staged.merge(proposed)
-                    dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
-                    if next_function and dispatch.current:
-                        revised = function_tasks.validate(assignment, staged.items)
-                        if function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
-                            raise ValueError('Updated instructions must preserve the current assignment identity and target scope')
-                        dispatch.current = None
-                    dispatch.assign(assignment, staged.items)
-                    if self.project and self.project.scope:
-                        from auto_moniter.project_workspace import contains
-                        files = [file for file,_ in function_tasks.targets(dispatch.current)] + dispatch.current.get('test_files',[])
-                        if any(not contains(self.project.scope,file) for file in files):
-                            raise ValueError('Parallel assignment targets must stay inside the declared task scope')
-                    if self._function_gate:
-                        self._validate_function_plan(dispatch, staged.items, brief)
-                    elif dispatch.current.get('kind') in ('integration','verification'):
-                        raise ValueError('Integration and verification assignments require the verified function gate')
-                    complete = (self._validate_complete_function_plan(backlog, dispatch, staged.items, brief)
-                                if self.config.full_function_plan else None)
+                    staged, dispatch, complete = self._stage_requirement_plan(
+                        assignment, modules, backlog, brief, next_function=next_function)
                     self.function_tasks = dispatch
                     self.function_plan = complete
                     self._planning_rejection = None
@@ -2758,16 +2782,22 @@ class Supervisor:
     def _validate_complete_function_plan(self, backlog, ledger, modules, brief):
         plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
         regressions = list(dict.fromkeys(name for item in ledger.accepted for name in item['task'].get('test_files', [])))
+        problems = []
         for task in plan['tasks']:
             if self.project and self.project.scope:
                 from auto_moniter.project_workspace import contains
                 paths = [file for file, _ in function_tasks.targets(task)] + task.get('test_files', [])
                 if any(not contains(self.project.scope, name) for name in paths):
-                    raise ValueError('Complete plan must stay inside the declared parallel task scope')
+                    problems.append('Complete plan must stay inside the declared parallel task scope: '+task['id'])
             if self._function_gate:
-                function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
-                    approvals=self._integration_scopes(), regressions=regressions, future=True)
+                try:
+                    function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
+                        approvals=self._integration_scopes(), regressions=regressions, future=True)
+                except ValueError as error:
+                    problems.append(task['id']+': '+str(error))
             regressions = list(dict.fromkeys([*regressions, *task.get('test_files', [])]))
+        if problems:
+            raise ValueError('; '.join(problems)[:12000])
         return plan
 
     def _function_scope_problems(self):

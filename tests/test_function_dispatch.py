@@ -122,6 +122,24 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(saved['requirements_review']['acceptance_criteria'],BRIEF['acceptance_criteria'])
             self.assertIn('requirement_criteria_preserved',(root/'run/events.jsonl').read_text())
 
+    def test_replanning_can_append_criteria_without_a_spurious_repair_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            final=task('F2','next.py',scope='requirement',depends=['F1'])
+            final['criterion_ids']=['main:1','req:1:1','req:1:2','req:1:3']
+            updated=plan(final)
+            brief=json.loads(updated['text']);brief['acceptance_criteria'].append('Boundary input is validated')
+            updated['text']=json.dumps(brief)
+            worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'},
+                {**result('F2','done',status='done',file='next.py'),'touch':'next.py'}])
+            reviewer=ScriptedProvider('reviewer',[plan(task('F1','app.py')),result('F1','accepted'),
+                updated,result('F2','accepted',status='done',file='next.py')])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2)
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+            saved=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(saved['requirements_review']['acceptance_criteria'],brief['acceptance_criteria'])
+
     def test_failed_planning_resume_recovers_approved_criteria_before_worker_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -475,7 +493,7 @@ class DispatchTests(unittest.TestCase):
     def test_missing_function_or_unaccepted_dependency_never_launches_worker(self):
         for response in [{'verdict':{},'text':json.dumps(BRIEF)},plan(task('F2','app.py',depends=['F1']))]:
             with tempfile.TemporaryDirectory() as d:
-                w=ScriptedProvider('worker',[]);r=ScriptedProvider('reviewer',[response])
+                w=ScriptedProvider('worker',[]);r=ScriptedProvider('reviewer',[response,response])
                 report=self.run_monitor(Path(d),w,r,max_rounds=1)
                 self.assertEqual(report.status,'action_required',report.summary)
                 self.assertEqual(w.calls,[])
@@ -538,7 +556,7 @@ class DispatchTests(unittest.TestCase):
     def test_empty_check_catalog_still_requires_a_valid_reviewer_test_plan(self):
         with tempfile.TemporaryDirectory() as d:
             worker=ScriptedProvider('worker', [])
-            reviewer=ScriptedProvider('reviewer', [plan(task('F1','app.py'))])
+            reviewer=ScriptedProvider('reviewer', [plan(task('F1','app.py')) for _ in range(2)])
             report = self.run_monitor(Path(d), worker, reviewer, checks=[])
             self.assertEqual(report.status, 'action_required')
             self.assertIn('approved check IDs or auto:N', report.summary)
@@ -744,7 +762,7 @@ class DispatchTests(unittest.TestCase):
     def test_premature_final_plan_never_launches_worker(self):
         with tempfile.TemporaryDirectory() as d:
             worker = FunctionWorker('worker', [])
-            reviewer = ScriptedProvider('reviewer', [plan(task('F1', 'app.py', scope='requirement'))])
+            reviewer = ScriptedProvider('reviewer', [plan(task('F1', 'app.py', scope='requirement')) for _ in range(2)])
             report = self.run_monitor(Path(d), worker, reviewer)
             self.assertEqual(report.status, 'action_required')
             self.assertIn('uncovered criteria: req:1:1', report.summary)
@@ -859,7 +877,7 @@ class IntegrationDispatchTests(unittest.TestCase):
         for i, (approved, overrides) in enumerate(cases):
             with self.subTest(approved=approved, overrides=overrides):
                 worker = FunctionWorker('worker', [])
-                reviewer = ScriptedProvider('reviewer', [plan(self.assignment(**overrides))])
+                reviewer = ScriptedProvider('reviewer', [plan(self.assignment(**overrides)) for _ in range(2)])
                 report = self.monitor(worker, reviewer, approved=approved, run_dir=self.root/f'run-{i}').run()
                 self.assertEqual(report.status, 'action_required', report.summary)
                 self.assertIn('matching preapproved scope', report.summary)

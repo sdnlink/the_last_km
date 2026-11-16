@@ -77,7 +77,7 @@ class CompleteFunctionPlanTests(unittest.TestCase):
             with self.subTest(index=index):
                 self.run = self.root / ('invalid-' + str(index))
                 worker = ScriptedProvider('worker', [])
-                reviewer = ScriptedProvider('reviewer', [{'verdict':{},'text':json.dumps(value)}])
+                reviewer = ScriptedProvider('reviewer', [{'verdict':{},'text':json.dumps(value)} for _ in range(2)])
                 report = self.monitor(worker, reviewer).run()
                 self.assertEqual(report.status, 'action_required', report.summary)
                 self.assertEqual(worker.calls, [])
@@ -147,6 +147,65 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         self.assertIn('COMPLETE ordered list',reviewer.calls[2]['prompt'])
         saved=json.loads((self.run/'state.json').read_text())
         self.assertEqual([item['task']['id'] for item in saved['function_tasks']['accepted']],['F1','F3','F2'])
+
+
+    def test_known_cross_module_references_are_valid_without_expanding_scope(self):
+        from auto_moniter.function_gate import validate_task
+        first,final=tasks()
+        modules={item['id']:item for item in _verdict('continue')['modules']}
+        modules['recap']={'id':'recap','title':'Recap','acceptance':['Record goals'],
+                          'checks':['echo separately approved check']}
+        first['criterion_ids'].append('recap:1')
+        final['criterion_ids']=['main:1','recap:1','req:1:1','req:1:2']
+        value=function_plan.validate([first,final],FunctionTasks(),modules,BRIEF)
+        self.assertEqual(value['tasks'][0]['file'],'a.py')
+        self.assertEqual(value['tasks'][0]['symbol'],'parse_input')
+        validate_task(first,self.root,modules,[CHECK],BRIEF)
+        bad=copy.deepcopy(first);bad['check_ids']=['recap:check:1']
+        with self.assertRaisesRegex(ValueError,'approved check IDs'):
+            validate_task(bad,self.root,modules,[CHECK],BRIEF)
+        bad=copy.deepcopy(first);bad['criterion_ids']=['recap:1']
+        with self.assertRaisesRegex(ValueError,'its module criteria'):
+            validate_task(bad,self.root,modules,[CHECK],BRIEF)
+
+    def test_plan_reports_all_unknown_criteria_instead_of_stopping_at_first(self):
+        first,final=tasks()
+        modules={item['id']:item for item in _verdict('continue')['modules']}
+        first['criterion_ids'].append('missing:1')
+        final['criterion_ids'].append('main:999')
+        with self.assertRaises(ValueError) as caught:
+            function_plan.validate([first,final],FunctionTasks(),modules,BRIEF)
+        for text in ['F1','missing:1','F2','main:999']:
+            self.assertIn(text,str(caught.exception))
+
+    def test_invalid_future_plan_is_repaired_readonly_before_worker_dispatch(self):
+        first,final=tasks()
+        invalid=complete_plan(first,final)
+        value=json.loads(invalid['text']);value['function_plan'][1]['criterion_ids'].append('missing:1')
+        invalid['text']=json.dumps(value)
+        reviewer=ScriptedProvider('reviewer',[invalid,complete_plan(first,final),
+            result('F1','accepted',file='a.py'),result('F2','accepted',file='b.py',status='done')])
+        worker=self.worker()
+        report=self.monitor(worker,reviewer).run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertIn('missing:1',reviewer.calls[1]['prompt'])
+        self.assertIn('plan validation errors',reviewer.calls[1]['prompt'])
+        self.assertTrue(all(call['read_only'] for call in reviewer.calls))
+        self.assertEqual(len(worker.calls),2)
+
+    def test_preflight_does_not_leak_partial_modules_or_dispatch_when_plan_is_invalid(self):
+        first,final=tasks()
+        value=json.loads(complete_plan(first,final)['text'])
+        value['function_plan'][1]['check_ids']=['check:999']
+        reviewer=ScriptedProvider('reviewer',[{'verdict':{},'text':json.dumps(value)} for _ in range(2)])
+        worker=ScriptedProvider('worker',[])
+        report=self.monitor(worker,reviewer).run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertEqual(worker.calls,[])
+        saved=json.loads((self.run/'state.json').read_text())
+        self.assertIsNone(saved['function_tasks']['current'])
+        self.assertIsNone(saved['function_plan'])
+        self.assertEqual(saved['modules'],[])
 
 
 if __name__ == '__main__':

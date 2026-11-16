@@ -93,12 +93,16 @@ class AssignmentIdentifierTests(unittest.TestCase):
         invalid = final_task()
         invalid['test_files'] = ['docs/not_a_test.py']
         worker = ScriptedProvider('worker', [])
-        reviewer = ScriptedProvider('reviewer', [plan(invalid)])
+        reviewer = ScriptedProvider('reviewer', [plan(invalid), plan(invalid)])
         report = self.monitor(worker, reviewer).run()
         self.assertEqual(report.status, 'action_required', report.summary)
-        self.assertEqual(len(reviewer.calls), 1)
+        self.assertEqual(len(reviewer.calls), 2)
         self.assertEqual(worker.calls, [])
-        self.assertFalse(list(self.run.glob('*reviewer-repair-*')))
+        self.assertIn('docs/not_a_test.py', report.summary)
+        self.assertIn('plan validation errors', reviewer.calls[1]['prompt'])
+        events=[json.loads(line) for line in (self.run/'events.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(e['event']=='requirements_report_repair' for e in events),1)
+        self.assertFalse(any(e['event']=='requirements_assignment_repair' for e in events))
 
     def test_workspace_change_prevents_retry_and_preserves_the_changed_file(self):
         worker = ScriptedProvider('worker', [])

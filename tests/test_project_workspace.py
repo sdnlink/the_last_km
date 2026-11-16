@@ -365,7 +365,7 @@ class ProjectWorkspaceTests(unittest.TestCase):
         from tests.test_function_dispatch import task, plan
         a=self.workspace()
         worker=ScriptedProvider('worker',[])
-        reviewer=SnapshotReviewer('reviewer',[plan(task('OUTSIDE','other.py'))])
+        reviewer=SnapshotReviewer('reviewer',[plan(task('OUTSIDE','other.py')) for _ in range(2)])
         report=self.monitor(a,worker,reviewer,function_dispatch=True).run()
         self.assertEqual(report.status,'action_required',report.summary)
         self.assertIn('declared task scope',report.summary)

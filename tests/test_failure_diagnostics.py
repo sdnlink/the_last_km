@@ -44,6 +44,18 @@ class FailureDiagnosticTests(unittest.TestCase):
         self.assertIn('.gitignore',result['raw_summary'])
         self.assertIn('不要重建基线',''.join(result['actions']))
 
+    def test_function_handoff_error_identifies_protocol_gate(self):
+        result = self.diagnostic('action_required',
+            'Function handoff rejected: Function approval requires matching worker completion and delivery scope',
+            records=[{'role':'reviewer','index':19,'task_status':'accepted'}])
+        self.assertEqual(result['code'], 'function_handoff_rejected')
+        self.assertEqual(result['role'], 'watcher')
+        self.assertIn('完整模块账本', ''.join(result['actions']))
+        self.assertIn('独立审核仍须通过', ''.join(result['actions']))
+        repaired = self.diagnostic('action_required',
+            'Reviewer audit update rejected after reviewer-only retry; worker candidate saved. Invalid function handoff report: missing modules')
+        self.assertEqual(repaired['code'], 'function_handoff_rejected')
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.run=self.root/'run';self.run.mkdir()
@@ -79,6 +91,21 @@ class FailureDiagnosticTests(unittest.TestCase):
     def test_active_and_done_tasks_do_not_show_stale_failure(self):
         for status in ('running','starting','paused','queued','done'):
             self.assertIsNone(self.diagnostic(status,'old authentication failure'))
+
+    def test_staging_conflicts_identify_watcher_publication_including_old_reports(self):
+        cases = [
+            ('action_required', 'StagedChangesConflict: Business branch has no initial commit and 62 staged source paths overlap the publication baseline',
+             'initial_commit_required', 'Git 发布预检'),
+            ('recovery_failed', 'RecoveryError: Business publication incomplete; preserve staging and resume after resolving: Reviewed paths overlap existing staged changes; preserve staging and resolve before publication',
+             'publication_staging_conflict', '本地 Git 发布'),
+        ]
+        for status, summary, code, phase in cases:
+            with self.subTest(code=code):
+                result = self.diagnostic(status, summary, records=[{'role':'reviewer', 'index':3}])
+                self.assertEqual(result['code'], code)
+                self.assertEqual(result['role'], 'watcher')
+                self.assertEqual(result['phase'], phase)
+                self.assertIn('恢复', ''.join(result['actions']))
 
     def test_program_exception_and_checkpoint_restore_error_are_actionable(self):
         result=self.diagnostic(summary="NameError: name 're' is not defined")

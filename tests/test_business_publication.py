@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter.git_history import GitHistory, GitHistoryError
-from auto_moniter.publication import publish, index_path
+from auto_moniter.publication import publish, index_path, check_unborn_staging
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.workspace import workspace_fingerprint
 from tests.test_review_first import BRIEF
@@ -19,6 +19,112 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 def git(root, *args):
     return subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+
+
+class UnbornPublicationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'project'
+        self.root.mkdir()
+        self.run = Path(self.tmp.name) / 'run'
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'app.py').write_text('baseline\n')
+        (self.root / 'other.py').write_text('other\n')
+
+    def stage_baseline(self):
+        subprocess.run(['git', '-C', str(self.root), 'add', 'app.py', 'other.py'], check=True)
+
+    def commit_baseline(self):
+        return git(self.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@local',
+                   'commit', '-qm', 'input baseline')
+
+    def monitor(self, worker=None, reviewer=None, **options):
+        return Supervisor(RunConfig('task', self.root, worker or ScriptedProvider('worker', []),
+            reviewer=reviewer or ScriptedProvider('reviewer', []), workflow='review-first',
+            git_history='required', run_dir=self.run, retry_delay_s=0,
+            max_rounds=3, checks=['test -f app.py'], **options), log=lambda _:None)
+
+    def reviewer(self, planning=True):
+        class Reviewer(ScriptedProvider):
+            def _command(inner, session, prompt, read_only):
+                match = re.search(r'Worker checkpoint: ([0-9a-f]{40,64})', prompt.read_text())
+                if match:
+                    inner.scripts[0]['verdict']['evidence'].append(match[1])
+                return super()._command(session, prompt, read_only)
+        return Reviewer('reviewer', ([{'verdict':{}, 'text':json.dumps(BRIEF)}] if planning else [])
+                        + [{'verdict':_verdict('done', evidence=['app.py', 'new.py'])}])
+
+    def test_staged_input_stops_before_any_agent_and_preserves_index_and_files(self):
+        self.stage_baseline()
+        index = self.root / '.git/index'
+        original = index.read_bytes()
+        worker = ScriptedProvider('worker', [])
+        reviewer = ScriptedProvider('reviewer', [])
+        result = self.monitor(worker, reviewer).run()
+        self.assertEqual(result.status, 'action_required', result.summary)
+        self.assertIn('no initial commit', result.summary)
+        self.assertIn('2 staged source paths', result.summary)
+        self.assertIn('app.py', result.summary)
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(reviewer.calls, [])
+        self.assertEqual(index.read_bytes(), original)
+        self.assertEqual((self.root/'app.py').read_text(), 'baseline\n')
+        self.assertEqual(git(self.root, 'for-each-ref', '--format=%(refname)', 'refs/heads'), '')
+        self.assertEqual(json.loads((self.run/'state.json').read_text())['status'], 'action_required')
+        self.assertEqual(json.loads((self.run/'report.json').read_text())['rounds'], 0)
+
+    def test_first_commit_unblocks_same_run_and_preserves_untracked_candidate(self):
+        self.stage_baseline()
+        self.assertEqual(self.monitor().run().status, 'action_required')
+        (self.root/'model.py').write_text('pending worker candidate\n')
+        self.commit_baseline()
+        baseline = git(self.root, 'rev-parse', 'HEAD')
+        self.assertNotIn('model.py', git(self.root, 'ls-tree', '-r', '--name-only', 'HEAD'))
+        worker = ScriptedProvider('worker', [{'verdict':_verdict('done', evidence=['app.py']), 'touch':'project/app.py'}])
+        result = self.monitor(worker, self.reviewer(), resume=True).run()
+        self.assertEqual(result.status, 'done', result.summary)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD^'), baseline)
+        self.assertEqual(git(self.root, 'show', 'HEAD:model.py'), 'pending worker candidate')
+        self.assertIn('Prior completion, review and check results need revalidation', worker.calls[0]['prompt'])
+
+    def test_existing_approved_candidate_revalidates_after_first_baseline_commit(self):
+        self.stage_baseline()
+        worker = ScriptedProvider('worker', [{'verdict':_verdict('done', evidence=['new.py']), 'touch':'project/new.py'}])
+        # Reproduce a run started before the startup preflight was added.
+        with patch('auto_moniter.supervisor.check_unborn_staging'):
+            result = self.monitor(worker, self.reviewer()).run()
+        self.assertEqual(result.status, 'action_required', result.summary)
+        self.assertTrue((self.run/'approval-ready.json').exists())
+        candidate = (self.root/'new.py').read_bytes()
+        self.commit_baseline()
+        baseline = git(self.root, 'rev-parse', 'HEAD')
+        self.assertNotIn('new.py', git(self.root, 'ls-tree', '-r', '--name-only', 'HEAD'))
+        fresh_worker = ScriptedProvider('worker', [{'verdict':_verdict('done', evidence=['new.py'])}])
+        fresh_review = self.reviewer(planning=False)
+        resumed = self.monitor(fresh_worker, fresh_review, resume=True).run()
+        self.assertEqual(resumed.status, 'done', resumed.summary)
+        self.assertEqual(len(fresh_worker.calls), 1)
+        self.assertEqual(len(fresh_review.calls), 1)
+        self.assertEqual((self.root/'new.py').read_bytes(), candidate)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD^'), baseline)
+        self.assertIn('new.py', git(self.root, 'ls-tree', '-r', '--name-only', 'HEAD'))
+
+    def test_subproject_does_not_block_or_consume_staged_sibling(self):
+        self.stage_baseline()
+        sub = self.root/'sub'
+        sub.mkdir()
+        (sub/'app.py').write_text('subproject\n')
+        self.run.mkdir()
+        history = ApprovedHistory(sub, self.run)
+        original = index_path(history).read_bytes()
+        check_unborn_staging(history)
+        history.prepare_review(1, history.begin_round(1))
+        publish(history, 1, _verdict('done'), _verdict('done'), '', '')
+        self.assertEqual(git(self.root, 'diff', '--cached', '--name-only').splitlines(), ['app.py', 'other.py'])
+        self.assertEqual(git(self.root, 'show', ':app.py'), 'baseline')
+        self.assertEqual(git(self.root, 'ls-tree', '-r', '--name-only', 'HEAD'), 'sub/app.py')
+        self.assertNotEqual(index_path(history).read_bytes(), original)
 
 
 class BusinessPublicationTests(unittest.TestCase):
@@ -188,7 +294,7 @@ class BusinessPublicationTests(unittest.TestCase):
         config=RunConfig('task',self.root,worker,reviewer=reviewer,workflow='review-first',
             git_history='required',run_dir=run,max_rounds=1,retry_delay_s=0,checks=['test -f app.py'])
         failed=Supervisor(config,log=lambda _:None).run()
-        self.assertEqual(failed.status,'recovery_failed')
+        self.assertEqual(failed.status,'action_required')
         self.assertEqual(git(self.root,'show',':app.py'),'human staged draft')
         subprocess.run(['git','-C',str(self.root),'reset','-q','HEAD','--','app.py'],check=True)
         no_worker=ScriptedProvider('worker',[]);no_reviewer=ScriptedProvider('reviewer',[])

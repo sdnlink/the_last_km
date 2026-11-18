@@ -362,6 +362,8 @@ auto-moniter run --resume \
 
 Resume retains requirements, checks, saved work, and cumulative usage. Resolve the reported blocker or increase the applicable budget before resuming. For a parallel task, use its worktree path as `--cwd`.
 
+Review-first runs on an unborn branch with pre-existing staged source files return `action_required` before calling a model. Review and commit the original input baseline separately, then resume the same run; keep pending worker files out of that baseline commit. Staged overlaps found during publication also return a resumable `action_required`, preserving the index and candidate. A new baseline commit invalidates old approval and checks, so resume revalidates the current input.
+
 An approved requirement and pending function assignment are reused on resume. If requirement review stopped on a blocker or invalid plan, the reviewer continues from its saved analysis and checks the outstanding issue, new instructions, and changed inputs. Starting a fresh reviewer session does not restart a full repository review. Cached analysis supplies context; a revised plan still passes the dispatch checks before the worker runs.
 
 After a worker submits a candidate, the watcher runs the assignment checks and saves their results before independent review. The reviewer receives the exact candidate, check results, and log paths. If the reviewer accepts and mandatory checks passed, the watcher verifies the version and check receipt, commits that assignment locally, then dispatches the next item. It does not run another semantic review or repeat successful checks after approval. A function commit does not mark the whole module or requirement complete. Only the reviewer can close audit findings.

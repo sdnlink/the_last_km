@@ -21,6 +21,7 @@ TASK_SCHEMA={'type':'object','additionalProperties':False,'properties':{
  'delivery_scope':{'type':'string','enum':['function','module','requirement']}},'required':sorted(FIELDS)}
 NEXT_SCHEMA={'anyOf':[{'type':'null'},TASK_SCHEMA]}
 GATE_FIELDS = {'criterion_ids', 'check_ids', 'test_files'}
+GATE_LIST_LIMITS = {'criterion_ids':128, 'check_ids':30, 'test_files':30}
 INTEGRATION_FIELDS = {'kind', 'integration_scope', 'targets', 'atomic_reason'}
 INTEGRATION_TASK_FIELDS = (FIELDS - {'file', 'symbol'}) | GATE_FIELDS | INTEGRATION_FIELDS
 VERIFICATION_TASK_FIELDS = FIELDS | GATE_FIELDS | {'kind'}
@@ -131,7 +132,7 @@ def validate(value, modules=None):
     if GATE_FIELDS <= value.keys():
         for key in GATE_FIELDS:
             entries = value[key]
-            if (not isinstance(entries, list) or len(entries) > 30
+            if (not isinstance(entries, list) or len(entries) > GATE_LIST_LIMITS[key]
                     or any(not isinstance(x, str) or not x or len(x) > 512 for x in entries)
                     or len(set(entries)) != len(entries) or (not entries and key != 'test_files')):
                 raise ValueError('Invalid function assignment ' + key)
@@ -212,7 +213,8 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
     next_schema = copy.deepcopy(NEXT_SCHEMA)
     if gate:
         task = next_schema['anyOf'][1]
-        task['properties'].update({k: {'type': 'array', 'items': {'type': 'string'}} for k in GATE_FIELDS})
+        task['properties'].update({k: {'type': 'array', 'maxItems':GATE_LIST_LIMITS[k],
+                                      'items': {'type': 'string'}} for k in GATE_FIELDS})
         task['properties']['check_ids']['description'] = (
             'Approved check IDs, auto:N for the Nth declared Python unittest, Node, Cargo integration or native Swift test file, '
             'or regression:N from the watcher catalog of already accepted tests. '
@@ -261,13 +263,21 @@ def module_schema():
     return result
 
 
-def verdict_contract(role, task, *, report_only=False):
+def verdict_contract(role, task, *, report_only=False, module_ids=None):
     group = task.get('kind') == 'integration'
     scope = ('the dispatched atomic change, its named primary function and exact edit_files' if task.get('edit_files')
              else 'the dispatched integration and all of its listed functions' if group else 'the dispatched function')
     manifest = ('The edit_files manifest grants whole-file edits at exactly those paths, including necessary helper '
                 'declarations, resources and registration. Preserve existing tests and all other file/function scopes. '
                 'Cite every manifest file in evidence. ' if task.get('edit_files') else '')
+    delivery_modules = (list(module_ids) if task['delivery_scope'] == 'requirement' and module_ids is not None
+                        else [task['module_id']])
+    completion = ('For module or requirement delivery, return status=done with scope matching delivery_scope and '
+                  'module_ids=' + json.dumps(delivery_modules) + ' only when that delivery scope is fully verified. '
+                  + ('Final requirement delivery jointly confirms every module in the watcher ledger, including '
+                     'prerequisites implemented by earlier accepted functions. This expands reporting scope, '
+                     'not file edit permissions; unchanged verified functions do not need reimplementation. '
+                     if task['delivery_scope'] == 'requirement' else ''))
     if role=='worker':
         return (
             ('Correct only the report using existing evidence. Do not edit files or run builds/tests. '
@@ -278,8 +288,7 @@ def verdict_contract(role, task, *, report_only=False):
             manifest + 'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
             'otherwise task_status=incomplete. Return next_task=null and modules=[]. '
             'For delivery_scope=function return status=continue even when task_status=done. '
-            'For module or requirement delivery, return status=done with scope matching delivery_scope and '
-            'module_ids=['+task['module_id']+'] only when that delivery scope is fully verified. '
+            + completion +
             'Give evidence for every target file and behavioral check results. '
             'For task_status=done, evidence must be nonempty. Use gaps=[], blockers=[], next_actions=[] '
             'when no implementation work remains. Existing notes in those fields are assessed by the reviewer; '
@@ -305,6 +314,6 @@ def verdict_contract(role, task, *, report_only=False):
            if task.get('kind') == 'verification' else '') +
         'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
         'and propose exactly one next_task that can be implemented and verified on its own. '
-        'For module or requirement delivery: status=done with matching scope and module_ids containing only the '
-        'current module; propose one next_task after module delivery, null after requirement delivery. '
+        + completion +
+        'Propose one next_task after module delivery, null after requirement delivery. '
         'Final requirement approval still checks coverage of every original requirement and integration.')

@@ -83,6 +83,18 @@ class BudgetTests(unittest.TestCase):
 
 
 class HealthTests(unittest.TestCase):
+    def test_requirement_review_does_not_hide_paused_or_waiting_phases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run=Path(tmp)
+            (run/'state.json').write_text(json.dumps({'status':'running','rounds':[],
+                'requirements_review':{'status':'reviewing'}}))
+            with file_lock(run/'supervisor.lock'):
+                for note,phase in [('round 900001: reviewer running','refining_requirements'),
+                                   ('paused at a turn boundary','paused'),
+                                   ('reviewer awaiting_permission','waiting_for_input')]:
+                    (run/'heartbeat').write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'note':note}))
+                    self.assertEqual(run_health(run)['phase'],phase)
+
     def test_health_distinguishes_active_stale_dead_and_finished(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

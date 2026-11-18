@@ -76,6 +76,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。'
         actions=['核对失败命令和原始日志；需要修改范围外代码、既有测试或生成文档时，先安排明确范围的修复。',
                  '恢复时保留当前候选；仅复用与当前版本和检查结果一致的审核结论，检查结果变化后重新审核。检查通过前不会派发下一项。']
+    elif 'function handoff rejected:' in text or 'invalid function handoff report' in text:
+        code='function_handoff_rejected';title='派单交付报告与验收协议不一致';role='watcher';phase='派单交付协议校验'
+        reason='当前候选已保留，但任务完成状态、交付范围或模块确认没有满足监督器协议，未推进交付。'
+        actions=['核对 worker 与 reviewer 的任务 ID、完成状态、交付范围和模块清单；需求级最终报告须确认完整模块账本。',
+                 '若是报告协议问题，修复后对同一候选进行只读报告补正；条款覆盖、固定检查及独立审核仍须通过。']
     elif 'protected acceptance baseline changed' in text:
         code='protected_baseline_changed';title='受保护的验收资产发生变化';role='watcher';phase='验收基线保护检查'
         reason='Watcher 检测到测试、验收入口或忽略规则与任务启动时不一致，已停止验收；这不代表 Worker 进程异常退出。'
@@ -86,6 +91,16 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='审查前后的工作区内容或文件权限不同，本次审查未获接受，尚未派发本轮 worker 任务。此检查不能确定修改者，也可能由并发写入触发。'
         actions=['核对变化文件及其来源，保留已有工作；不要通过重置或删除改动绕过检查。',
                  '在没有并发写入的工作区重新审查，或为并行任务使用独立工作副本；审查结果仍需通过原验收条件。']
+    elif 'business branch has no initial commit' in text:
+        code='initial_commit_required';title='原有暂存文件需要首次提交';role='watcher';phase='Git 发布预检'
+        reason='业务分支尚无首次提交，原有暂存文件会与自动发布重叠；已保留暂存内容并停止调用模型。'
+        actions=['核对原有暂存文件，单独提交为项目输入基线；不要将任务新增文件混入该提交。',
+                 '完成首次提交后恢复原任务，系统会保留已有工作并重新验证。']
+    elif 'overlap existing staged changes' in text:
+        code='publication_staging_conflict';title='本地提交与已有暂存内容重叠';role='watcher';phase='本地 Git 发布'
+        reason='候选发布被暂存区保护拦截，已有暂存内容和候选均保留；独立审核结论不代表本地提交已经完成。'
+        actions=['核对暂存内容与候选差异，处理重叠后恢复原任务；不要清理或覆盖暂存内容绕过保护。',
+                 '业务版本未变且凭据有效时复用当前审核；新增基线提交后重新验证。']
     elif 'business head changed' in text:
         code='business_head_changed';role='watcher';phase='业务版本一致性检查'
         title='业务分支在任务外发生变化'

@@ -18,6 +18,61 @@ from tests.test_function_dispatch import FunctionWorker, task, plan, result, CHE
 
 
 class RequirementQueueTests(unittest.TestCase):
+    def test_explicit_queued_function_requirement_can_add_modules_and_confirm_the_whole_ledger(self):
+        queued = self.queue.append('Build a new SIEM product module after the original requirement')
+        first = task('F1','app.py',scope='requirement')
+        first['edit_files'] = ['app.py']
+        first['criterion_ids'] = ['main:1','req:1:1','req:1:2']
+        second = task('F2','next.py',scope='requirement',depends=['F1'])
+        second.update(module_id='siem', criterion_ids=['siem:1','req:2:1','req:2:2'])
+        first_plan = plan(first)
+        p = json.loads(first_plan['text']);p['function_plan']=[first];first_plan['text']=json.dumps(p)
+        next_plan = plan(second)
+        p = json.loads(next_plan['text'])
+        p.update(modules=[{'id':'siem','title':'SIEM workflows','acceptance':['SIEM workflows work'],
+                           'depends_on':['main']}],function_plan=[second])
+        next_plan['text']=json.dumps(p)
+        final_worker = result('F2','done',status='done',file='next.py')
+        final_worker['verdict']['module_ids']=['main','siem']
+        final_review = result('F2','accepted',status='done',file='next.py')
+        final_review['verdict']['module_ids']=['main','siem']
+        worker = FunctionWorker('worker',[{**result('F1','done',status='done'),'touch':'app.py'},
+                                           {**final_worker,'touch':'next.py'}])
+        reviewer = ScriptedProvider('reviewer',[first_plan,result('F1','accepted',status='done'),
+                                                 next_plan,final_review])
+        monitor = self.monitor(worker,reviewer,function_dispatch=True,full_function_plan=True)
+        monitor.config.git_history='off';monitor.config.checks=[CHECK]
+        report = monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+        self.assertIn('may append new modules',reviewer.calls[2]['prompt'])
+        self.assertNotIn('may append new modules',reviewer.calls[0]['prompt'])
+        saved=json.loads((self.run/'state.json').read_text())
+        self.assertEqual([(m['id'],m['status']) for m in saved['modules']],
+                         [('main','accepted'),('siem','accepted')])
+        self.assertEqual(self.queue.snapshot()['completed'][0]['id'],queued['id'])
+
+    def test_queue_module_expansion_is_limited_to_the_new_requirement_boundary(self):
+        from auto_moniter.modules import ModuleLedger
+        monitor=self.monitor(ScriptedProvider('worker',[]),ScriptedProvider('reviewer',[]),function_dispatch=True)
+        monitor.modules=ModuleLedger([{'id':'main','title':'Original','acceptance':['Original works']}])
+        handoff={'round':3,'modules':monitor.modules.export(),'next_queued_requirement':'request-2'}
+        monitor.requirement_cycles=[{'handoff':handoff}]
+        self.assertFalse(monitor._queued_cycle_can_add_modules())
+        monitor.active_queued_requirement={'id':'request-2'}
+        self.assertTrue(monitor._queued_cycle_can_add_modules())
+        monitor.active_queued_requirement={'id':'wrong-request'}
+        self.assertFalse(monitor._queued_cycle_can_add_modules())
+        monitor.active_queued_requirement={'id':'request-2'}
+        monitor.function_tasks.current=task('S1','app.py')
+        self.assertFalse(monitor._queued_cycle_can_add_modules())
+        monitor.function_tasks.current=None
+        monitor.function_tasks.accepted=[{'round':4}]
+        self.assertFalse(monitor._queued_cycle_can_add_modules())
+        monitor.function_tasks.accepted=[]
+        monitor.modules.merge([{'id':'siem','title':'SIEM','acceptance':['SIEM works']}])
+        self.assertFalse(monitor._queued_cycle_can_add_modules())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

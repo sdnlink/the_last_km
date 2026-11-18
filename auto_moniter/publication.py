@@ -150,6 +150,25 @@ class PublicationRefused(GitHistoryError):
     """Stop or budget refused a new publication before refs moved."""
 
 
+class StagedChangesConflict(GitHistoryError):
+    """Publication needs a staging decision; keep the candidate resumable."""
+
+
+def check_unborn_staging(history):
+    """Detect an unavoidable first-publication conflict before any model calls."""
+    if not history.business_commits or history.business_head['commit']:
+        return
+    empty = history.git('hash-object', '-t', 'tree', '--stdin', data=b'').decode().strip()
+    staged = set(filter(None, history.git('diff', '--cached', '--name-only', '-z', empty).split(b'\0')))
+    overlap = sorted(staged & entries(history, history.initial).keys())
+    if overlap:
+        paths = ', '.join(os.fsdecode(path) for path in overlap[:10])
+        raise StagedChangesConflict(
+            f'Business branch has no initial commit and {len(overlap)} staged source paths overlap '
+            f'the publication baseline: {paths}. Preserve staging, commit the existing input baseline '
+            'separately, then resume this run; do not add the pending worker files to that baseline.')
+
+
 def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text, boundary=None):
     history.verify()
     previous = history.last_business_commit
@@ -198,7 +217,7 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
             # A human's pre-existing staged changes are never silently folded into
             # or replaced by an automated publication.
             if staged & changed:
-                raise GitHistoryError('Reviewed paths overlap existing staged changes; preserve staging and resolve before publication')
+                raise StagedChangesConflict('Reviewed paths overlap existing staged changes; preserve staging and resolve before publication')
             code_entries = entries(history, code_tree)
             updates = b''.join(code_entries.get(p, b'0 ' + zero + b'\t' + p + b'\0') for p in sorted(changed))
             if updates:

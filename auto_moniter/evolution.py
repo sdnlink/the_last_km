@@ -121,13 +121,32 @@ class Evolution:
             commands.append('node --test tests/*.mjs')
         return commands
 
+    def _check_command(self,command,cwd):
+        # A fresh Git worktree has no ignored .venv. Keep shell helpers such
+        # as restart.sh on this controller's supported Python and dependencies.
+        tools=self.path.parent/'tools'
+        private_directory(tools)
+        local=cwd/'.venv'
+        if local.is_symlink() or (local/'bin').is_symlink():
+            raise ValueError('Unsafe evolution virtual-environment bootstrap')
+        private_directory(local/'bin')
+        content='#!/bin/sh\nexec '+shlex.quote(sys.executable)+' "$@"\n'
+        for name in ('python','python3'):
+            for path in (tools/name,local/'bin'/name):
+                if path.is_symlink() or (path.exists() and path.read_text()!=content):
+                    raise ValueError('Evolution Python tool wrapper changed')
+                path.write_text(content)
+                path.chmod(0o700)
+        environment_path=str(tools)+os.pathsep+os.environ.get('PATH','')
+        return PreparedCommand(['/usr/bin/env','PATH='+environment_path,'/bin/sh','-c',command])
+
     def _validate(self,cwd,stage):
         results=[]
         expected=git(cwd,'rev-parse','HEAD')
         for index,command in enumerate(self._checks(),1):
             if self._cancelled():
                 return False
-            result=run_command(PreparedCommand(['/bin/sh','-c',command]),cwd,
+            result=run_command(self._check_command(command,cwd),cwd,
                 timeout_s=min(900,self._remaining()) if self.config.max_runtime_s else 900,
                 should_stop=self._cancelled,detect_input_requests=False,
                 heartbeat=self.path.parent/'heartbeat',heartbeat_note='evolution '+stage+' validation')

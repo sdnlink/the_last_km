@@ -75,7 +75,7 @@ class EvolutionTests(unittest.TestCase):
         (self.source/'tests/test_baseline.py').write_text(
             'import unittest\nfrom auto_moniter.supervisor import repair_target\n'
             'class Baseline(unittest.TestCase):\n def test_api(self): self.assertTrue(callable(repair_target))\n')
-        (self.source/'.gitignore').write_text('.auto-moniter/\n__pycache__/\n*.pyc\n')
+        (self.source/'.gitignore').write_text('.auto-moniter/\n__pycache__/\n*.pyc\n.venv/\n')
         git(self.source,'init','-q');git(self.source,'add','.')
         git(self.source,'-c','user.name=Fixture','-c','user.email=fixture@local','commit','-qm','baseline')
         self.base=git(self.source,'rev-parse','HEAD')
@@ -304,6 +304,32 @@ class EvolutionTests(unittest.TestCase):
         with patch('auto_moniter.evolution.run_command',side_effect=change):
             self.assertFalse(self.engine._validate(self.source,'candidate'))
         self.assertTrue(self.engine.record['candidate_checks'][0]['source_changed'])
+
+    def test_fresh_worktree_shell_helpers_use_controller_python_without_a_local_venv(self):
+        directory=self.root/'verification';directory.mkdir()
+        self.engine.path=directory/'evolution.json'
+        self.engine.record={'base':{'commit':self.base}}
+        wrong=self.root/'wrong-bin';wrong.mkdir()
+        binary=wrong/'python3';binary.write_text('#!/bin/sh\necho unsupported-python\nexit 33\n');binary.chmod(0o700)
+        command='python3 -c '+__import__('shlex').quote(
+            'import sys; assert sys.version_info >= (3,11); assert sys.executable == '+repr(sys.executable))
+        original_path=os.environ.get('PATH','')
+        self.assertFalse((self.source/'.venv').exists())
+        with patch.dict(os.environ,{'PATH':str(wrong)+os.pathsep+original_path}), \
+             patch.object(self.engine,'_checks',return_value=[command]):
+            self.assertTrue(self.engine._validate(self.source,'baseline'))
+        self.assertEqual(os.environ.get('PATH',''),original_path)
+        self.assertTrue((self.source/'.venv/bin/python').is_file())
+
+    def test_bootstrap_rejects_a_changed_interpreter_wrapper(self):
+        directory=self.root/'verification';directory.mkdir()
+        self.engine.path=directory/'evolution.json'
+        self.engine.record={'base':{'commit':self.base}}
+        self.engine._check_command('true',self.source)
+        wrapper=self.source/'.venv/bin/python'
+        wrapper.write_text('#!/bin/sh\nexit 0\n')
+        with self.assertRaisesRegex(ValueError,'wrapper changed'):
+            self.engine._check_command('true',self.source)
 
     def test_active_runs_and_product_check_failures_are_not_monitor_upgrade_evidence(self):
         from auto_moniter.workspace import file_lock

@@ -309,3 +309,7 @@ auto-moniter history restore RUN_DIR -C PROJECT --apply
 ## 项目经验查询
 
 `auto-moniter experience --cwd <项目目录>` 只读展示该项目观察到的失败模式和经独立审核、Watcher 接受的修复次数，不调用模型、不创建状态目录。经验自动提供给后续相关任务，但不能替代当前验收，也不授予新增权限。详情见[自动恢复与项目经验](adaptive-recovery.md)。
+
+## 系统源码自动进化
+
+`auto-moniter evolve --cwd <本系统源码目录>` 自动实施、审核和验证隔离升级候选，通过后更新本地分支并检查控制台启用；失败保留旧版本或自动回退。默认 `--provider codex --reviewer claude --cycles 3 --max-runtime 1h --max-agent-calls 20`，预算由整个循环共享。`--model`、`--reviewer-model` 指定模型，`--evidence-root` 可重复提供运行证据根目录。`--plan-only` 只读选题；`--recover <周期目录>` 核对并恢复已验证的发布事务，不能与 `--plan-only` 同用。完整流程见[自动进化说明](self-evolution.md)。

@@ -162,6 +162,19 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostic.add_argument("-C", "--cwd", type=Path, default=Path.cwd())
     experience = sub.add_parser('experience', help='Inspect project repair learning; read-only, no model calls')
     experience.add_argument('-C','--cwd',type=Path,default=Path.cwd())
+    evolve=sub.add_parser('evolve',help='Improve auto-moniter source using isolated implementation, review and full regression')
+    evolve.add_argument('-C','--cwd',type=Path,default=Path.cwd())
+    evolve.add_argument('--provider',default='codex')
+    evolve.add_argument('--reviewer',default='claude')
+    evolve.add_argument('--model',default='')
+    evolve.add_argument('--reviewer-model',default='')
+    evolve.add_argument('--evidence-root',type=Path,action='append',default=[])
+    evolve.add_argument('--cycles',type=_positive_int,default=3,help='Maximum evolution cycles sharing the same budget (default 3)')
+    evolve.add_argument('--max-runtime',default='1h')
+    evolve.add_argument('--max-agent-calls',type=_positive_int,default=20)
+    evolution_mode=evolve.add_mutually_exclusive_group()
+    evolution_mode.add_argument('--plan-only',action='store_true')
+    evolution_mode.add_argument('--recover',type=Path,help='Reconcile an interrupted promotion without calling models')
     sub.add_parser("selftest", help="Exercise the installed monitor end to end using a local fixture, without models")
     return parser
 
@@ -175,6 +188,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {'available' if ok else 'missing'}")
         return 0
     try:
+        if args.command=='evolve':
+            from auto_moniter.evolution import Evolution
+            limit=_parse_duration(args.max_runtime)
+            if limit<=0:
+                raise ValueError('Self-evolution requires a positive shared runtime budget')
+            started=time.monotonic()
+            used=0
+            results=[]
+            for _ in range(args.cycles):
+                remaining=limit-(time.monotonic()-started)
+                if remaining<=0 or used>=args.max_agent_calls:
+                    break
+                config=RunConfig('',args.cwd,resolve_provider(args.provider),
+                    reviewer=resolve_provider(args.reviewer,role='reviewer'),model=args.model,
+                    reviewer_model=args.reviewer_model,max_runtime_s=remaining,
+                    max_agent_calls=args.max_agent_calls-used)
+                engine=Evolution(config,evidence_roots=args.evidence_root,log=lambda msg:print(msg,file=sys.stderr,flush=True))
+                result=engine.recover(args.recover) if args.recover else engine.run(plan_only=args.plan_only)
+                results.append(result)
+                used+=result.get('agent_calls',0)
+                if args.plan_only or args.recover or result['phase'] in {'idle','deferred','stopped','baseline_failed','recovery_required','rolled_back','rollback_activation_failed'}:
+                    break
+            print(json.dumps(safe({'cycles':results,'agent_calls':used,'elapsed_s':round(time.monotonic()-started,3)}),ensure_ascii=False,indent=2))
+            return 0 if results and results[-1]['phase'] in {'promoted','planned','idle','no_change'} else 1
         if args.command == 'experience':
             from auto_moniter.experience import Experience
             result=Experience(args.cwd,args.cwd).summary()

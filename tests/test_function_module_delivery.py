@@ -1,12 +1,13 @@
 """Final function reports jointly confirm the whole requirement's module ledger."""
 import copy
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from auto_moniter.supervisor import RunConfig, Supervisor
+from auto_moniter.supervisor import RunConfig, Supervisor, RoundRecord
 from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task
 from tests.test_supervisor import ScriptedProvider
 
@@ -30,6 +31,208 @@ def conclusion(ident, decision, ids, *, final=False, file='app.py', next_task=No
 
 
 class FunctionModuleDeliveryTests(unittest.TestCase):
+    def test_prerequisite_module_verification_allows_the_dependent_milestone_and_final_delivery(self):
+        implementation = {**self.final,'delivery_scope':'function'}
+        verify = {**self.first,'id':'VERIFY_A','kind':'verification','delivery_scope':'module','depends_on':['F2']}
+        milestone = {**self.final,'id':'VERIFY_B','kind':'verification','delivery_scope':'module','depends_on':['VERIFY_A']}
+        final = {**self.final,'id':'FINAL','kind':'verification','depends_on':['VERIFY_B'],
+                 'criterion_ids':['A:1','B:1','req:1:1','req:1:2']}
+        def delivery(ident,role,ids,file,scope,next_task=None):
+            value=conclusion(ident,role,ids,final=True,file=file,next_task=next_task)
+            value['verdict']['scope']=scope
+            return value
+        worker = FunctionWorker('worker',[
+            {**conclusion('F1','done',['A']),'touch':'app.py'},
+            {**conclusion('F2','done',['B'],file='next.py'),'touch':'next.py'},
+            delivery('VERIFY_A','done',['A'],'app.py','module'),
+            delivery('VERIFY_B','done',['B'],'next.py','module'),
+            delivery('FINAL','done',['A','B'],'next.py','requirement')])
+        reviewer = ScriptedProvider('reviewer',[self.planning(),
+            conclusion('F1','accepted',[],next_task=implementation),
+            conclusion('F2','accepted',[],file='next.py',next_task=verify),
+            delivery('VERIFY_A','accepted',['A'],'app.py','module',milestone),
+            delivery('VERIFY_B','accepted',['B'],'next.py','module',final),
+            delivery('FINAL','accepted',['A','B'],'next.py','requirement')])
+        monitor=self.monitor(worker,reviewer)
+        monitor.config.max_rounds=5
+        report=monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual([m['status'] for m in monitor.modules.items.values()],['accepted','accepted'])
+        self.assertEqual([call['read_only'] for call in worker.calls],[False,False,True,True,True])
+
+    def test_full_plan_rejects_dependent_module_delivery_without_a_prerequisite_milestone(self):
+        from auto_moniter.function_tasks import FunctionTasks
+        from auto_moniter.modules import ModuleLedger
+        from tests.test_review_first import BRIEF
+        monitor=self.monitor(self.workers(),self.reviewers())
+        modules=ModuleLedger(MODULES)
+        ledger=FunctionTasks()
+        ledger.current=self.first
+        milestone={**self.final,'delivery_scope':'module'}
+        final={**self.final,'id':'FINAL','depends_on':['F2']}
+        with self.assertRaisesRegex(ValueError,'prerequisite module acceptance'):
+            monitor._validate_complete_function_plan([self.first,milestone,final],ledger,modules.items,BRIEF)
+        implementation={**milestone,'delivery_scope':'function'}
+        verify_a={**self.first,'id':'VERIFY_A','kind':'verification','delivery_scope':'module','depends_on':['F2']}
+        verify_b={**milestone,'id':'VERIFY_B','kind':'verification','depends_on':['VERIFY_A']}
+        final={**final,'kind':'verification','depends_on':['VERIFY_B']}
+        planned=monitor._validate_complete_function_plan([self.first,implementation,verify_a,verify_b,final],
+                                                         ledger,modules.items,BRIEF)
+        self.assertEqual(len(planned['tasks']),5)
+
+    def test_full_plan_accounts_for_source_edits_invalidating_prior_module_acceptance(self):
+        from auto_moniter.function_tasks import FunctionTasks
+        from auto_moniter.modules import ModuleLedger
+        from tests.test_review_first import BRIEF
+        monitor=self.monitor(self.workers(),self.reviewers())
+        ledger=FunctionTasks();ledger.current=self.first
+        verify_a={**self.first,'id':'VERIFY_A','kind':'verification','delivery_scope':'module','depends_on':['F1']}
+        milestone={**self.final,'delivery_scope':'module','depends_on':['VERIFY_A']}
+        final={**self.final,'id':'FINAL','kind':'verification','depends_on':['F2']}
+        modules=ModuleLedger(MODULES)
+        with self.assertRaisesRegex(ValueError,'prerequisite module acceptance'):
+            monitor._validate_complete_function_plan([self.first,verify_a,milestone,final],ledger,modules.items,BRIEF)
+        scoped=ModuleLedger([{**MODULES[0],'files':['app.py']},{**MODULES[1],'files':['next.py']}])
+        planned=monitor._validate_complete_function_plan([self.first,verify_a,milestone,final],ledger,scoped.items,BRIEF)
+        self.assertEqual(len(planned['tasks']),4)
+
+    def test_legacy_retry_approval_also_obeys_the_current_report_protocol(self):
+        from auto_moniter.modules import ModuleLedger
+        from auto_moniter.workspace import workspace_fingerprint
+        from auto_moniter.verdict import parse_verdict
+        monitor=self.monitor(self.workers(),self.reviewers())
+        monitor.modules=ModuleLedger(MODULES)
+        monitor.function_tasks.current=self.final
+        tree=workspace_fingerprint(self.root,ignore_dir=self.root/'run')
+        raw=conclusion('F2','accepted',['B'],final=True,file='next.py')['verdict']
+        review=parse_verdict(json.dumps(raw),function_gate=True)
+        record=RoundRecord(2,'reviewer',review,0,False,0,'','',tree=tree,watcher_result={'check_retry':{
+            'tree':tree,'task':self.final,'provider_config':monitor._provider_config(),
+            'reviewer_model':monitor._reviewer_model(),'direction_ids':[],'review':raw}})
+        self.assertIsNone(monitor._check_retry_review(record))
+        record.watcher_result['check_retry']['review']={**raw,'module_ids':['A','B']}
+        self.assertIsNotNone(monitor._check_retry_review(record))
+
+    def test_cached_old_protocol_review_is_refreshed_without_repeating_worker_or_checks(self):
+        from auto_moniter.verdict import parse_verdict
+        worker,reviewer=self.workers(),self.reviewers()
+        monitor=self.monitor(worker,reviewer)
+        invoke=monitor._invoke_review
+        def cached(provider,prompt,session_id,**kwargs):
+            if kwargs['index']==2:
+                record=next(r for r in reversed(monitor._records) if r.role=='worker' and r.index==2)
+                receipt=record.watcher_result['candidate_checks']
+                old=parse_verdict(json.dumps(conclusion('F2','accepted',['B'],final=True,file='next.py')['verdict']),function_gate=True)
+                monitor._records.append(RoundRecord(2,'reviewer',old,0,False,0,'','',tree=record.tree,
+                    watcher_result={'candidate_approval':{'checks_digest':receipt['digest'],
+                        'context':receipt['context'],'review':old.to_dict()}}))
+            return invoke(provider,prompt,session_id,**kwargs)
+        with patch.object(monitor,'_invoke_review',side_effect=cached):
+            report=monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,3))
+        events=[json.loads(line) for line in (self.root/'run/events.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(e['event']=='check_finished' for e in events),2)
+
+    def test_saved_approval_file_is_checked_against_current_module_protocol(self):
+        from tests.test_candidate_handoff import CheckedReviewer
+        subprocess.run(['git','init','-q',str(self.root)],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=Fixture','-c','user.email=fixture@local',
+                        'commit','--allow-empty','-qm','baseline'],check=True)
+        worker=self.workers()
+        reviewer=CheckedReviewer(self.root,self.reviewers().scripts)
+        monitor=self.monitor(worker,reviewer)
+        monitor.config.git_history='required'
+        invoke=monitor._invoke_review
+        def cached(provider,prompt,session_id,**kwargs):
+            if kwargs['index']==2:
+                record=next(r for r in reversed(monitor._records) if r.role=='worker' and r.index==2)
+                (self.root/'run/approval-ready.json').write_text(json.dumps({
+                    'round':2,'tree':record.tree,'candidate_tree':monitor.git_history.candidate['commit'],
+                    'business_head':monitor.git_history.business_head,'provider_config':monitor._provider_config(),
+                    'reviewer_model':monitor._reviewer_model(),
+                    'checks_digest':record.watcher_result['candidate_checks']['digest'],
+                    'review':conclusion('F2','accepted',['B'],final=True,file='next.py')['verdict']}))
+            return invoke(provider,prompt,session_id,**kwargs)
+        with patch.object(monitor,'_invoke_review',side_effect=cached):
+            report=monitor.run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,3))
+        events=(self.root/'run/events.jsonl').read_text()
+        self.assertNotIn('approval_review_reused',events)
+
+    def test_dependent_module_milestone_is_rejected_before_its_worker_runs(self):
+        milestone = copy.deepcopy(self.final)
+        milestone['delivery_scope'] = 'module'
+        worker = FunctionWorker('worker',[{**conclusion('F1','done',['A']),'touch':'app.py'}])
+        reviewer = ScriptedProvider('reviewer',[self.planning(),
+            conclusion('F1','accepted',[],next_task=milestone)])
+        monitor = self.monitor(worker,reviewer)
+        control = monitor._process_control
+        def stop_after_plan_rejection(active=False):
+            if monitor._planning_rejection:
+                monitor.request_stop()
+            return control(active)
+        monitor._process_control = stop_after_plan_rejection
+        report = monitor.run()
+        self.assertEqual(report.status,'stopped',report.summary)
+        self.assertEqual(len(worker.calls),1)
+        self.assertIn('prerequisite module acceptance',monitor._planning_rejection['reason'])
+        self.assertFalse((self.root/'next.py').exists())
+
+    def test_old_dispatched_module_dependency_failure_is_not_replayed_until_budget_exhaustion(self):
+        milestone = copy.deepcopy(self.final)
+        milestone['delivery_scope'] = 'module'
+        work = conclusion('F2','done',['B'],final=True,file='next.py')
+        review = conclusion('F2','accepted',['B'],final=True,file='next.py')
+        work['verdict']['scope'] = review['verdict']['scope'] = 'module'
+        worker = FunctionWorker('worker',[{**conclusion('F1','done',['A']),'touch':'app.py'},
+                                          {**work,'touch':'next.py'}])
+        reviewer = ScriptedProvider('reviewer',[self.planning(),
+            conclusion('F1','accepted',[],next_task=milestone),review,copy.deepcopy(review)])
+        monitor = self.monitor(worker,reviewer)
+        validate = monitor._validate_function_plan
+        def old_dispatch(ledger,modules,brief,**kwargs):
+            if ledger.current['delivery_scope']=='module':
+                # Simulate the old validator: check the function and criteria,
+                # without the new prerequisite-module dispatch guard.
+                from auto_moniter import function_gate
+                function_gate.validate_task(ledger.current,monitor.config.cwd,modules,monitor.config.checks,brief)
+                self.assertEqual(function_gate.coverage(ledger,modules,ledger.current,brief,monitor.config.cwd,
+                                                       provisional=kwargs.get('provisional')),[])
+                return
+            return validate(ledger,modules,brief,**kwargs)
+        with patch.object(monitor,'_validate_function_plan',side_effect=old_dispatch):
+            report = monitor.run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertIn('requires accepted dependencies: A',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+        self.assertTrue((self.root/'next.py').exists())
+        self.assertEqual([m['status'] for m in monitor.modules.items.values()],['pending','pending'])
+        events=(self.root/'run/events.jsonl').read_text()
+        self.assertNotIn('acceptance_review_reused',events)
+        last = next(r for r in reversed(report.records) if r.role=='reviewer')
+        self.assertNotIn('candidate_approval',last.watcher_result)
+
+    def test_module_dependency_validation_allows_a_provisionally_accepted_module(self):
+        from auto_moniter.function_tasks import FunctionTasks
+        from auto_moniter.modules import ModuleLedger
+        from tests.test_review_first import BRIEF
+        monitor = self.monitor(self.workers(),self.reviewers())
+        modules = ModuleLedger(MODULES)
+        ledger = FunctionTasks()
+        ledger.current = copy.deepcopy(self.final)
+        ledger.current['delivery_scope']='module'
+        ledger.current['kind']='verification'
+        (self.root/'next.py').write_text('def parse_input():\n    return 42\n')
+        provisional = {**self.first,'delivery_scope':'module'}
+        monitor._validate_function_plan(ledger,modules.items,BRIEF,provisional=provisional)
+        with self.assertRaisesRegex(ValueError,'prerequisite module acceptance'):
+            monitor._validate_function_plan(ledger,modules.items,BRIEF,provisional=self.first)
+        ledger.current.pop('kind')
+        with self.assertRaisesRegex(ValueError,'prerequisite module acceptance'):
+            monitor._validate_function_plan(ledger,modules.items,BRIEF,provisional=provisional)
+
     def test_large_final_criterion_sets_have_matching_schema_and_validation_limits(self):
         from auto_moniter import function_tasks
         from auto_moniter.verdict import VERDICT_SCHEMA

@@ -1138,7 +1138,8 @@ class Supervisor:
                 if next_functions is not None:
                     self._apply_function_assessment(record, review_record)
                     verdict = record.verdict
-                    self._save_candidate_approval(record, review_record)
+                    if self.function_tasks.current['delivery_scope'] == 'function':
+                        self._save_candidate_approval(record, review_record)
                 if scope_gaps:
                     self._reject_function_candidate(review_record, scope_gaps)
                 if next_functions is not None and self._function_gate:
@@ -1257,6 +1258,7 @@ class Supervisor:
                         continue
                     return self._finish_function_acceptance(review_record, records, review.gaps)
             if _accepted(review) and problems:
+                self._invalidate_candidate_approval(record.index, problems)
                 review_record.delivery = {'status': 'rejected', 'reasons': problems}
                 review.status = "continue"
                 review.gaps.extend(problems)
@@ -1264,6 +1266,8 @@ class Supervisor:
                 review_record.verdict = review
                 self.log(f"round {round_index}: reviewer done rejected: {'; '.join(problems)}")
                 self._event("review_rejected", reasons="; ".join(problems))
+                if self.config.function_dispatch:
+                    return self._finish_function_acceptance(review_record, records, problems)
 
             if (getattr(self, '_publication_review_reused', None) == round_index
                     and any(self.modules.items[k]['status'] != 'accepted' for k in verdict.module_ids)):
@@ -2479,7 +2483,11 @@ class Supervisor:
                 or self._pending_directions()):
             return None
         value = parse_verdict(json.dumps(approval['review']),function_gate=self._function_gate)
-        return value if not value.parse_error and (_accepted(value) or value.task_status=='accepted') else None
+        return value if (not value.parse_error and (_accepted(value) or value.task_status=='accepted')
+                         and self._cached_function_report_valid(value)) else None
+
+    def _cached_function_report_valid(self, review):
+        return not self.config.function_dispatch or not self._function_reviewer_report_errors(review)
 
     def _acceptance_commands(self, final, module_ids, function_commands=None):
         commands = list(self.config.checks) if final or self.config.workflow == 'review-first' else []
@@ -2824,6 +2832,17 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
+        if task['delivery_scope'] == 'module':
+            accepted = {key for key, item in modules.items() if item['status'] == 'accepted'}
+            if provisional and provisional['delivery_scope'] in ('module', 'requirement'):
+                accepted.add(provisional['module_id'])
+            if task.get('kind') != 'verification':
+                impact = ModuleLedger.restore(list(modules.values()))
+                accepted.difference_update(impact.affected(function_tasks.writable_files(task)))
+            missing = set(modules[task['module_id']].get('depends_on', [])) - accepted
+            if missing:
+                raise ValueError('Complete prerequisite module acceptance before module delivery: '
+                                 + ', '.join(sorted(missing)))
         if self.project and self.project.scope:
             from auto_moniter.project_workspace import contains
             files = function_tasks.writable_files(task)
@@ -2847,7 +2866,17 @@ class Supervisor:
         plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
         regressions = list(dict.fromkeys(name for item in ledger.accepted for name in item['task'].get('test_files', [])))
         problems = []
+        accepted_modules = {key for key, item in modules.items() if item['status'] == 'accepted'}
+        impact = ModuleLedger.restore(list(modules.values()))
         for task in plan['tasks']:
+            if task.get('kind') != 'verification':
+                accepted_modules.difference_update(impact.affected(function_tasks.writable_files(task)))
+            if task['delivery_scope'] == 'module':
+                missing = set(modules[task['module_id']].get('depends_on', [])) - accepted_modules
+                if missing:
+                    problems.append(task['id'] + ': Complete prerequisite module acceptance before module delivery: '
+                                    + ', '.join(sorted(missing)))
+                accepted_modules.add(task['module_id'])
             if self.project and self.project.scope:
                 from auto_moniter.project_workspace import contains
                 paths = function_tasks.writable_files(task)
@@ -4210,7 +4239,8 @@ class Supervisor:
         if not isinstance(value, dict):
             return None
         review = parse_verdict(json.dumps(value), function_gate=self._function_gate)
-        if review.parse_error or not (_accepted(review) or review.task_status == 'accepted'):
+        if (review.parse_error or not (_accepted(review) or review.task_status == 'accepted')
+                or not self._cached_function_report_valid(review)):
             return None
         return review
 
@@ -4232,6 +4262,8 @@ class Supervisor:
                 or review.gaps or review.blockers or review.next_actions
                 or self._function_evidence_problems(review, 'reviewer')
                 or self.git_history and self.git_history.review_problems(review.evidence)):
+            return None
+        if not self._cached_function_report_valid(review):
             return None
         self._event('function_scope_review_reused', round=record.index, task_id=review.task_id)
         return review
@@ -4272,10 +4304,11 @@ class Supervisor:
             conclusion = parse_verdict(json.dumps(ready['review']))
             if not (_accepted(conclusion) or conclusion.task_status=='accepted'):
                 raise RecoveryError('Saved approval is invalid')
-            self._publication_review_reused = kwargs['index']
-            self._event('approval_review_reused', round=kwargs['index'])
-            return _CompletedTurn(json.dumps(ready['review']), '', 0, False, 0,
-                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
+            if self._cached_function_report_valid(conclusion):
+                self._publication_review_reused = kwargs['index']
+                self._event('approval_review_reused', round=kwargs['index'])
+                return _CompletedTurn(json.dumps(ready['review']), '', 0, False, 0,
+                                      self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         publication = getattr(self.git_history, 'last_business_commit', {})
         if (not receipt and publication.get('round') == kwargs['index']
                 and publication.get('candidate_tree') == self.git_history.candidate.get('commit')):
@@ -4285,10 +4318,12 @@ class Supervisor:
                                  (self.config.cwd.relative_to(self.git_history.root) / record['record']).as_posix()))
             if payload.get('role') != 'reviewer' or payload['result'].get('tree') != tree:
                 raise RecoveryError('Committed review does not match the resumed candidate')
-            self._event('publication_review_reused', round=kwargs['index'], commit=record['commit'])
-            self._publication_review_reused = kwargs['index']
-            return _CompletedTurn(json.dumps({**payload['result'], 'modules': []}), '', 0, False, 0,
-                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
+            conclusion = parse_verdict(json.dumps(payload['result']), function_gate=self._function_gate)
+            if self._cached_function_report_valid(conclusion):
+                self._event('publication_review_reused', round=kwargs['index'], commit=record['commit'])
+                self._publication_review_reused = kwargs['index']
+                return _CompletedTurn(json.dumps({**payload['result'], 'modules': []}), '', 0, False, 0,
+                                      self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         for attempt in range(2):
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')

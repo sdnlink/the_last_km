@@ -39,6 +39,7 @@ from console.logs import LogReader
 from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
 from console.diagnostics import diagnose, console_result
+from console.launch import abort_start
 
 
 PROVIDERS = tuple(AGENTS)
@@ -880,6 +881,7 @@ class TaskStore:
         env['PYTHONPATH'] = package_root + os.pathsep + env.get('PYTHONPATH', '')
         env['PYTHONUNBUFFERED'] = '1'
         previous_control = read_json(run / 'control.json') if resume else {}
+        child = None
         try:
             if resume:
                 (run / 'control.json').unlink(missing_ok=True)
@@ -908,12 +910,31 @@ class TaskStore:
             self._children[meta['id']] = child
             self._save(meta)
             threading.Thread(target=self._wait, args=(meta['id'], child, meta['requirement']), daemon=True).start()
-        except OSError as exc:
+        except Exception as exc:
+            if child is None and not isinstance(exc, OSError):
+                raise
+            errors = []
+            if child is not None:
+                try:
+                    abort_start(child)
+                except Exception as cleanup_error:
+                    errors.append('进程回收失败：' + str(cleanup_error))
+                else:
+                    if self._children.get(meta['id']) is child:
+                        self._children.pop(meta['id'], None)
+                    meta.pop('launcher', None)
             if previous_control:
-                write_json(run / 'control.json', previous_control, durable=True)
-            meta.update(status='failed', started_at=timestamp(), error=str(exc))
-            self._save(meta)
-            raise TaskError(f'启动失败：{exc}', 500) from exc
+                try:
+                    write_json(run / 'control.json', previous_control, durable=True)
+                except OSError as control_error:
+                    errors.append('原控制请求未能恢复：' + str(control_error))
+            message = str(exc) + (('；' + '；'.join(errors)) if errors else '')
+            meta.update(status='failed', started_at=timestamp(), error=message)
+            try:
+                self._save(meta)
+            except OSError as save_error:
+                message += '；失败记录未能保存：' + str(save_error)
+            raise TaskError(f'启动失败：{message}', 500) from exc
 
     def _wait(self, ident: str, child: subprocess.Popen, requirement: str) -> None:
         child.communicate(requirement.encode('utf-8'))

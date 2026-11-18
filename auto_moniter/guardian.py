@@ -17,6 +17,7 @@ from auto_moniter.storage import write_json
 from auto_moniter.paths import default_run_dir, private_directory, state_root
 from auto_moniter.redaction import redact
 from auto_moniter.health import valid_report
+from auto_moniter.control import ControlError, read_control
 from auto_moniter.supervisor import RunConfig, RunReport, Supervisor
 from auto_moniter.workspace import LockError, file_lock
 from auto_moniter.locking import workspace_lease
@@ -53,10 +54,16 @@ class Guardian:
 
     def _check_control(self) -> None:
         try:
-            if json.loads((self.run_dir / "control.json").read_text(encoding="utf-8")).get("action") == "stop":
-                self.request_stop()
-        except FileNotFoundError:
-            pass
+            value = read_control(self.run_dir / 'control.json')
+        except ControlError as exc:
+            error = str(exc)
+            if error != getattr(self, '_control_read_error', ''):
+                self.log('guardian: invalid control request; waiting for valid input: ' + redact(error))
+            self._control_read_error = error
+            return
+        self._control_read_error = ''
+        if value.get('action') == 'stop':
+            self.request_stop()
 
     def _write(self, status: str, reason: str = "") -> None:
         write_json(self.run_dir / "guardian.json", {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_moniter.health import read_run_snapshot, run_health
+from auto_moniter.control import ControlError, read_control
 from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
 from auto_moniter.providers import discover_providers
@@ -44,6 +46,7 @@ from console.launch import abort_start
 
 PROVIDERS = tuple(AGENTS)
 RESUMABLE = {'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required', 'interrupted'}
+logger = logging.getLogger(__name__)
 
 
 class TaskError(ValueError):
@@ -203,6 +206,9 @@ class TaskStore:
             write_json(Path(meta['run_dir']) / 'project-lifecycle.json', {'status':meta['status']}, durable=True)
 
     def _launcher_alive(self, meta: dict) -> bool:
+        child = self._children.get(meta['id'])
+        if child is not None and child.poll() is None:
+            return True
         identity = meta.get('launcher') or {}
         try:
             return bool(identity and process_identity(identity['pid']) == identity)
@@ -257,7 +263,8 @@ class TaskStore:
         guardian = read_json(run / 'guardian.json')
         roots = []
         if live:
-            roots.append(meta['launcher']['pid'])
+            child = self._children.get(meta['id'])
+            roots.append(child.pid if child is not None else meta['launcher']['pid'])
         if health.get('lock_held') or health.get('guardian_lock_held'):
             roots.extend(pid for pid in (heartbeat.get('pid'), heartbeat.get('supervisor_pid'),
                                          heartbeat.get('child_pid'), guardian.get('guardian_pid')) if type(pid) is int)
@@ -267,8 +274,12 @@ class TaskStore:
         title = meta.get('title') or next((line.strip('# ').strip() for line in requirement.splitlines() if line.strip('# ').strip()), run.name)
         modules = state.get('modules') or []
         accepted = sum(item.get('status') == 'accepted' for item in modules)
-        control = read_json(run / 'control.json').get('action', '')
-        if status == 'paused' and control != 'pause':
+        control_error = ''
+        try:
+            control = read_control(run / 'control.json').get('action', '')
+        except ControlError as exc:
+            control, control_error = 'invalid', str(exc)
+        if status == 'paused' and control not in {'pause', 'invalid'}:
             status = 'running'
             health = {**health, 'phase': 'resuming'}
         active = status in {'running', 'paused'}
@@ -306,6 +317,9 @@ class TaskStore:
                 control_message = '恢复已请求，正在继续原任务。'
         elif status == 'starting':
             control_message = '正在启动监督器并加载任务检查点…'
+        if control_error:
+            control_message = (control_message + ' ' if control_message else '') + (
+                '控制请求暂不可用：' + control_error + '；请重新发送暂停、恢复或停止指令。')
         from auto_moniter.failures import classify
         failure_records=state.get('rounds') if isinstance(state.get('rounds'),list) else state.get('records',[])
         latest_failure = next((r.get('failure') or ' '.join(r.get('gaps', [])) for r in reversed(failure_records)
@@ -769,6 +783,8 @@ class TaskStore:
             return self.detail(ident)
 
     def _check_start(self, meta: dict) -> None:
+        if meta['id'] in self._children or self._launcher_alive(meta):
+            raise TaskError('任务进程仍在运行或等待回收，请稍后重试', 409)
         available = self.agents.providers(discover_providers())
         for role in ('provider', 'reviewer'):
             if meta.get(role) and meta[role] != '—' and not available.get(meta[role]):
@@ -903,11 +919,12 @@ class TaskStore:
             with (run / 'console.log').open('ab') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
                                          cwd=package_root, env=env, start_new_session=True)
+                # Ownership must survive identity lookup or bookkeeping failures.
+                self._children[meta['id']] = child
             # communicate() runs off the request thread and reaps the detached CLI on exit.
             meta.update(status='starting', started_at=timestamp(), launcher=process_identity(child.pid))
             meta.pop('error', None)
             meta.pop('exit_summary', None)
-            self._children[meta['id']] = child
             self._save(meta)
             threading.Thread(target=self._wait, args=(meta['id'], child, meta['requirement']), daemon=True).start()
         except Exception as exc:
@@ -937,17 +954,39 @@ class TaskStore:
             raise TaskError(f'启动失败：{message}', 500) from exc
 
     def _wait(self, ident: str, child: subprocess.Popen, requirement: str) -> None:
-        child.communicate(requirement.encode('utf-8'))
+        error = ''
+        cleanup_confirmed = True
+        try:
+            child.communicate(requirement.encode('utf-8'))
+        except Exception as exc:
+            error = '任务进程通信或等待失败：' + str(exc)
+            try:
+                abort_start(child)
+            except Exception as cleanup_error:
+                cleanup_confirmed = False
+                error += '；进程回收失败：' + str(cleanup_error)
+        if error:
+            logger.warning('任务 %s：%s', ident, redact(error))
         with self._lock:
             if self._children.get(ident) is child:
-                meta = read_json(self.tasks_dir / (ident + '.json'))
-                if meta:
-                    meta['exit_code'] = child.returncode
-                    result = console_result(Path(meta['run_dir']))
-                    if result:
-                        meta['exit_summary'] = result['summary']
-                    self._save(meta)
-                self._children.pop(ident, None)
+                reaped = cleanup_confirmed and child.returncode is not None
+                try:
+                    meta = read_json(self.tasks_dir / (ident + '.json'))
+                    if meta:
+                        meta['exit_code'] = child.returncode
+                        if error:
+                            meta.update(status='failed', error=error)
+                        if reaped:
+                            meta.pop('launcher', None)
+                        result = console_result(Path(meta['run_dir']))
+                        if result:
+                            meta['exit_summary'] = result['summary']
+                        self._save(meta)
+                except OSError as save_error:
+                    logger.warning('任务 %s 的进程退出记录保存失败：%s', ident, redact(str(save_error)))
+                finally:
+                    if reaped:
+                        self._children.pop(ident, None)
 
     def action(self, ident: str, action: str, data: dict | None = None) -> dict:
         with self._lock:

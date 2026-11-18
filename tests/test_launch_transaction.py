@@ -97,6 +97,18 @@ class LaunchTransactionTests(unittest.TestCase):
         self.assertIs(self.store._children[self.task['id']], self.children[0])
         self.assertEqual(self.store._get(self.task['id'])['launcher']['pid'], self.children[0].pid)
 
+    def test_identity_and_cleanup_failure_still_block_a_duplicate_launch(self):
+        with patch('console.tasks.process_identity', side_effect=OSError('identity unavailable')), \
+             patch('console.tasks.abort_start', side_effect=RuntimeError('termination unconfirmed')):
+            with self.assertRaisesRegex(TaskError, '进程回收失败'):
+                self.store._launch(self.meta)
+            saved = self.store._get(self.task['id'])
+            self.assertIs(self.store._children.get(self.task['id']), self.children[0])
+            self.assertTrue(self.store._launcher_alive(saved))
+            self.assertEqual(self.store.detail(self.task['id'])['status'], 'starting')
+            with self.assertRaisesRegex(TaskError, '仍在'):
+                self.store._check_start(saved)
+
     def test_abort_escalates_if_the_child_ignores_sigterm_and_closes_all_pipes(self):
         # Use the real constructor; the fixture's launch replacement is scoped
         # to the console path and would otherwise replace this invocation too.

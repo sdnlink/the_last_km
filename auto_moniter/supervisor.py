@@ -2013,11 +2013,23 @@ class Supervisor:
     def _event(self, kind: str, **details) -> None:
         record_event(self.run_dir, kind, **details)
 
-    def _process_control(self, active: bool = False) -> None:
-        path = self.run_dir / "control.json"
+    def _read_control(self):
+        from auto_moniter.control import ControlError, read_control
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+            value = read_control(self.run_dir / 'control.json')
+        except ControlError as exc:
+            error = str(exc)
+            if error != getattr(self, '_control_read_error', ''):
+                self._event('control_request_invalid', reason=error)
+                self.log('Invalid control request; waiting for valid input: ' + error)
+            self._control_read_error = error
+            return None
+        self._control_read_error = ''
+        return value
+
+    def _process_control(self, active: bool = False) -> None:
+        value = self._read_control()
+        if value is None:
             return
         action = value.get("action")
         if action == "stop":
@@ -2033,10 +2045,10 @@ class Supervisor:
                 self._check_budget()
                 self._beat("paused at a turn boundary")
                 self._stop_event.wait(0.2)
-                try:
-                    action = json.loads(path.read_text(encoding="utf-8")).get("action")
-                except FileNotFoundError:
-                    break
+                value = self._read_control()
+                if value is None:
+                    continue  # An unreadable request cannot release an existing pause.
+                action = value.get('action')
                 if action == "stop":
                     self._process_control(active=True)
                 elif action != "pause":

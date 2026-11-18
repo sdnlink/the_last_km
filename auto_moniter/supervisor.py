@@ -1527,10 +1527,20 @@ class Supervisor:
         return staged, dispatch, complete
 
     def _invoke_requirement_review(self, prompt, index, *, next_function=False, previous_brief=None):
-        """Repair one typed report or plan validation failure without dispatching work."""
+        """Repair distinct planning errors with durable limits, without dispatching work."""
+        from auto_moniter.adaptive_recovery import RecoveryJournal
+        journal = RecoveryJournal(self.run_dir)
         tree = workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)
         signature = self.project.signature if self.project else ''
-        for attempt in range(2):
+        recovery_context = {'kind':'requirement_plan', 'tree':tree, 'index':index,
+                            'task':self.function_tasks.current,
+                            'directions':[item['id'] for item in self.directions.messages()]}
+        try:
+            prompt += journal.prompt()
+        except (OSError, ValueError):
+            pass  # Advisory history cannot prevent an otherwise valid review.
+        base_prompt = prompt
+        for attempt in range(5):
             turn = self._invoke(self.config.reviewer,prompt,'',role='reviewer',index=index,
                 model=self._reviewer_model(),extra_args=self.config.reviewer_extra_args,read_only=True)
             if turn.session_id:
@@ -1593,10 +1603,17 @@ class Supervisor:
                         raise requirements_review.RequirementReportRepair(str(error))
             except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment,
                     requirements_review.RequirementReportRepair) as exc:
-                if not attempt:
-                    self._process_control()
-                if (attempt or self._stop or self._stop_requested
+                self._process_control()
+                if (attempt >= 4 or self._stop or self._stop_requested
                         or workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) != tree):
+                    return turn
+                try:
+                    admitted = journal.admit(recovery_context, str(exc))
+                except (OSError, ValueError) as history_error:
+                    admitted = False
+                    self.log('Automatic plan repair deferred: ' + redact(str(history_error)))
+                if not admitted:
+                    self._event('adaptive_recovery_exhausted', phase='requirement_plan', reason=str(exc))
                     return turn
                 if self.project:
                     self.project.observe(force=True)
@@ -1613,6 +1630,9 @@ class Supervisor:
                     source = self.run_dir / f'{index:03d}-reviewer{suffix}'
                     if source.exists():
                         source.replace(self.run_dir / (artifact+suffix))
+                # Keep the latest response and bounded error history, rather
+                # than concatenating several complete copies of a large plan.
+                prompt = base_prompt + journal.prompt()
                 if isinstance(exc, requirements_review.NeedsInputReassessment):
                     self._event('requirements_blocker_reassessment',reason=str(exc),output_file=artifact+'-text.md')
                     prompt += requirements_review.reassessment_prompt(plan)
@@ -1636,6 +1656,11 @@ class Supervisor:
             except ValueError:
                 return turn
             else:
+                try:
+                    if isinstance(plan,dict) and plan.get('status') == 'ready':
+                        journal.recovered(recovery_context)
+                except (OSError, ValueError):
+                    pass
                 return turn
 
     def _elaborate_requirement_once(self,records, *, next_function=False):
@@ -2433,6 +2458,14 @@ class Supervisor:
             receipt['failures'] = list(verdict.gaps[len(record.verdict.gaps):])
             receipt['digest'] = candidate_checks.digest({key:value for key,value in receipt.items() if key!='digest'})
             record.watcher_result['candidate_checks'] = receipt
+            if self.config.function_dispatch and self.function_tasks.current:
+                from auto_moniter.experience import Experience
+                try:
+                    if (candidate_checks.valid(receipt,self.run_dir,context)
+                            and (receipt['passed'] or candidate_checks.observed_assertion_failure(receipt,self.run_dir))):
+                        Experience(self.config.cwd,self.run_dir).observe(self.function_tasks.current,receipt)
+                except (OSError, ValueError, LockError) as exc:
+                    self.log('Project experience update deferred: ' + redact(str(exc)))
             self._write_state(self._records, 'running', 0, '', record.tree)
         self._event('candidate_checks_completed', round=record.index, tree=record.tree, passed=passed)
 
@@ -3215,6 +3248,12 @@ class Supervisor:
                                                      'tree': review_record.tree}
         self._progress_reset |= self.quality.milestone('function:' + task['id'])
         self._event('function_accepted', task_id=task['id'], tree=review_record.tree)
+        from auto_moniter.experience import Experience
+        try:
+            Experience(self.config.cwd,self.run_dir).confirm(task['id'],review_record.tree,
+                summary=review_record.verdict.summary,evidence=review_record.verdict.evidence)
+        except (OSError, ValueError, LockError) as exc:
+            self.log('Verified experience confirmation deferred: ' + redact(str(exc)))
         if staged.current:
             self._record_assignment(staged.current)
 
@@ -3566,8 +3605,11 @@ class Supervisor:
         self._planning_rejection = state.get('planning_rejection')
         if self._planning_rejection is not None and (
                 not isinstance(self._planning_rejection, dict)
-                or set(self._planning_rejection) != {'task_id', 'reason'}
-                or any(not isinstance(v, str) or len(v) > 2000 for v in self._planning_rejection.values())):
+                or not {'task_id', 'reason'} <= set(self._planning_rejection)
+                or set(self._planning_rejection) - {'task_id','reason','scope_repair'}
+                or any(not isinstance(self._planning_rejection[k],str) or len(self._planning_rejection[k])>2000
+                       for k in ('task_id','reason'))
+                or 'scope_repair' in self._planning_rejection and type(self._planning_rejection['scope_repair']) is not bool):
             raise ValueError('Invalid saved function planning rejection')
         if (not isinstance(self._function_issue_ids, list) or len(self._function_issue_ids)>128
                 or any(not isinstance(x, str) or not re.fullmatch(r'AUD-[1-9][0-9]{0,11}', x) for x in self._function_issue_ids)):
@@ -4298,9 +4340,16 @@ class Supervisor:
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         previous = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == kwargs['index']), None)
         worker = next((r for r in reversed(self._records) if r.role=='worker' and r.index==kwargs['index']),None)
+        worker_record = worker
         receipt = worker.watcher_result.get('candidate_checks') if worker else None
+        behavioral_failure = bool(self.config.function_dispatch and receipt
+            and candidate_checks.valid(receipt,self.run_dir,self._candidate_check_context(worker_record))
+            and receipt['complete'] and not receipt['passed'] and not receipt['source_changed']
+            and not receipt.get('scope_gaps') and receipt['checks']
+            and all(item['status'] in {'passed','check_failed'} for item in receipt['checks'])
+            and candidate_checks.observed_assertion_failure(receipt,self.run_dir))
         retry = (self._candidate_approval(previous,worker) if receipt else self._check_retry_review(previous)) if previous else None
-        if retry:
+        if retry and not behavioral_failure:
             context = previous.watcher_result.get('candidate_approval',{}).get('context') if receipt else previous.watcher_result.get('check_retry')
             if isinstance(context, dict):
                 self._direction_ids['reviewer'] = list(context['direction_ids'])
@@ -4308,6 +4357,8 @@ class Supervisor:
             return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         ready = self._saved_approval(kwargs['index'], tree)
+        if behavioral_failure:
+            ready = None  # A historical mistaken approval requires actual reassessment.
         if receipt and ready and (ready.get('checks_digest') != receipt['digest']
                 or previous and previous.watcher_result.get('candidate_approval',{}).get('invalidated')):
             ready = None
@@ -4345,6 +4396,23 @@ class Supervisor:
                     review.status = 'continue'
                     review.parse_error = 'invalid review checkpoint evidence'
                     review.gaps.extend(problems)
+            if (behavioral_failure and not review.parse_error
+                    and review.task_status == 'accepted'
+                    and not (turn.exit_code or turn.timed_out or turn.interruption)
+                    and not self._stop and not self._pending_directions()
+                    and workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree):
+                reason = ('Reviewer accepted a candidate with current watcher check failures. '
+                          'Inspect the saved failing check logs. For a concrete defect within the assignment, '
+                          'return changes_required with focused gaps so the worker can repair it automatically. '
+                          'For verification-only work, supply a bounded implementation next_task. '
+                          'Name genuine external blockers explicitly; do not weaken checks, expand permissions, '
+                          'or claim this candidate passed.')
+                review.parse_error = 'acceptance contradicts watcher check failures'
+                review.status = 'continue'
+                review.gaps.append(reason)
+                self._event('acceptance_reassessment', round=kwargs['index'], attempt=attempt+1)
+                if attempt:
+                    self._review_audit_rejection = {'round':kwargs['index'],'reason':reason}
             if (self.config.function_dispatch and self.function_tasks.current and not review.parse_error
                     and not (turn.exit_code or turn.timed_out or turn.interruption)
                     and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
@@ -4506,6 +4574,11 @@ class Supervisor:
             self._last_worker_invocation = dict(self._last_invocation)
         state['last_worker_invocation'] = self._last_worker_invocation
         write_json(state_path, state, durable=True)
+        from auto_moniter.experience import Experience
+        try:
+            prompt += Experience(self.config.cwd,self.run_dir).prompt(self.function_tasks.current if role=='worker' else None)
+        except (OSError, ValueError, LockError):
+            pass  # Damaged/unavailable advisory memory never blocks the task.
         prompt_path = self.run_dir / f"{index:03d}-{role}-prompt.md"
         if self.requirements_review.get("status")=="ready" and not (role=='worker' and self.config.function_dispatch):
             prompt += ("\n\nWatcher-approved requirement elaboration (historical reviewed snapshot; "

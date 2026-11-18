@@ -76,6 +76,46 @@ class AssignmentIdentifierTests(unittest.TestCase):
         self.assertEqual(state['function_tasks']['accepted'][0]['task']['id'], 'F1')
         self.assertEqual(state['requirements_review']['acceptance_criteria'], BRIEF['acceptance_criteria'])
 
+    def test_distinct_plan_errors_are_repaired_in_one_run_without_user_intervention(self):
+        invalid_test = final_task()
+        invalid_test['test_files'] = ['docs/not_a_test.py']
+        worker = self.worker()
+        reviewer = ScriptedProvider('reviewer', [plan(final_task('task:1')), plan(invalid_test),
+            plan(final_task()), result('F1','accepted',status='done')])
+        report = self.monitor(worker,reviewer).run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,4))
+        episode = json.loads((self.run/'adaptive-recovery.json').read_text())['episodes'][0]
+        self.assertEqual(episode['status'],'recovered')
+        self.assertEqual(len(episode['reasons']),2)
+        self.assertIn('docs/not_a_test.py', reviewer.calls[2]['prompt'])
+
+    def test_large_dependency_sets_match_the_plan_capacity_and_provider_schema(self):
+        value = final_task()
+        value['depends_on'] = ['F'+str(index) for index in range(25)]
+        self.assertEqual(len(function_tasks.validate(value)['depends_on']),25)
+        schema = function_tasks.schema(requirements_review.SCHEMA,planning=True,gate=True,integration=True)
+        for variant in schema['properties']['next_task']['anyOf'][1:]:
+            self.assertEqual(variant['properties']['depends_on']['maxItems'],function_tasks.MAX_PLAN_TASKS)
+        with self.assertRaisesRegex(ValueError,'distinct IDs'):
+            function_tasks.validate({**value,'depends_on':['F1','F1']})
+
+    def test_scope_repair_checkpoint_can_resume_without_losing_its_rejection(self):
+        worker=ScriptedProvider('worker',[]);reviewer=ScriptedProvider('reviewer',[])
+        monitor=self.monitor(worker,reviewer)
+        monitor.request_stop()
+        self.assertEqual(monitor.run().status,'stopped')
+        state_path=self.run/'state.json'
+        state=json.loads(state_path.read_text())
+        rejection={'task_id':'F1','scope_repair':True,'reason':'Correct the current edit manifest'}
+        state['planning_rejection']=rejection
+        state_path.write_text(json.dumps(state))
+        resumed=self.monitor(worker,reviewer,resume=True)
+        resumed.request_stop()
+        report=resumed.run()
+        self.assertEqual(report.status,'stopped',report.summary)
+        self.assertEqual(resumed._planning_rejection,rejection)
+
     def test_identifier_repair_is_bounded_and_never_dispatches_invalid_work(self):
         worker = ScriptedProvider('worker', [])
         reviewer = ScriptedProvider('reviewer', [plan(final_task('task:1')), plan(final_task('task:2'))])

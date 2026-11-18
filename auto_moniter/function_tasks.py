@@ -17,7 +17,7 @@ TASK_SCHEMA={'type':'object','additionalProperties':False,'properties':{
  **{k:{'type':'string'} for k in ['file','symbol','objective','inputs','outputs']},
  **{k:{'type':'array','items':{'type':'string'}} for k in ['boundaries','verification']},
  **{k:copy.deepcopy(IDENTIFIER_SCHEMA) for k in ['id','module_id']},
- 'depends_on':{'type':'array','items':copy.deepcopy(IDENTIFIER_SCHEMA)},
+ 'depends_on':{'type':'array','maxItems':200,'uniqueItems':True,'items':copy.deepcopy(IDENTIFIER_SCHEMA)},
  'delivery_scope':{'type':'string','enum':['function','module','requirement']}},'required':sorted(FIELDS)}
 NEXT_SCHEMA={'anyOf':[{'type':'null'},TASK_SCHEMA]}
 GATE_FIELDS = {'criterion_ids', 'check_ids', 'test_files'}
@@ -119,8 +119,11 @@ def validate(value, modules=None):
             raise ValueError('edit_files must use canonical exact paths')
     for key in ['boundaries','verification','depends_on']:
         v=value[key]
-        if not isinstance(v,list) or len(v)>20 or any(not isinstance(s,str) or not s.strip() or len(s)>1500 for s in v):
+        limit = MAX_PLAN_TASKS if key == 'depends_on' else 20
+        if not isinstance(v,list) or len(v)>limit or any(not isinstance(s,str) or not s.strip() or len(s)>1500 for s in v):
             raise ValueError('Invalid function assignment '+key)
+        if key == 'depends_on' and len(set(v)) != len(v):
+            raise ValueError('Function assignment depends_on must contain distinct IDs')
     if not value['boundaries'] or not value['verification']:
         raise ValueError('Function assignment requires boundaries and behavioral verification')
     if value['delivery_scope'] not in ['function','module','requirement']:

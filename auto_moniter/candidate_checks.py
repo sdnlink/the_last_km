@@ -12,6 +12,24 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
+def observed_assertion_failure(receipt, run):
+    """Use actual failed-test output, never infer a product bug from exit 1 alone."""
+    for item in receipt.get('checks', []):
+        if item.get('status') != 'check_failed':
+            continue
+        path = Path(run)/item['log']
+        try:
+            # Callers validate receipt/log hashes first. Skip command text:
+            # mentioning an assertion in the requested command is not evidence.
+            output = '\n'.join(path.read_text(errors='replace').splitlines()[2:])
+        except OSError:
+            continue
+        if re.search(r'AssertionError|AssertionError\s*\[|FAILED \((?:failures|errors)=|'
+                     r'(?m:^not ok [0-9]+)|test result: FAILED|panicked at|XCTAssert.*failed', output):
+            return True
+    return False
+
+
 def log_hashes(run, results):
     hashes = {}
     for item in results:

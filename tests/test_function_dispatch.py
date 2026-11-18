@@ -656,7 +656,7 @@ class DispatchTests(unittest.TestCase):
             worker=FunctionWorker('worker',[{**result('F1','done'),
                 'writes':{'app.py':'def parse_input(): return 41\n',
                     'test_app.py':'import unittest\nfrom app import parse_input\nclass Behavior(unittest.TestCase):\n def test_result(self): self.assertEqual(parse_input(),42)\n'}}])
-            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted')])
+            reviewer=ScriptedProvider('reviewer',[plan(assignment),result('F1','accepted'),result('F1','accepted')])
             report=self.run_monitor(root,worker,reviewer,max_rounds=1)
             self.assertEqual(report.status,'action_required',report.summary)
             saved=json.loads((root/'run/state.json').read_text())
@@ -743,7 +743,7 @@ class DispatchTests(unittest.TestCase):
             report = self.run_monitor(root, worker, reviewer, max_rounds=2,
                 checks=["python3 -c 'from app import parse_input; assert parse_input() == 42'"])
             self.assertEqual(report.status,'action_required',report.summary)
-            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
             blocked = json.loads((root/'run/state.json').read_text())
             self.assertEqual(blocked['function_tasks']['current']['id'],'F1')
             self.assertEqual(blocked['function_tasks']['accepted'],[])
@@ -853,7 +853,7 @@ class IntegrationDispatchTests(unittest.TestCase):
             self.response('accepted'), self.response('accepted'), self.response('accepted', next_task=next_task)])
         report = self.monitor(worker, reviewer, max_rounds=4).run()
         self.assertEqual(report.status,'action_required',report.summary)
-        self.assertEqual((len(worker.calls),len(reviewer.calls)),(3,4))
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(3,5))
         self.assertIn('assigned source file did not change: client.py',worker.calls[1]['prompt'])
         self.assertIn('Restore changes outside this assignment: third.py',worker.calls[2]['prompt'])
         self.assertEqual(self.state()['function_tasks']['accepted'],[])

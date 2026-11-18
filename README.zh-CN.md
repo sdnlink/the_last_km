@@ -56,6 +56,8 @@ auto-moniter selftest
 
 `providers` 检查是否能找到 CLI，`doctor` 检查本地运行条件，两者均不验证账号认证或模型访问权限。`selftest` 使用本地夹具，不调用模型。
 
+自动恢复会在原运行内修正不同的计划错误，将真实失败检查交回 Reviewer 重评，并把独立验收通过的修复保存为项目经验供后续任务参考。`auto-moniter experience --cwd <项目目录>` 可只读查看学习统计；机制与边界见[自动恢复与项目经验](docs/adaptive-recovery.md)。
+
 目标仓库尚未配置提交作者时，先设置：
 
 ```sh

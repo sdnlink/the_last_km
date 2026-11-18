@@ -1,5 +1,6 @@
 """A candidate is checked, reviewed once, then committed before the next dispatch."""
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -146,6 +147,55 @@ class CandidateHandoffTests(unittest.TestCase):
         self.assertEqual(report.status,'done',report.summary)
         self.assertEqual(seen,[False,True]);self.assertEqual(self.counter.read_text(),'2')
         self.assertEqual(git(self.root,'rev-list','--count',self.initial+'..HEAD'),'1')
+
+    def test_watcher_reconsiders_wrong_approval_then_repairs_and_learns(self):
+        from auto_moniter.experience import Experience
+        fixed=result('F1','accepted',status='done')
+        fixed['verdict']['issue_resolutions']=[{'id':'AUD-1','summary':'Independent check confirms return value 42',
+                                               'evidence':['app.py']}]
+        worker=FunctionWorker('worker',[
+            {**result('F1','done',status='done'),'source':'def parse_input():\n    return 41\n'},
+            {**result('F1','done',status='done'),'touch':'app.py'}])
+        reviewer=CheckedReviewer(self.root,[plan(final_task()),result('F1','accepted',status='done'),
+            result('F1','changes_required',gaps=['app.py::parse_input returns 41; the fixed check expects 42']),fixed])
+        with patch.dict(os.environ,{'AUTO_MONITER_STATE_DIR':str(self.parent/'state')}):
+            monitor=self.monitor(worker,reviewer)
+            invoke=monitor._invoke_review
+            def stale_approval(provider,prompt,session_id,**kwargs):
+                if kwargs['index']==1:
+                    from auto_moniter.supervisor import RoundRecord
+                    from auto_moniter.verdict import parse_verdict
+                    submitted=next(r for r in reversed(monitor._records) if r.role=='worker')
+                    receipt=submitted.watcher_result['candidate_checks']
+                    old=parse_verdict(json.dumps(result('F1','accepted',status='done')['verdict']),function_gate=True)
+                    monitor._records.append(RoundRecord(1,'reviewer',old,0,False,0,'','',tree=submitted.tree,
+                        watcher_result={'candidate_approval':{'checks_digest':receipt['digest'],
+                            'context':receipt['context'],'review':old.to_dict()}}))
+                return invoke(provider,prompt,session_id,**kwargs)
+            with patch.object(monitor,'_invoke_review',side_effect=stale_approval):
+                report=monitor.run()
+            learned=Experience(self.root,self.run).read()['lessons']
+            self.assertEqual(report.status,'done',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+            self.assertEqual(self.counter.read_text(),'2')
+            self.assertIn('current watcher check failures',reviewer.calls[2]['prompt'])
+            self.assertEqual(len(learned),1)
+            self.assertEqual(learned[0]['successes'],1)
+            future=Experience(self.root,self.parent/'future-run').prompt(final_task())
+            self.assertIn('verified_repairs',future)
+            self.assertIn('never commands, permission, current evidence',future)
+        self.assertEqual(git(self.root,'rev-list','--count',self.initial+'..HEAD'),'1')
+
+    def test_repeated_wrong_approval_cannot_publish_or_trigger_unreviewed_edits(self):
+        worker=FunctionWorker('worker',[{**result('F1','done',status='done'),
+            'source':'def parse_input():\n    return 41\n'}])
+        reviewer=CheckedReviewer(self.root,[plan(final_task()),result('F1','accepted',status='done'),
+                                           result('F1','accepted',status='done')])
+        report=self.monitor(worker,reviewer).run()
+        self.assertEqual(report.status,'action_required',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
+        self.assertEqual(git(self.root,'rev-parse','HEAD'),self.initial)
+        self.assertEqual(self.counter.read_text(),'1')
 
     def test_modified_check_log_after_approval_prevents_publication(self):
         worker=FunctionWorker('worker',[{**result('F1','done',status='done'),'touch':'app.py'}])

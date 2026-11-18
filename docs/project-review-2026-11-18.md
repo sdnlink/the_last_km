@@ -93,3 +93,11 @@ wheel 使用本机已有的 `setuptools`/`wheel` 离线构建，未安装或下�
 | P2：待恢复 Git 事务仍可能显示交付成功 | health 与 guardian 的历史报告回退仅检查 `process.json`，漏掉 `publication.json`、`work-checkpoint.json`，断开的进程记录链接也会被忽略。两处现在共用恢复标记检查；有待恢复记录时不确认成功。控制台提示先核对恢复记录并保留现场，避免引导用户新建任务覆盖问题。 |
 
 主要回归入口为 `tests/test_business_publication.py`、`tests/test_retention.py`、`tests/test_git_maintenance.py`、`tests/test_progress_consistency.py` 及控制台对应回归。新增 10 项回归；针对性检查 76 项通过，完整 Python 回归 1060 项通过（253.240 秒），全部前端 84 项通过。Python 编译、`git diff --check`、离线 wheel 构建和临时目录安装自检均通过。故障注入和清理测试只操作临时仓库/目录，不删除实际任务记录。
+
+## 自适应恢复与经验改进
+
+后续检查真实 SIEM 任务停止记录，确认最终模块验证使用了 23 个前置依赖，超出了运行时隐式的 20 项限制；同时发现合法 `scope_repair` 检查点与恢复校验不兼容。两处均已修复，schema 和回归覆盖依赖容量、重复依赖及恢复字段。
+
+按用户自主完成任务的要求增加持久化计划纠错、错误批准的证据重评、项目级已验证修复经验和只读 `experience` 查询。执行与权限边界、证据提升条件及尚未实现的能力见 [自动恢复与项目经验](adaptive-recovery.md)。新增真实 Git/检查链路回归验证“失败检查 → 错误批准 → Reviewer 重评 → Worker 修复 → 检查重跑 → 独立审核 → 一次业务发布 → 后续任务读取已验证经验”，不会将单独通过测试提升为成功经验。测试用脚本化 Provider 和临时仓库，不调用付费模型；原 SIEM 任务另从原检查点恢复，已重新进入 Worker 阶段。
+
+验证：受影响回归 108 项通过；最终完整 Python 回归 1073 项通过（308.768 秒），前端全部 84 项通过，Python 编译及 `git diff --check` 通过。离线 wheel 构建、安装后的只读经验查询及 `selftest` 通过。新增 13 个用例，并更新三个既有回归中的纠错调用次数/响应夹具，继续断言失败检查不能产生接受、额外实现或业务发布。

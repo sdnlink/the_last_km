@@ -305,3 +305,7 @@ auto-moniter history restore RUN_DIR -C PROJECT --apply
 `history` 省略 operation 时为 list；支持 `--runs-dir ROOT` 重复指定扫描根、`--include-failed`、`--keep-archives 10`、`--archive-older-than 90d`。cleanup 归档后再删除对应引用，恢复只恢复审计引用，不切换业务分支；restore 必须带 RUN_DIR 和 `--apply`。保留年龄和数量共同约束，过期归档可能不可恢复。
 
 任务 run 的退出码：0 表示完成，1 表示未完成、停止、预算/轮次/失败上限或运行异常，2 表示参数/预检/恢复配置无效。watch 默认跟随到最终状态；watch --once、status、doctor 等诊断成功不能当作任务交付通过。
+
+## 项目经验查询
+
+`auto-moniter experience --cwd <项目目录>` 只读展示该项目观察到的失败模式和经独立审核、Watcher 接受的修复次数，不调用模型、不创建状态目录。经验自动提供给后续相关任务，但不能替代当前验收，也不授予新增权限。详情见[自动恢复与项目经验](adaptive-recovery.md)。

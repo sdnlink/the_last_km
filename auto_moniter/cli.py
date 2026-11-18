@@ -160,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("providers", help="Show which agent CLIs are on PATH")
     diagnostic = sub.add_parser("doctor", help="Offline platform and executable checks; does not call models")
     diagnostic.add_argument("-C", "--cwd", type=Path, default=Path.cwd())
+    experience = sub.add_parser('experience', help='Inspect project repair learning; read-only, no model calls')
+    experience.add_argument('-C','--cwd',type=Path,default=Path.cwd())
     sub.add_parser("selftest", help="Exercise the installed monitor end to end using a local fixture, without models")
     return parser
 
@@ -173,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {'available' if ok else 'missing'}")
         return 0
     try:
+        if args.command == 'experience':
+            from auto_moniter.experience import Experience
+            result=Experience(args.cwd,args.cwd).summary()
+            print(json.dumps(safe(result),ensure_ascii=False,indent=2))
+            return 0
         if args.command == "doctor":
             result = doctor(args.cwd)
             print(json.dumps(result, ensure_ascii=False, indent=2))

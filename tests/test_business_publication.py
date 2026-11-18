@@ -177,6 +177,69 @@ class BusinessPublicationTests(unittest.TestCase):
         self.assertEqual(self.submit(history), (first, second))
         self.assertEqual(git(self.root, 'rev-list', '--count', 'HEAD'), '2')
 
+    def assert_lock_setup_failure(self, phase):
+        history = self.history()
+        path = index_path(history)
+        lock = path.with_name(path.name+'.lock')
+        original_index = path.read_bytes()
+        real_write, real_fsync = os.write, os.fsync
+        descriptors = []
+        error = KeyboardInterrupt if phase == 'interrupt' else OSError
+        def write(descriptor, data):
+            if data.startswith(b'auto-moniter publication '):
+                descriptors.append(descriptor)
+                if phase in {'write', 'interrupt'}:
+                    raise error('fixture index-lock setup failure')
+            return real_write(descriptor, data)
+        def fsync(descriptor):
+            if descriptor in descriptors:
+                raise error('fixture index-lock setup failure')
+            return real_fsync(descriptor)
+        with patch('auto_moniter.publication.os.write', side_effect=write), \
+             patch('auto_moniter.publication.os.fsync', side_effect=fsync):
+            with self.assertRaisesRegex(error, 'fixture index-lock setup failure'):
+                self.submit(history)
+        leaked = False
+        for descriptor in descriptors:
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            leaked = True
+            os.close(descriptor)
+        self.assertFalse(lock.exists(), 'failed setup stranded the Git index lock')
+        self.assertFalse(leaked, 'failed setup leaked its file descriptor')
+        self.assertEqual(path.read_bytes(), original_index)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), self.before)
+        self.assertFalse((self.run/'publication.json').exists())
+        self.submit(history)
+        self.assertEqual(git(self.root, 'show', 'HEAD:app.py'), 'reviewed code')
+
+    def test_index_lock_write_failure_is_rolled_back_before_retry(self):
+        self.assert_lock_setup_failure('write')
+
+    def test_index_lock_fsync_failure_is_rolled_back_before_retry(self):
+        self.assert_lock_setup_failure('fsync')
+
+    def test_interrupt_during_index_lock_setup_does_not_strand_the_lock(self):
+        self.assert_lock_setup_failure('interrupt')
+
+    def test_preparation_failure_does_not_remove_a_replacement_index_lock(self):
+        history = self.history()
+        path = index_path(history)
+        lock = path.with_name(path.name+'.lock')
+        original_index = path.read_bytes()
+        def replaced(*_args):
+            lock.unlink()
+            lock.write_bytes(b'owned by another Git operation')
+            raise OSError('fixture preparation failed after replacement')
+        with patch('auto_moniter.publication.business_tree', side_effect=replaced):
+            with self.assertRaisesRegex(OSError, 'fixture preparation failed'):
+                self.submit(history)
+        self.assertEqual(lock.read_bytes(), b'owned by another Git operation')
+        self.assertEqual(path.read_bytes(), original_index)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), self.before)
+
     def test_unrelated_staged_file_is_preserved(self):
         history = self.history()
         # The reviewer did not inspect this later staging operation; it must not
@@ -360,7 +423,8 @@ class BusinessPublicationTests(unittest.TestCase):
         from console.git_records import read_git_record
         history=self.history();first,second=self.submit(history)
         state={'cwd':str(self.root),'state_version':1,'status':'done','git_history':history.export()}
-        (self.run/'state.json').write_text(json.dumps(state));(self.run/'report.json').write_text(json.dumps({'status':'done','git_history':history.export()}))
+        (self.run/'state.json').write_text(json.dumps(state));(self.run/'report.json').write_text(json.dumps({
+            'status':'done','rounds':1,'summary':'fixture','stop_reason':'done','git_history':history.export()}))
         (self.run/'supervisor.lock').touch()
         code=git(self.root,'rev-parse','HEAD')
         result=maintenance(self.root,runs_dirs=[self.run.parent],operation='cleanup',

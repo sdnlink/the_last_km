@@ -88,6 +88,27 @@ class ProgressConsistencyTests(unittest.TestCase):
         self.assertEqual(run_health(self.run)["report_warning"], "outstanding_process_record")
         self.assertFalse(run_health(self.run)["delivery_confirmed"])
 
+    def test_pending_git_transactions_cannot_confirm_delivery_or_feed_guardian_success(self):
+        from auto_moniter.guardian import Guardian
+        from auto_moniter.supervisor import RunConfig
+        from tests.test_supervisor import ScriptedProvider
+        self.state('done')
+        self.report()
+        guardian = Guardian(RunConfig('fixture', self.run, ScriptedProvider('worker', []),
+                                     no_review=True, run_dir=self.run), log=lambda _:None)
+        for name in ('publication.json','work-checkpoint.json','process.json'):
+            with self.subTest(name=name):
+                marker = self.run/name
+                # Even an unreadable/dangling recovery record must be preserved.
+                marker.symlink_to(self.run/'missing-record')
+                try:
+                    self.assertFalse(run_health(self.run)['delivery_confirmed'])
+                    self.assertIsNone(guardian._new_report(0))
+                finally:
+                    marker.unlink()
+        self.assertTrue(run_health(self.run)['delivery_confirmed'])
+        self.assertIsNotNone(guardian._new_report(0))
+
     def test_read_only_inspection_preserves_files_and_lock_content(self):
         self.state("done")
         self.report()

@@ -126,6 +126,20 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.store.overview()['tasks'],[])
         self.assertTrue((run/'state.json').exists())
 
+    def test_pending_publication_is_not_complete_or_offered_as_a_new_task(self):
+        task = self.create()
+        run = Path(task['run_dir']); run.mkdir()
+        write_json(run/'state.json', {'cwd':str(self.project), 'status':'done', 'rounds':[]})
+        write_json(run/'report.json', {'status':'done', 'rounds':0, 'summary':'fixture', 'stop_reason':'done'})
+        (run/'supervisor.lock').touch()
+        write_json(run/'publication.json', {'phase':'preparing'})
+        view = self.store.detail(task['id'])
+        self.assertEqual(view['status'], 'interrupted')
+        self.assertFalse(view['health']['delivery_confirmed'])
+        self.assertIn('恢复记录', view['resume_unavailable'])
+        self.assertNotIn('新建任务', view['resume_unavailable'])
+        self.assertNotIn('delete', view['actions'])
+
     def test_append_checks_preserves_ids_budget_and_checkpoint_and_is_idempotent(self):
         task = self.create(checks=['git diff --check'])
         run = Path(task['run_dir']);run.mkdir()

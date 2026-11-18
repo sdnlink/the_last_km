@@ -18,6 +18,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from auto_moniter.paths import project_runs_dir
+from auto_moniter.health import valid_report
 
 
 _FINAL = {"done", "failed", "stalled", "max_rounds"}
@@ -100,8 +101,18 @@ def _metadata(directory: int, cwd: Path, run: Path, include_failed: bool) -> dic
     if status not in _FINAL:
         return result
     report = _json_at(directory, "report.json")
+    if not valid_report(report):
+        result['reason'] = 'invalid_report'
+        return result
     if report.get("status") != status:
         result["reason"] = "inconsistent_report"
+        return result
+    try:
+        os.stat('resume-error.json', dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        result['reason'] = 'recovery_error_present'
         return result
     result["finished_at"] = os.stat("report.json", dir_fd=directory, follow_symlinks=False).st_mtime
     # An unresolved local process identity must remain available for recovery.

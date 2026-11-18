@@ -14,13 +14,15 @@ from auto_moniter.locking import workspace_lease
 from auto_moniter.paths import project_runs_dir
 from auto_moniter.retention import _FLAGS, _locks, _json_at, _check_mounts, _root_path
 from auto_moniter.storage import write_json
+from auto_moniter.health import valid_report
+
 
 FINAL = {'done', 'failed', 'stalled', 'max_rounds'}
 
 
 def recovery_pending(run):
     return any((run/name).exists() or (run/name).is_symlink()
-               for name in ('process.json', 'publication.json', 'work-checkpoint.json'))
+               for name in ('process.json', 'publication.json', 'work-checkpoint.json', 'resume-error.json'))
 
 
 def handle(cwd):
@@ -218,7 +220,8 @@ def maintenance(cwd, *, runs_dirs=None, operation='list', apply=False, older_tha
                         archived = history.get('archived')
                         row.update(status=state['status'], ref=history['ref'], head=history['head'], archived=bool(archived))
                         report = docs.get('report.json', {})
-                        final = state['status'] in FINAL and report.get('status') == state['status']
+                        final = (state['status'] in FINAL and valid_report(report)
+                                 and report.get('status') == state['status'])
                         finished = (run/'report.json').stat().st_mtime if final else None
                         row.update(reason='recoverable_run_preserved', finished_at=finished)
                         if operation == 'migrate' and archived and not ref_value(git, history['ref']):

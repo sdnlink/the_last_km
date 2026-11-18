@@ -17,6 +17,17 @@ def valid_report(report: object) -> bool:
             and isinstance(report.get("summary"), str) and isinstance(report.get("stop_reason"), str))
 
 
+def delivery_recovery_warning(run_dir: Path) -> str:
+    """An unresolved transaction cannot serve as final delivery confirmation."""
+    for name, warning in (('process.json', 'outstanding_process_record'),
+                          ('publication.json', 'publication_recovery_pending'),
+                          ('work-checkpoint.json', 'work_checkpoint_recovery_pending')):
+        path = run_dir / name
+        if path.exists() or path.is_symlink():
+            return warning
+    return ''
+
+
 def _lock_held(path: Path, *, missing=None):
     try:
         import fcntl
@@ -61,8 +72,8 @@ def read_run_snapshot(run_dir: Path) -> dict:
     guardian_after = _lock_held(run_dir / "guardian.lock", missing=False)
     held = True if held is True or after is True else after
     guardian = True if guardian is True or guardian_after is True else guardian_after
-    if report and report.get("status") == "done" and (run_dir / "process.json").exists():
-        warning = "outstanding_process_record"
+    if report and report.get("status") == "done":
+        warning = delivery_recovery_warning(run_dir) or warning
     finished = bool(report and not warning and held is False and guardian is False)
     resume_error = read('resume-error.json')
     if (held is False and guardian is False and resume_error

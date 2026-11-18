@@ -68,6 +68,39 @@ def read_index(path):
     return data
 
 
+def remove_owned_lock(path, identity):
+    """A failed transaction cannot remove a lock substituted by another owner."""
+    if identity is None:
+        return
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return
+    if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+        path.unlink()
+
+
+def acquire_index_lock(path, marker):
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    identity = None
+    try:
+        identity = os.fstat(descriptor)
+        offset = 0
+        while offset < len(marker):
+            written = os.write(descriptor, marker[offset:])
+            if written <= 0:
+                raise OSError('Cannot write publication index-lock marker')
+            offset += written
+        os.fsync(descriptor)
+        return descriptor, identity
+    except BaseException:
+        try:
+            remove_owned_lock(path, identity)
+        finally:
+            os.close(descriptor)
+        raise
+
+
 def recover(history):
     """Reconcile an interrupted ref/index transaction before checking saved HEAD."""
     journal = history.run_dir / 'publication.json'
@@ -182,14 +215,11 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
         raise GitHistoryError('Business publication requires a checked-out local branch')
     path = index_path(history)
     lock = path.with_name(path.name + '.lock')
-    descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     marker = ('auto-moniter publication ' + history.key).encode()
-    os.write(descriptor, marker)
-    os.fsync(descriptor)
-    stat = os.fstat(descriptor)
     old_state = history.export()
     journal = history.run_dir / 'publication.json'
     prepared = False
+    descriptor, stat = acquire_index_lock(lock, marker)
     try:
         old_index = read_index(path)
         write_json(journal, {'phase':'preparing', 'project':str(history.cwd), 'audit_ref':history.ref,
@@ -300,7 +330,7 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
             history.business_head = old_state['business_head']
             history.last_business_commit = old_state.get('last_business_commit', {})
             history.audit_initial = old_state.get('audit_initial', '')
-            lock.unlink(missing_ok=True)
+            remove_owned_lock(lock, stat)
             journal.unlink(missing_ok=True)
         raise
     finally:

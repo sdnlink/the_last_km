@@ -44,13 +44,31 @@ class GitMaintenanceTests(unittest.TestCase):
             (run/'git-history.json').write_text(json.dumps(data))
         state={'cwd':str(self.root),'state_version':1,'status':status,'git_history':data,
                'rounds':[{'role':'worker','index':1,'git_checkpoint':checkpoint}]}
-        (run/'state.json').write_text(json.dumps(state));(run/'report.json').write_text(json.dumps({'status':status,'git_history':data}))
+        (run/'state.json').write_text(json.dumps(state));(run/'report.json').write_text(json.dumps({
+            'status':status,'rounds':1,'summary':'fixture','stop_reason':status,'git_history':data}))
         (run/'supervisor.lock').touch()
         stamp=time.time()-days*86400;os.utime(run/'report.json',(stamp,stamp))
         return run,data,checkpoint
 
     def maintenance(self, **kwargs):
         return maintenance(self.root,runs_dirs=[self.runs],**kwargs)
+
+    def test_partial_report_cannot_release_audit_or_work_references(self):
+        run, history, _ = self.task()
+        (run/'report.json').write_text(json.dumps({'status':'done','git_history':history}))
+        result = self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+        self.assertFalse(result['runs'][0]['selected'])
+        self.assertEqual(handle(self.root).git('rev-parse','--verify',history['ref']).decode().strip(),history['head'])
+        self.assertFalse(archive_path(handle(self.root),history['ref'].split('/')[-1]).exists())
+
+    def test_failed_restore_keeps_audit_references_and_the_original_checkpoint(self):
+        run, history, _ = self.task()
+        (run/'resume-error.json').write_text(json.dumps({'status':'recovery_failed','summary':'fixture restore failure'}))
+        before=(run/'state.json').read_bytes()
+        result=self.maintenance(operation='cleanup',keep_runs=0,older_than=0,apply=True)
+        self.assertFalse(result['runs'][0]['selected'])
+        self.assertEqual((run/'state.json').read_bytes(),before)
+        self.assertEqual(handle(self.root).git('rev-parse','--verify',history['ref']).decode().strip(),history['head'])
 
     def test_preview_is_read_only_and_migration_preserves_web_history(self):
         run,history,checkpoint=self.task(legacy=True)
@@ -209,7 +227,8 @@ class GitMaintenanceTests(unittest.TestCase):
         history.prepare_review(1,before)
         self.assertFalse(history.head)
         state={'cwd':str(self.root),'state_version':1,'status':'max_rounds','git_history':history.export()}
-        (run/'state.json').write_text(json.dumps(state));(run/'report.json').write_text(json.dumps({'status':'max_rounds','git_history':history.export()}))
+        (run/'state.json').write_text(json.dumps(state));(run/'report.json').write_text(json.dumps({
+            'status':'max_rounds','rounds':1,'summary':'fixture','stop_reason':'max_rounds','git_history':history.export()}))
         (run/'supervisor.lock').touch()
         return run,history
 

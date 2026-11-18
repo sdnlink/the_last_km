@@ -31,7 +31,7 @@ class RetentionTests(unittest.TestCase):
         run = self.runs / name
         run.mkdir()
         write_json(run / "state.json", {"cwd": str(self.project), "state_version": 1, "status": status, **state})
-        write_json(run / "report.json", {"status": status})
+        write_json(run / "report.json", {"status": status, "rounds": 0, "summary": "fixture", "stop_reason": str(status)})
         (run / "supervisor.lock").write_text("12345")
         (run / "001-worker.log").write_bytes(b"x" * 1024)
         at = time.time() - days * 86400
@@ -67,6 +67,27 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(rows["old_failure"]["reason"], "failed_run_preserved")
         self.assertEqual(rows["new_success"]["reason"], "too_recent")
         self.assertTrue(rows["old_success"]["selected"])
+
+    def test_incomplete_or_invalid_final_reports_never_authorize_deletion(self):
+        valid = {'status':'done', 'rounds':0, 'summary':'fixture', 'stop_reason':'done'}
+        cases = [{'status':'done'}, {**valid,'rounds':-1}, {**valid,'rounds':True},
+                 {**valid,'summary':[]}, {**valid,'stop_reason':None}]
+        runs = []
+        for index, report in enumerate(cases):
+            run = self.run_dir('invalid-report-'+str(index))
+            write_json(run/'report.json', report)
+            runs.append(run)
+        result = self.inspect(keep_runs=0, older_than=0, include_failed=True, apply=True)
+        self.assertTrue(all(run.is_dir() for run in runs))
+        self.assertTrue(all(row['reason']=='invalid_report' and not row['selected'] for row in result['runs']))
+
+    def test_resume_error_preserves_the_original_checkpoint(self):
+        run = self.run_dir('resume-failed')
+        write_json(run/'resume-error.json', {'status':'recovery_failed','summary':'fixture restore failure'})
+        result = self.inspect(keep_runs=0, older_than=0, include_failed=True, apply=True)
+        self.assertTrue(run.is_dir())
+        self.assertFalse(result['runs'][0]['selected'])
+        self.assertEqual(result['runs'][0]['reason'], 'recovery_error_present')
 
     def test_recoverable_states_are_kept_even_when_include_failed(self):
         statuses = ["stopped", "blocked", "running", "action_required", "recovery_failed", "budget_exceeded"]

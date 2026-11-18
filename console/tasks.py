@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from auto_moniter.health import read_run_snapshot, run_health
+from auto_moniter.health import delivery_recovery_warning, read_run_snapshot, run_health
 from auto_moniter.control import ControlError, read_control
 from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
@@ -828,6 +828,8 @@ class TaskStore:
     def _resume_args(self, meta: dict, state: dict | None = None) -> list[str]:
         run = Path(meta['run_dir'])
         state = state if state is not None else read_json(run / 'state.json')
+        if state.get('status') == 'done' and delivery_recovery_warning(run):
+            raise TaskError('仍有未完成的进程或提交恢复记录，尚不能确认交付；请先核对恢复记录并保留现场', 409)
         if state.get('status') not in {'running', 'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required'}:
             raise TaskError('检查点状态不支持恢复，请新建任务', 409)
         if not (run / 'requirement.md').is_file():

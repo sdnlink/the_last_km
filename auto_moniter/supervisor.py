@@ -609,6 +609,22 @@ class Supervisor:
                         break
                 self._check_budget(new_call=True)
                 self._beat(f"round {round_index}: starting worker")
+                first_follow_up = (self.config.workflow == 'review-first' and not self.config.function_dispatch
+                                   and not self.project and self.requirement_cycles
+                                   and round_index == self.requirement_cycles[-1]['handoff']['round'] + 1
+                                   and self._last_worker_invocation.get('round', 0) < round_index)
+                if first_follow_up:
+                    self.log(f"round {round_index}: worker running")
+                    self._process_control()
+                    if self._stop:
+                        break
+                    # Control can pause here. Reconcile before taking the source
+                    # snapshot that will be used for this first dispatch.
+                    if self._sync_business_head(records):
+                        last_worker = None
+                        last_review = self._audit_feedback
+                        stall, previous_gap_key, previous_tree = 0, '', ''
+                        continue
                 if self.git_history:
                     self._git_before = self.git_history.begin_round(round_index)
 
@@ -621,26 +637,10 @@ class Supervisor:
                         return self._finish('action_required', 'Function scope could not be initialized: ' + str(exc), records, last_worker)
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
                                      workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
-                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
-                # Compare to the last verified workspace, including changes made
-                # between turns; comparing only to turn-start would miss those edits.
-                impact_before = getattr(self, '_impact_snapshot', None)
-                if impact_before is None and worker_start_tree == previous_tree:
-                    impact_before = before_files
-                self.log(f"round {round_index}: worker running")
-                if self._stop:
-                    break
                 worker_directions = None
-                if (self.config.workflow == 'review-first' and not self.config.function_dispatch
-                        and not self.project and self.requirement_cycles
-                        and round_index == self.requirement_cycles[-1]['handoff']['round'] + 1
-                        and self._last_worker_invocation.get('round', 0) < round_index):
-                    self._process_control()
-                    if self._stop:
-                        break
-                    # Check and dispatch the same snapshot. An amendment that
-                    # arrives after this boundary is pending for a later turn.
-                    # The run lock keeps the configured checks fixed until exit.
+                if first_follow_up:
+                    # Compare the inputs used for dispatch to those reviewed.
+                    # Later amendments stay pending for a later turn.
                     worker_directions = self.directions.messages()
                     revision = self.directions.revision(self.config.requirement, worker_directions)
                     brief = self.requirements_review
@@ -650,13 +650,24 @@ class Supervisor:
                     if (brief.get('status') != 'ready'
                             or brief.get('cycle') != len(self.requirement_cycles) + 1
                             or reviewed != revision['sha256']
-                            or not requirement_context.matches_ready_checks(
-                                self.run_dir, self.config.cwd, brief, self.config.checks, worker_directions)):
+                            or not requirement_context.matches_ready_inputs(
+                                self.run_dir, self.config.cwd, self.config.requirement, brief,
+                                worker_start_tree, self.config.checks, worker_directions)):
                         if not self._elaborate_requirement(records):
                             return self._finish('stopped' if self._stop_requested else 'action_required',
                                 self.requirements_review.get('summary', 'Next requirement did not become ready.'),
                                 records, last_worker)
                         continue
+                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
+                # Compare to the last verified workspace, including changes made
+                # between turns; comparing only to turn-start would miss those edits.
+                impact_before = getattr(self, '_impact_snapshot', None)
+                if impact_before is None and worker_start_tree == previous_tree:
+                    impact_before = before_files
+                if not first_follow_up:
+                    self.log(f"round {round_index}: worker running")
+                if self._stop:
+                    break
                 self._next_round = round_index + 1
                 verification_only = self._verification_only()
                 reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session and not verification_only
@@ -5196,7 +5207,11 @@ class Supervisor:
         )
         # The round log is a bounded summary; the text artifact is the complete
         # captured public result, including rejected requirement reviews.
-        (self.run_dir / f"{index:03d}-{role}-text.md").write_text(redact(text or partial), encoding="utf-8")
+        text_path = self.run_dir / f"{index:03d}-{role}-text.md"
+        if role == 'reviewer' and self.schema_path == self.run_dir / 'requirements.schema.json':
+            requirement_context.write_response(text_path, redact(text or partial))
+        else:
+            text_path.write_text(redact(text or partial), encoding="utf-8")
         return output_path
 
     def _save_external_session(self, role: str, session_id: str) -> None:

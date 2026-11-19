@@ -1,7 +1,10 @@
 """Retain requirement-review analysis for scoped continuation, never approval."""
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
 from pathlib import Path
 
 from auto_moniter import requirements_review
@@ -24,33 +27,80 @@ def parsed_response(value):
 
 
 def read(path, limit=MAX_CONTEXT_BYTES):
-    if path.is_symlink() or path.stat().st_size > limit:
+    def open_artifact(name, flags):
+        return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+    with open(path, 'rb', opener=open_artifact) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError('Invalid requirement context artifact')
+        data = handle.read(limit + 1)
+    if len(data) > limit:
         raise ValueError('Invalid requirement context artifact')
-    return json.loads(path.read_text(encoding='utf-8'))
+    value = json.loads(data.decode('utf-8'))
+    # JSON escapes can introduce lone surrogates even in a UTF-8 file.
+    json.dumps(value, ensure_ascii=False).encode('utf-8')
+    return value
+
+
+def _preserve_directory(path):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        return
+
+    # Keep the damaged artifact in the run directory for diagnosis and
+    # leave the canonical path available for the refreshed review.
+    backup = Path(tempfile.mkdtemp(prefix=f'.{path.name}.invalid-', dir=path.parent))
+    try:
+        path.rename(backup / path.name)
+    except OSError:
+        backup.rmdir()
+        raise
+
+
+def write_response(path, text):
+    """Publish the new review without opening an invalid legacy response for writing."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', prefix=f'.{path.name}-',
+                                         dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+        _preserve_directory(path)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def checks_digest(checks):
     return hashlib.sha256(json.dumps(checks, ensure_ascii=False).encode()).hexdigest()
 
 
-def matches_ready_checks(run, cwd, brief, checks, directions):
+def matches_ready_inputs(run, cwd, requirement, brief, tree, checks, directions):
+    """Require the saved analysis to identify this exact ready brief and its inputs."""
     digest = checks_digest(checks)
-    if 'reviewed_checks_sha256' in brief:
-        return brief['reviewed_checks_sha256'] == digest
+    if brief.get('reviewed_checks_sha256', digest) != digest:
+        return False
+    original = requirements_review.requirement_hash(requirement)
 
-    # Older ready checkpoints have no digest. Use the context only when its
-    # inputs and response identify this exact ready brief.
+    # The context is saved before the ready checkpoint and also records the
+    # reviewed tree for briefs written before source binding was enforced.
     try:
         saved = read(run/'requirement-review-context.json')
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
     return (isinstance(saved, dict) and saved.get('version') == 1
             and saved.get('cwd') == str(cwd)
-            and saved.get('original_sha256') == brief['original_sha256']
+            and saved.get('original_sha256') == brief.get('original_sha256') == original
             and saved.get('cycle') == brief['cycle']
+            and saved.get('tree') == tree
             and saved.get('checks') == digest
             and saved.get('direction_ids') == [item['id'] for item in directions]
-            and saved.get('response') == {key: brief[key] for key in requirements_review.SCHEMA['required']})
+            and saved.get('response') == safe({key: brief[key] for key in requirements_review.SCHEMA['required']}))
 
 
 def save(run, cwd, requirement, cycle, response, snapshot, checks, directions):
@@ -67,7 +117,9 @@ def save(run, cwd, requirement, cycle, response, snapshot, checks, directions):
     value = safe(value)
     if len(json.dumps(value,ensure_ascii=False).encode()) > MAX_CONTEXT_BYTES:
         value['files'] = None
-    write_json(run/'requirement-review-context.json',value,durable=True)
+    path = run / 'requirement-review-context.json'
+    _preserve_directory(path)
+    write_json(path, value, durable=True)
 
 
 def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous=None, output_file=''):
@@ -106,13 +158,13 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
             return None
         try:
             response = parsed_response(read(run/name, 1024*1024))
-        except (OSError,ValueError,TypeError):
+        except (OSError,ValueError,TypeError,RecursionError):
             return None
         context = {'previous_response':response, 'workspace_changed':True,
                    'changed_files':None, 'changed_file_count':None, 'checks_changed':True,
                    'new_direction_ids':[item['id'] for item in directions],
                    'source':'legacy reviewer artifact; prior input snapshot unavailable'}
-    except (OSError,ValueError,TypeError,KeyError):
+    except (OSError,ValueError,TypeError,KeyError,RecursionError):
         return None
     name = previous.get('output_file')
     if (previous.get('status') == 'failed' and isinstance(name,str)
@@ -122,7 +174,7 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
             if latest != context['previous_response']:
                 context['previous_response'] = latest
                 context['source'] = 'latest rejected reviewer artifact with retained input context'
-        except (OSError,ValueError,TypeError):
+        except (OSError,ValueError,TypeError,RecursionError):
             pass
     context['previous_status'] = previous.get('status','unknown')
     context['rejection'] = previous.get('summary','') if previous.get('status') == 'failed' else ''

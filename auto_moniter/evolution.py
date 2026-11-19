@@ -5,12 +5,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -100,9 +102,130 @@ class Evolution:
         return self.stop.is_set() or bool(self.config.max_runtime_s and self._remaining() <= 0)
 
     def _save(self, phase, **fields):
-        self.record.update(safe(fields),phase=phase,updated_at=datetime.now(timezone.utc).isoformat(),
-                           elapsed_s=round(time.monotonic()-self.started,3))
-        write_json(self.path,self.record,durable=True)
+        """Persist a cursor independently of outcome wrappers and keep usage cumulative."""
+        interrupted={'stopped','deferred','baseline_failed','rejected','candidate_failed',
+                     'recovery_required','rollback_activation_failed','failed'}
+        terminal=interrupted|{'promoted','rolled_back','no_change'}
+        previous_phase=self.record.get('resume_phase',self.record.get('phase'))
+        if previous_phase in interrupted:
+            previous_phase=None  # A legacy failure alone is not a trustworthy cursor.
+        record=safe({**self.record,**fields})
+        record.update(version=2,phase=phase,
+            resume_phase=previous_phase if phase in interrupted else phase,
+            stop_reason=safe(fields.get('stop_reason') or fields.get('summary') or phase) if phase in terminal else '',
+            updated_at=datetime.now(timezone.utc).isoformat())
+
+        def digest(value):
+            return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+        def provider_identity(provider):
+            if provider is None:
+                return None
+            # Profiles, environments and executable templates never belong in the checkpoint.
+            return {'name':provider.name,'backend':getattr(provider,'backend',''),'mode':provider.mode,
+                    'binary_sha256':digest(provider.binary),
+                    'command_hash':digest([getattr(provider,'start_template',''),getattr(provider,'resume_template','')])}
+
+        limit_names=('max_runtime_s','max_agent_calls','max_output_bytes','memory_bytes','file_bytes',
+                     'max_run_bytes','max_history_bytes','max_agent_state_bytes','max_tokens','max_cost_usd')
+        invalid_history='Cannot verify evolution checkpoint identity and original budgets'
+        identity=self.record.get('config_identity')
+        if identity is None:
+            # Only an unsaved new cycle can acquire an identity from the live config.
+            # Legacy history with missing authorization must remain untouched.
+            if (self.path.exists() or self.path.is_symlink() or self.record.get('phase') is not None
+                    or self.record.get('version',1)!=1):
+                raise ValueError(invalid_history)
+            limits={name:getattr(self.config,name) for name in limit_names[:-2]}
+            limits.update({name:self.config.quality_policy.get(name,0) for name in ('max_tokens','max_cost_usd')})
+            identity={'worker':provider_identity(self.config.provider),
+                'reviewer':provider_identity(self.config.reviewer),'model':self.config.model,
+                'reviewer_model':self.config.reviewer_model,'limits':limits,
+                'requirement_sha256':digest(self.config.requirement),'acceptance_sha256':digest(self.config.acceptance),
+                'worker_args_sha256':digest(self.config.extra_args),'reviewer_args_sha256':digest(self.config.reviewer_extra_args),
+                'policy_sha256':digest({name:getattr(self.config,name) for name in (
+                    'no_review','fresh_review','review_isolation','worker_isolation','protect_paths',
+                    'quality_policy','checks','workflow','git_history','function_dispatch','full_function_plan',
+                    'max_rounds','turn_timeout_s','idle_timeout_s','retry_delay_s','stall_limit','failure_limit',
+                    'check_timeout_s','restart_after_stall','review_every','task_type')})}
+        elif self.record.get('version')!=2:
+            raise ValueError(invalid_history)
+
+        def is_digest(value):
+            return isinstance(value,str) and len(value)==64 and all(c in '0123456789abcdef' for c in value)
+
+        if (not isinstance(identity,dict) or not all(key in identity for key in ('worker','reviewer','limits'))
+                or not all(isinstance(identity.get(key),str) for key in ('model','reviewer_model'))
+                or not all(is_digest(identity.get(key)) for key in ('requirement_sha256','acceptance_sha256',
+                    'worker_args_sha256','reviewer_args_sha256','policy_sha256'))):
+            raise ValueError(invalid_history)
+        for role in ('worker','reviewer'):
+            provider=identity[role]
+            if provider is None and role=='reviewer':
+                continue
+            if (not isinstance(provider,dict)
+                    or not all(isinstance(provider.get(key),str) for key in ('name','backend','mode'))
+                    or not all(is_digest(provider.get(key)) for key in ('binary_sha256','command_hash'))):
+                raise ValueError(invalid_history)
+        limits=identity['limits']
+        if not isinstance(limits,dict) or not all(name in limits for name in limit_names):
+            raise ValueError(invalid_history)
+        for name in limit_names:
+            value=limits[name]
+            if name=='max_output_bytes' and value is None:
+                continue
+            numeric_types=(int,float) if name in {'max_runtime_s','max_cost_usd'} else (int,)
+            if type(value) not in numeric_types or value<0 or not math.isfinite(value):
+                raise ValueError(invalid_history)
+        # A later wrapper or changed controller config cannot relabel this cycle or grant fresh limits.
+        record['config_identity']=safe(identity)
+
+        def high_water(name, sources, *, integer=False):
+            values=[source[name] for source in sources if source.get(name) is not None]
+            if any(type(value) not in ((int,) if integer else (int,float))
+                   or value<0 or (not integer and not math.isfinite(value)) for value in values):
+                raise ValueError('Invalid evolution usage: '+name)
+            return max([0,*values])
+
+        old_usage=self.record.get('usage',{})
+        new_usage=fields.get('usage',{})
+        sources=(self.record,old_usage,fields,new_usage)
+        calls=high_water('agent_calls',sources,integer=True)
+        clock_key=(self.path,self.started)
+        saved_clock=getattr(self,'_checkpoint_clock',None)
+        elapsed_before=(saved_clock[1] if saved_clock and saved_clock[0]==clock_key
+                        else high_water('elapsed_s',(self.record,old_usage)))
+        elapsed=max(high_water('elapsed_s',sources),round(elapsed_before+max(0,time.monotonic()-self.started),3))
+        usage={**identity['limits'],'agent_calls':calls,'elapsed_s':elapsed}
+        reported=[source['provider_reported'] for source in (old_usage,new_usage) if 'provider_reported' in source]
+        if reported:
+            usage['provider_reported']={name:high_water(name,reported,integer=name!='cost_usd') for name in (
+                'tokens','cost_usd','reported_turns','unreported_turns','unknown_token_turns','unknown_cost_turns')}
+        record.update(agent_calls=calls,elapsed_s=elapsed,usage=usage)
+
+        # write_json is atomic, but a directory fsync can fail after its replace.
+        # Keep a private rollback copy until the entire durable write succeeds.
+        backup=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError('Unsafe evolution checkpoint: '+str(self.path))
+            if self.path.exists():
+                with tempfile.NamedTemporaryFile(prefix='.evolution-checkpoint-',dir=self.path.parent,delete=False) as handle:
+                    backup=Path(handle.name)
+                    handle.write(self.path.read_bytes())
+            try:
+                write_json(self.path,record,durable=True)
+            except BaseException:
+                if backup is not None:
+                    os.replace(backup,self.path)
+                else:
+                    self.path.unlink(missing_ok=True)
+                raise
+        finally:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        self.record=record
+        self._checkpoint_clock=(clock_key,elapsed_before)
         self.log('evolution: '+phase)
 
     def _identity(self):

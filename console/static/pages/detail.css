@@ -1,5 +1,27 @@
 .task-detail-page { min-width: 0; }
 
+/* The task itself is the page heading; keep actions and live state together. */
+body[data-page="detail"] main { padding-top:18px; }
+body[data-page="detail"] .page-heading { display:none; }
+.task-workspace { margin-bottom:18px; overflow:hidden; }
+.task-workspace .task-detail-top { padding:10px 20px 0; margin:0; gap:12px; }
+.task-workspace .detail-back { font-size:11px; padding:4px 0; }
+.task-workspace .task-detail-heading { padding:12px 20px 16px; margin:0; gap:20px; align-items:center; }
+.task-workspace-title { min-width:0; flex:1; }
+.task-workspace #detail-title { font-size:21px; margin:0; line-height:1.55; letter-spacing:0; overflow-wrap:anywhere; }
+.task-workspace #detail-project { font-size:11px; line-height:1.6; margin:5px 0 0; }
+.task-workspace .detail-page-actions { flex-direction:row; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:8px; max-width:52%; }
+.task-workspace #detail-actions { gap:6px; }
+.task-workspace .detail-edit-actions { gap:6px; }
+.task-workspace .button { min-height:32px; padding:7px 10px; font-size:11px; }
+.task-workspace .task-narrative { border:0; border-top:1px solid var(--accent-line); border-bottom:1px solid var(--accent-line); border-radius:0; margin:0; padding:12px 20px; gap:12px; }
+.task-workspace .narrative-icon { width:32px; height:32px; flex-basis:32px; border-radius:8px; }
+.task-workspace .narrative-icon .state-glyph { width:16px; height:16px; flex-basis:16px; }
+.task-workspace .task-narrative strong { font-size:12px; }
+.task-workspace .task-narrative p { margin:2px 0 0; font-size:11px; }
+.task-workspace .task-tabs { margin:0; padding:0 8px; border:0; gap:4px; }
+.task-workspace .task-tabs a { padding:12px 14px; font-size:12px; }
+
 .task-tabs { display:flex; gap:6px; margin:0 0 22px; padding:0 4px; border-bottom:1px solid var(--line); overflow-x:auto; }
 .task-tabs a { flex-shrink:0; padding:13px 18px; color:var(--muted); text-decoration:none; border-bottom:2px solid transparent; font-size:13px; }
 .task-tabs a:hover { color:var(--accent); background:var(--accent-soft); }
@@ -29,6 +51,16 @@
 #dispatch-pagination > .pagination { padding:16px 24px; }
 
 @media (max-width:640px) {
+ body[data-page="detail"] main { padding-top:12px; }
+ .task-workspace .task-detail-top { padding:10px 14px 0; }
+ .task-workspace .task-detail-heading { padding:10px 14px 14px; gap:12px; align-items:stretch; }
+ .task-workspace #detail-title { font-size:18px !important; }
+ .task-workspace .detail-page-actions { max-width:none; width:100%; justify-content:flex-start; gap:8px; }
+ .task-workspace .detail-edit-actions { width:auto; flex-wrap:wrap; }
+ .task-workspace .detail-edit-actions button { flex:initial; }
+ .task-workspace .task-narrative { padding:11px 14px; align-items:flex-start; }
+ .task-workspace .task-tabs { padding:0 6px; gap:0; }
+ .task-workspace .task-tabs a { padding:10px 6px; font-size:11px; }
  .task-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; overflow:visible; }
  .task-tabs a { padding:12px 8px; font-size:12px; text-align:center; }
  .detail-edit-actions { width:100%; }

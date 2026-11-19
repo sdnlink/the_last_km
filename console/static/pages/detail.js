@@ -33,7 +33,8 @@ function render(t){
  $('#detail-open-requirement-queue').dataset.requirementQueue=id;
  $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
- if(section==='home'){stableHTML($('#detail-current-state'),taskNarrativeHTML(t));renderWorkflow(t,{role});}
+ stableHTML($('#detail-current-state'),taskNarrativeHTML(t));
+ if(section==='home')renderWorkflow(t,{role});
  if(section==='conclusions')renderConclusions(t,{groupByRound:true});
  if(section==='git')stableHTML($('#detail-git'),gitHistoryHTML(t));
  if(section==='requirements')renderRequirements(t);

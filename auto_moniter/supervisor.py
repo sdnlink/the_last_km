@@ -608,7 +608,6 @@ class Supervisor:
                     if self._stop:
                         break
                 self._check_budget(new_call=True)
-                self._next_round = round_index + 1
                 self._beat(f"round {round_index}: starting worker")
                 if self.git_history:
                     self._git_before = self.git_history.begin_round(round_index)
@@ -630,8 +629,32 @@ class Supervisor:
                     impact_before = before_files
                 self.log(f"round {round_index}: worker running")
                 if self._stop:
-                    self._next_round = round_index
                     break
+                worker_directions = None
+                if (self.config.workflow == 'review-first' and not self.config.function_dispatch
+                        and not self.project and self.requirement_cycles
+                        and round_index == self.requirement_cycles[-1]['handoff']['round'] + 1
+                        and self._last_worker_invocation.get('round', 0) < round_index):
+                    self._process_control()
+                    if self._stop:
+                        break
+                    # Check and dispatch the same snapshot. An amendment that
+                    # arrives after this boundary is pending for a later turn.
+                    worker_directions = self.directions.messages()
+                    revision = self.directions.revision(self.config.requirement, worker_directions)
+                    brief = self.requirements_review
+                    # A legacy brief without a binding can only be reused
+                    # when the original requirement has no amendments.
+                    reviewed = brief.get('reviewed_direction_sha256', revision['original_sha256'])
+                    if (brief.get('status') != 'ready'
+                            or brief.get('cycle') != len(self.requirement_cycles) + 1
+                            or reviewed != revision['sha256']):
+                        if not self._elaborate_requirement(records):
+                            return self._finish('stopped' if self._stop_requested else 'action_required',
+                                self.requirements_review.get('summary', 'Next requirement did not become ready.'),
+                                records, last_worker)
+                        continue
+                self._next_round = round_index + 1
                 verification_only = self._verification_only()
                 reuse_worker = bool(self.worker_session_id) and not self._drop_worker_session and not verification_only
                 if verification_only:
@@ -648,6 +671,7 @@ class Supervisor:
                     model=self.config.model,
                     extra_args=self.config.extra_args,
                     read_only=verification_only,
+                    direction_snapshot=worker_directions,
                 )
                 if verification_only:
                     self.worker_session_id = ''
@@ -1593,6 +1617,9 @@ class Supervisor:
 
     def _elaborate_requirement(self,records, *, next_function=False):
         while True:
+            self._process_control()
+            if self._stop:
+                return False
             self._project_review_changed = False
             self._requirement_input_changed = False
             result = self._elaborate_requirement_once(records,next_function=next_function)
@@ -1666,6 +1693,9 @@ class Supervisor:
             pass  # Advisory history cannot prevent an otherwise valid review.
         base_prompt = prompt
         for attempt in range(5):
+            self._process_control()
+            if self._stop:
+                return None
             turn = self._invoke(self.config.reviewer,prompt,'',role='reviewer',index=index,
                 model=self._reviewer_model(),extra_args=self.config.reviewer_extra_args,read_only=True)
             if turn.session_id:
@@ -1876,6 +1906,8 @@ class Supervisor:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
             turn=self._invoke_requirement_review(prompt,index=review_index,next_function=next_function,previous_brief=previous_brief)
+            if turn is None:
+                return False
             review_directions = [item for item in self.directions.messages()
                                  if item['id'] in self._direction_ids['reviewer']]
             if turn.session_id:self._active_reviewer_id=turn.session_id
@@ -1959,12 +1991,15 @@ class Supervisor:
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
+            ready_follow_up = follow_up and not self.config.function_dispatch and brief['status'] == 'ready'
+            if ready_follow_up:
+                brief['reviewed_direction_sha256'] = self._last_invocation['requirement_revision']['sha256']
             self.requirements_review=brief
             if self.project and brief['status']=='ready':
                 self.project.mark_reviewed(project_signature)
                 self._project_replan = False
             self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
-            if follow_up and not self.config.function_dispatch and brief['status'] == 'ready':
+            if ready_follow_up:
                 # The run checkpoint is authoritative on resume. Save it before
                 # publishing the separate brief so a ready plan is not reviewed twice.
                 self._write_state(records, 'running', 0, '', before)
@@ -4838,6 +4873,7 @@ class Supervisor:
         extra_args: list[str],
         read_only: bool,
         report_only: bool = False,
+        direction_snapshot: list[dict] | None = None,
     ) -> "_CompletedTurn":
         schema_path = self.schema_path
         if report_only:
@@ -4850,7 +4886,7 @@ class Supervisor:
         self._event("agent_start", role=role, round=index, provider=provider.name)
         self._check_budget(new_call=True)
         self._agent_calls += 1
-        messages = self.directions.messages()
+        messages = self.directions.messages() if direction_snapshot is None else direction_snapshot
         revision = self.directions.revision(self.config.requirement, messages)
         # Persist the call before launch so interruption cannot reset its budget.
         state_path = self.run_dir / "state.json"

@@ -29,6 +29,30 @@ def read(path, limit=MAX_CONTEXT_BYTES):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def checks_digest(checks):
+    return hashlib.sha256(json.dumps(checks, ensure_ascii=False).encode()).hexdigest()
+
+
+def matches_ready_checks(run, cwd, brief, checks, directions):
+    digest = checks_digest(checks)
+    if 'reviewed_checks_sha256' in brief:
+        return brief['reviewed_checks_sha256'] == digest
+
+    # Older ready checkpoints have no digest. Use the context only when its
+    # inputs and response identify this exact ready brief.
+    try:
+        saved = read(run/'requirement-review-context.json')
+    except (OSError, ValueError):
+        return False
+    return (isinstance(saved, dict) and saved.get('version') == 1
+            and saved.get('cwd') == str(cwd)
+            and saved.get('original_sha256') == brief['original_sha256']
+            and saved.get('cycle') == brief['cycle']
+            and saved.get('checks') == digest
+            and saved.get('direction_ids') == [item['id'] for item in directions]
+            and saved.get('response') == {key: brief[key] for key in requirements_review.SCHEMA['required']})
+
+
 def save(run, cwd, requirement, cycle, response, snapshot, checks, directions):
     response = parsed_response(response)
     value = {'version':1, 'original_sha256':requirements_review.requirement_hash(requirement),
@@ -36,7 +60,7 @@ def save(run, cwd, requirement, cycle, response, snapshot, checks, directions):
              'tree':snapshot_fingerprint(cwd, snapshot),
              'files':{str(Path(name).relative_to(cwd)):token for name,token in snapshot.items()}
                      if len(snapshot) <= MAX_SNAPSHOT_FILES else None,
-             'checks':hashlib.sha256(json.dumps(checks,ensure_ascii=False).encode()).hexdigest(),
+             'checks':checks_digest(checks),
              'direction_ids':[item['id'] for item in directions]}
     # Commands may contain credentials; only their hash is needed for change
     # detection. The current approved commands already appear in the prompt.
@@ -70,7 +94,7 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
         context = {'previous_response':saved['response'], 'workspace_changed':not unchanged,
                    'changed_files':changed[:100] if changed is not None else None,
                    'changed_file_count':len(changed) if changed is not None else None,
-                   'checks_changed':saved.get('checks') != hashlib.sha256(json.dumps(checks,ensure_ascii=False).encode()).hexdigest(),
+                   'checks_changed':saved.get('checks') != checks_digest(checks),
                    'new_direction_ids':[item['id'] for item in directions if item['id'] not in saved.get('direction_ids',[])],
                    'source':'saved requirement analysis'}
     except FileNotFoundError:

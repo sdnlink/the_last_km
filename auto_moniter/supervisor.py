@@ -640,6 +640,7 @@ class Supervisor:
                         break
                     # Check and dispatch the same snapshot. An amendment that
                     # arrives after this boundary is pending for a later turn.
+                    # The run lock keeps the configured checks fixed until exit.
                     worker_directions = self.directions.messages()
                     revision = self.directions.revision(self.config.requirement, worker_directions)
                     brief = self.requirements_review
@@ -648,7 +649,9 @@ class Supervisor:
                     reviewed = brief.get('reviewed_direction_sha256', revision['original_sha256'])
                     if (brief.get('status') != 'ready'
                             or brief.get('cycle') != len(self.requirement_cycles) + 1
-                            or reviewed != revision['sha256']):
+                            or reviewed != revision['sha256']
+                            or not requirement_context.matches_ready_checks(
+                                self.run_dir, self.config.cwd, brief, self.config.checks, worker_directions)):
                         if not self._elaborate_requirement(records):
                             return self._finish('stopped' if self._stop_requested else 'action_required',
                                 self.requirements_review.get('summary', 'Next requirement did not become ready.'),
@@ -1686,7 +1689,7 @@ class Supervisor:
                     if self.config.full_function_plan else None)
         return staged, dispatch, complete
 
-    def _invoke_requirement_review(self, prompt, index, *, next_function=False, previous_brief=None):
+    def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None):
         """Repair distinct planning errors with durable limits, without dispatching work."""
         from auto_moniter.adaptive_recovery import RecoveryJournal
         journal = RecoveryJournal(self.run_dir)
@@ -1725,7 +1728,7 @@ class Supervisor:
                         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
                             requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                                 len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
-                                self.config.checks,[item for item in self.directions.messages()
+                                checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise requirements_review.RequirementReportRepair(str(error))
                 assignment = plan.get('next_task') if isinstance(plan,dict) else None
@@ -1734,7 +1737,7 @@ class Supervisor:
                     if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
                         requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                             len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
-                            self.config.checks,[item for item in self.directions.messages()
+                            checks,[item for item in self.directions.messages()
                                                 if item['id'] in self._direction_ids['reviewer']])
                     raise requirements_review.NeedsInputReassessment(brief['summary'])
                 if self.config.function_dispatch and isinstance(assignment,dict):
@@ -1744,7 +1747,7 @@ class Supervisor:
                         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
                             requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                                 len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
-                                self.config.checks,[item for item in self.directions.messages()
+                                checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise
                 if self.config.function_dispatch and isinstance(plan,dict) and plan.get('status') == 'ready':
@@ -1761,7 +1764,7 @@ class Supervisor:
                         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
                             requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                                 len(self.requirement_cycles)+1,plan,file_snapshot(self.config.cwd,ignore_dir=self.run_dir),
-                                self.config.checks,[item for item in self.directions.messages()
+                                checks,[item for item in self.directions.messages()
                                                     if item['id'] in self._direction_ids['reviewer']])
                         raise requirements_review.RequirementReportRepair(str(error))
             except (function_tasks.AssignmentIdentifierError, requirements_review.NeedsInputReassessment,
@@ -1828,6 +1831,7 @@ class Supervisor:
 
     def _elaborate_requirement_once(self,records, *, next_function=False):
         follow_up = [item['handoff'] for item in self.requirement_cycles]
+        review_checks = list(self.config.checks)
         previous_brief = self.requirements_review
         previous_result = self.requirements_review
         if next_function and previous_brief.get('status') != 'ready':
@@ -1846,7 +1850,7 @@ class Supervisor:
         before=snapshot_fingerprint(self.config.cwd,before_files)
         review_index = 910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0
         continuation = requirement_context.load(self.run_dir,self.config.cwd,self.config.requirement,
-            len(self.requirement_cycles)+1,before_files,self.config.checks,self.directions.messages(),
+            len(self.requirement_cycles)+1,before_files,review_checks,self.directions.messages(),
             previous=previous_result,output_file=f'{review_index:03d}-reviewer-text.md')
         if not continuation and next_function and previous_brief.get('status') == 'ready':
             continuation = {'previous_response':previous_brief,'source':'approved requirement brief',
@@ -1880,7 +1884,7 @@ class Supervisor:
             prompt = requirements_review.prompt(
                 self.config, self.modules.export(), follow_up=follow_up or None,
                 continuation=continuation, queued_requirement=self.active_queued_requirement,
-                state_path=self.run_dir / 'state.json',
+                state_path=self.run_dir / 'state.json', checks=review_checks,
             )
             if self.config.function_dispatch:
                 module_contract = (
@@ -1916,7 +1920,8 @@ class Supervisor:
             if self.project:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
-            turn=self._invoke_requirement_review(prompt,index=review_index,next_function=next_function,previous_brief=previous_brief)
+            turn = self._invoke_requirement_review(prompt, index=review_index, checks=review_checks,
+                next_function=next_function, previous_brief=previous_brief)
             if turn is None:
                 return False
             review_directions = [item for item in self.directions.messages()
@@ -1951,7 +1956,7 @@ class Supervisor:
             if any(item['id'] not in self._direction_ids['reviewer'] for item in self.directions.messages()):
                 try:
                     requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
-                        len(self.requirement_cycles)+1,json.loads(turn.text),before_files,self.config.checks,review_directions)
+                        len(self.requirement_cycles)+1,json.loads(turn.text),before_files,review_checks,review_directions)
                 except (ValueError,TypeError):
                     pass
                 artifact = f'{review_index:03d}-reviewer-repair-{self._agent_calls}'
@@ -1971,7 +1976,7 @@ class Supervisor:
                 backlog = plan.pop('function_plan', None)
                 brief = requirements_review.parse(json.dumps(plan))
                 requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
-                    len(self.requirement_cycles)+1,response,before_files,self.config.checks,review_directions)
+                    len(self.requirement_cycles)+1,response,before_files,review_checks,review_directions)
                 brief['cycle'] = len(self.requirement_cycles) + 1
                 if next_function and previous_brief.get('status') == 'ready':
                     previous = previous_brief['acceptance_criteria']
@@ -1996,7 +2001,7 @@ class Supervisor:
             else:
                 brief=requirements_review.parse(turn.text)
                 requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
-                    len(self.requirement_cycles)+1,brief,before_files,self.config.checks,review_directions)
+                    len(self.requirement_cycles)+1,brief,before_files,review_checks,review_directions)
                 if next_function and previous_brief.get('status') == 'ready':
                     brief['acceptance_criteria'] = list(previous_brief['acceptance_criteria'])
             brief['cycle']=len(self.requirement_cycles) + 1
@@ -2005,6 +2010,7 @@ class Supervisor:
             ready_follow_up = follow_up and not self.config.function_dispatch and brief['status'] == 'ready'
             if ready_follow_up:
                 brief['reviewed_direction_sha256'] = self._last_invocation['requirement_revision']['sha256']
+                brief['reviewed_checks_sha256'] = requirement_context.checks_digest(review_checks)
             self.requirements_review=brief
             if self.project and brief['status']=='ready':
                 self.project.mark_reviewed(project_signature)

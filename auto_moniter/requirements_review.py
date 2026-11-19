@@ -114,7 +114,9 @@ def reassessment_prompt(previous):
 
 
 def prompt(config, modules, *, follow_up=None, continuation=None,
-           queued_requirement=None, state_path=None):
+           queued_requirement=None, state_path=None, checks=None):
+    if checks is None:
+        checks = config.checks
     task_guidance = ''
     if getattr(config, 'task_type', 'code') == 'deployment':
         from auto_moniter.deployment import instructions
@@ -147,7 +149,7 @@ def prompt(config, modules, *, follow_up=None, continuation=None,
             ('Saved requirement analysis and input changes (context, not approval):\n'
              +json.dumps(continuation,ensure_ascii=False)+'\n\n' if continuation else '') +
             'Original request:\n'+config.requirement+'\n\nHuman acceptance criteria:\n'+config.acceptance+
-            '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(config.checks,ensure_ascii=False))
+            '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(checks,ensure_ascii=False))
 
 
 def _follow_up_block(follow_up, queued_requirement=None, *, state_path=None):

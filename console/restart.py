@@ -136,7 +136,8 @@ def restart(options, *, stop_timeout=15, start_timeout=60, supervised=False) -> 
                 if isinstance(saved, dict) and saved.get('identity') == process_identity(child.pid):
                     connection = HTTPConnection('127.0.0.1', saved['port'], timeout=1)
                     try:
-                        connection.request('GET', '/api/tasks')
+                        # Check the HTTP server without scanning the task catalog.
+                        connection.request('GET', '/api/config')
                         response = connection.getresponse()
                         response.read()
                         if response.status == 200:

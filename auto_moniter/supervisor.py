@@ -2529,7 +2529,12 @@ class Supervisor:
         copies = []
         for index, result in enumerate(results, 1):
             source = self.run_dir/result['log']
-            content = source.read_bytes()
+            try:
+                content = source.read_bytes()
+            except OSError:
+                # Historical evidence can become unavailable after validation.
+                # No current-round logs have been written yet, so checks can rerun.
+                return False
             target = self.run_dir/f'{record.index:03d}-check-{index:02d}.log'
             if (target.exists() or target.is_symlink()
                     or hashlib.sha256(content).hexdigest() != receipt['logs'].get(result['log'])):

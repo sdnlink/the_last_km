@@ -2425,17 +2425,22 @@ class Supervisor:
                 or self.config.task_type != 'code' or not self.audit.pending(set(record.verdict.module_ids))
                 or record.watcher_result.get('candidate_checks')):
             return None
-        rejected = 0
+        submitted = {item.index:item for item in self._records if item.role == 'worker'}
+        rejected = set()
         for previous in reversed(self._records):
             if previous.role != 'reviewer':
                 continue
             if previous.delivery.get('status') == 'accepted':
                 break
+            # Rejected reviews may intentionally accept no module_ids. Scope
+            # those findings to their actual worker handoff, never all modules.
+            prior_worker = submitted.get(previous.index)
+            ids = previous.verdict.module_ids or (prior_worker.verdict.module_ids if prior_worker else [])
             if (not previous.failure and not previous.interruption and not previous.verdict.parse_error
                     and previous.verdict.status == 'continue' and previous.verdict.gaps
-                    and set(previous.verdict.module_ids) & set(record.verdict.module_ids)):
-                rejected += 1
-        if rejected < 2:
+                    and set(ids) & set(record.verdict.module_ids)):
+                rejected.add(previous.index)  # Report retries are one candidate.
+        if len(rejected) < 2:
             return None
         context_digest = candidate_checks.digest(self._candidate_check_context(record))
         saved = record.watcher_result.get('repair_preflight', {})
@@ -2477,7 +2482,7 @@ class Supervisor:
         record.watcher_result['repair_preflight'] = {
             'status':'changes_required' if actionable else 'ready' if _accepted(value) and not failure else 'invalid',
             'tree':record.tree, 'context_digest':context_digest, 'output_file':turn.output_path.name,
-            'summary':value.summary, 'rejected_candidates':rejected}
+            'summary':value.summary, 'rejected_candidates':len(rejected)}
         self._event('repair_preflight', round=record.index, **record.watcher_result['repair_preflight'])
         self._write_state(self._records, 'running', 0, '', record.tree)
         if actionable:
@@ -2489,9 +2494,9 @@ class Supervisor:
         return None
 
     def _reuse_module_checks(self, record, context):
-        """Carry an accepted module's exact checks into an unchanged final candidate."""
-        if (self.config.task_type != 'code' or self.config.function_dispatch or not context['final']
-                or any(item['status'] != 'accepted' for item in self.modules.items.values())
+        """Carry an accepted module's exact checks into an unchanged handoff."""
+        if (self.config.task_type != 'code' or self.config.function_dispatch
+                or context['final'] and any(item['status'] != 'accepted' for item in self.modules.items.values())
                 or self._pending_directions()
                 or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
             return False
@@ -2534,7 +2539,7 @@ class Supervisor:
         for target, content in copies:
             with target.open('xb') as stream:
                 stream.write(content)
-        self._write_acceptance_snapshot(record.index, record.tree, True, results, [], False, False)
+        self._write_acceptance_snapshot(record.index, record.tree, context['final'], results, [], False, False)
         reused = candidate_checks.create(self.run_dir, context, {'checks':results}, True)
         reused.update(scope_gaps=[], target_hashes={}, failures=[],
                       reused_from={'round':previous.index,'checks_digest':receipt['digest']})
@@ -2542,7 +2547,8 @@ class Supervisor:
         record.watcher_result['candidate_checks'] = reused
         self._passed_function_checks = dict(reused['passed_commands'])
         self._delivery_tree = record.tree
-        self._event('module_checks_reused_for_final', round=record.index, from_round=previous.index, tree=record.tree)
+        self._event('module_checks_reused_for_final' if context['final'] else 'module_checks_reused',
+                    round=record.index, from_round=previous.index, tree=record.tree)
         return True
 
     def _prepare_candidate_checks(self, record):

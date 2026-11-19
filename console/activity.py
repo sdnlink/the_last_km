@@ -68,6 +68,7 @@ EVENT_LABELS = {
     'repair_preflight_started': '修复预检开始，先核对代码缺口再运行全量检查',
     'repair_preflight': '修复预检结束，正式验收尚未确认',
     'module_checks_reused_for_final': '源码与检查输入未变，最终验收复用已通过的模块检查',
+    'module_checks_reused': '源码与检查输入未变，下一模块复用已通过的检查并重新审核',
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',
     'acceptance_checks_added': '已追加验收检查',

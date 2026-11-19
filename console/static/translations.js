@@ -1380,5 +1380,6 @@ export default {
   "完整任务详情": "Full task details",
   "修复预检开始，先核对代码缺口再运行全量检查": "Repair preflight started: review code gaps before full checks",
   "修复预检结束，正式验收尚未确认": "Repair preflight finished; delivery is not yet accepted",
-  "源码与检查输入未变，最终验收复用已通过的模块检查": "Source and check inputs unchanged; final acceptance reuses passed module checks"
+  "源码与检查输入未变，最终验收复用已通过的模块检查": "Source and check inputs unchanged; final acceptance reuses passed module checks",
+  "源码与检查输入未变，下一模块复用已通过的检查并重新审核": "Source and check inputs unchanged; the next module reuses passed checks and gets a fresh review"
 };

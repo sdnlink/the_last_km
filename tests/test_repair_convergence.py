@@ -72,6 +72,75 @@ class RepairConvergenceTests(unittest.TestCase):
         worker4 = next(r for r in state['rounds'] if r['role']=='worker' and r['index']==4)
         self.assertTrue(worker4['watcher_result']['candidate_checks']['passed'])
 
+    def test_rejected_review_without_module_ids_still_triggers_preflight(self):
+        worker = self.worker(4)
+        rejected = self.rejected()
+        rejected['verdict']['module_ids'] = []  # Rejection reports do not accept modules.
+        reviewer = self.reviewer(rejected, rejected, rejected,
+                                 self.done(), self.done(closed=['AUD-1']))
+        report = self.monitor(worker, reviewer).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(self.counter.read_text(), '3')
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (4, 6))
+        self.assertIn('REPAIR PREFLIGHT ONLY', reviewer.calls[3]['prompt'])
+        self.assertFalse((self.run/'003-check-01.log').exists())
+        self.assertTrue((self.run/'003-reviewer-preflight.log').is_file())
+
+    def test_unchanged_next_module_reuses_checks_but_gets_its_own_review(self):
+        modules = [
+            _verdict('done')['modules'][0],
+            {'id':'integration', 'title':'Integration', 'acceptance':['Verify integration'],
+             'depends_on':['main']},
+        ]
+        integration = self.done(scope='module')
+        integration['verdict']['module_ids'] = ['main', 'integration']
+        final = self.done()
+        final['verdict']['module_ids'] = ['main', 'integration']
+        worker = ScriptedProvider('worker', [
+            {**self.done(scope='module'), 'touch':'app.py'}, integration, final])
+        reviewer = self.reviewer(self.done(scope='module'), integration, final)
+        report = self.monitor(worker, reviewer, modules=modules).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(self.counter.read_text(), '1')
+        self.assertEqual((len(worker.calls),len(reviewer.calls)), (3,4))
+        state = json.loads((self.run/'state.json').read_text())
+        candidates = [r for r in state['rounds'] if r['role']=='worker']
+        self.assertEqual(candidates[1]['watcher_result']['candidate_checks']['reused_from']['round'],1)
+        self.assertEqual(candidates[2]['watcher_result']['candidate_checks']['reused_from']['round'],2)
+        accepted = [r for r in report.records if r.role=='reviewer' and r.delivery.get('status')=='accepted']
+        self.assertEqual([r.index for r in accepted],[1,2,3])
+        prune_files(self.run,3)
+        self.assertTrue((self.run/'003-check-01.log').is_file())
+
+    def test_next_module_with_additional_check_requires_fresh_execution(self):
+        modules = [_verdict('done')['modules'][0],
+            {'id':'integration', 'title':'Integration', 'acceptance':['Verify integration'],
+             'depends_on':['main'], 'checks':['test -f app.py']}]
+        integration = self.done(scope='module')
+        integration['verdict']['module_ids'] = ['main','integration']
+        final = self.done()
+        final['verdict']['module_ids'] = ['main','integration']
+        worker = ScriptedProvider('worker', [
+            {**self.done(scope='module'),'touch':'app.py'}, integration, final])
+        reviewer = self.reviewer(self.done(scope='module'),integration,final)
+        report = self.monitor(worker,reviewer,modules=modules).run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual(self.counter.read_text(),'2')
+        candidates = [r for r in report.records if r.role=='worker']
+        self.assertNotIn('reused_from',candidates[1].watcher_result['candidate_checks'])
+        self.assertEqual(candidates[2].watcher_result['candidate_checks']['reused_from']['round'],2)
+
+    def test_successful_checks_without_module_approval_cannot_be_reused(self):
+        worker = ScriptedProvider('worker', [
+            {**self.done(scope='module'),'touch':'app.py'},self.done(scope='module'),self.done()])
+        reviewer = self.reviewer(self.rejected(),self.done(scope='module',closed=['AUD-1']),self.done())
+        report = self.monitor(worker,reviewer).run()
+        self.assertEqual(report.status,'done',report.summary)
+        self.assertEqual(self.counter.read_text(),'2')
+        candidates = [r for r in report.records if r.role=='worker']
+        self.assertNotIn('reused_from',candidates[1].watcher_result['candidate_checks'])
+        self.assertEqual(candidates[2].watcher_result['candidate_checks']['reused_from']['round'],2)
+
     def test_preflight_ready_does_not_bypass_failure_or_independent_review(self):
         worker = self.worker(3)
         reviewer = self.reviewer(self.rejected(), self.rejected(), self.done(),
@@ -150,7 +219,9 @@ class RepairConvergenceTests(unittest.TestCase):
         case = RepairConvergenceTests()
         case.setUp()
         self.addCleanup(case.doCleanups)
-        monitor = case.monitor(case.worker(2), case.reviewer(case.rejected(), case.rejected()))
+        rejected = case.rejected()
+        rejected['verdict']['module_ids'] = []
+        monitor = case.monitor(case.worker(2), case.reviewer(rejected, rejected))
         monitor.log = lambda line: monitor.request_stop() if 'round 2: reviewer status=continue' in line else None
         self.assertEqual(monitor.run().status, 'stopped')
         worker = case.worker(1)

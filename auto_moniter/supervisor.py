@@ -2670,9 +2670,14 @@ class Supervisor:
     def _reuse_module_checks(self, record, context):
         """Carry an accepted module's exact checks into an unchanged handoff."""
         if (self.config.task_type != 'code' or self.config.function_dispatch
-                or context['final'] and any(item['status'] != 'accepted' for item in self.modules.items.values())
                 or self._pending_directions()
                 or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
+            return False
+        # A final report may cover previously accepted modules awaiting
+        # revalidation. Joint coverage is still checked after independent review.
+        if context['final'] and (self.modules.coverage(record.verdict)
+                or any(item['status'] != 'accepted' and not item['round']
+                       for item in self.modules.items.values())):
             return False
         previous = next((item for item in reversed(self._records) if item.role == 'worker'
                          and item.index < record.index and item.watcher_result.get('candidate_checks')), None)

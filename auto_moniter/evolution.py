@@ -1,6 +1,7 @@
 """Evolve the monitor's own source in a reviewed, independently tested worktree."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -15,17 +16,20 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import uuid
 
-from auto_moniter.health import _lock_held, read_run_snapshot
+from auto_moniter.health import _lock_held, read_run_snapshot, valid_report
 from auto_moniter.evolution_checkpoint import load_checkpoint
 from auto_moniter.locking import workspace_lease
 from auto_moniter.paths import private_directory, project_runs_dir
 from auto_moniter.providers import PreparedCommand
-from auto_moniter.quality import test_asset
+from auto_moniter.processes import process_identity, _members
+from auto_moniter.quality import test_asset, policy as quality_policy
 from auto_moniter.redaction import safe
 from auto_moniter.storage import write_json
-from auto_moniter.supervisor import RunConfig, Supervisor, run_command
+from auto_moniter.supervisor import RunConfig, Supervisor, run_command, _EXECUTION_DEFAULTS
+from auto_moniter.supervisor import Supervisor as _RecoverySupervisor
 from auto_moniter.workspace import LockError, file_lock
 
 
@@ -411,18 +415,178 @@ class Evolution:
                 return {'phase':'idle','base':base,'issue':None,'summary':'No new improvement candidate'}
             return self._run(selected,base)
 
-    def recover(self, directory):
-        """Reconcile a promotion interrupted after the immutable candidate passed."""
-        directory=Path(directory).resolve()
+    def _recovery_monitor(self, context):
+        """Validate execution inputs without constructing or running a Supervisor."""
+        monitor=context['directory']/'monitor'
+        for stage in ('baseline','candidate'):
+            rows=self.record.get(stage+'_checks',[])
+            if not isinstance(rows,list) or len(rows)>len(self._checks()):
+                raise ValueError('Evolution recovery check evidence is malformed: '+stage)
+            for index,row in enumerate(rows,1):
+                path=context['directory']/f'{stage}-{index:02d}.log'
+                if (not isinstance(row,dict) or row.get('command')!=self._checks()[index-1]
+                        or row.get('log')!=path.name or path.is_symlink() or path.stat().st_size>16*1024*1024
+                        or hashlib.sha256(path.read_bytes()).hexdigest()!=row.get('sha256')):
+                    raise ValueError('Evolution recovery check evidence changed: '+stage)
+            if self.record.get(stage+'_checks_complete') is True:
+                commit=self.record['base']['commit'] if stage=='baseline' else self.record.get('candidate')
+                workspaces=(context['workspace'],context['directory']/'baseline-verification') if stage=='baseline' else (context['directory']/'validation',)
+                if not self._cycle_checks_reusable(stage,commit,workspaces):
+                    raise ValueError('Evolution recovery check identity changed: '+stage)
+        if not monitor.exists():
+            return None
+        if not (monitor/'state.json').exists():
+            if any(monitor.iterdir()):
+                raise ValueError('Evolution monitor has artifacts but no resumable checkpoint')
+            return None
+        state=read(monitor/'state.json')
+        expected=_RecoverySupervisor._provider_config(SimpleNamespace(config=self.config))
+        if (state.get('cwd')!=str(context['workspace']) or state.get('state_version')!=1
+                or state.get('workflow')!='review-first' or state.get('function_dispatch') is not True
+                or state.get('full_function_plan') is not True or state.get('provider_config')!=expected
+                or state.get('checks')!=['git diff --check']
+                or quality_policy(state.get('quality_policy'))!=quality_policy({'protect_tests':True})):
+            raise ValueError('Evolution Supervisor configuration or checkpoint identity changed')
+        settings=state.get('execution_settings')
+        if (not isinstance(settings,dict) or set(settings)-_EXECUTION_DEFAULTS.keys()
+                or 'max_output_bytes' not in settings):
+            raise ValueError('Evolution Supervisor execution settings cannot be verified')
+        for name,value in settings.items():
+            try:
+                valid=(type(value) in (int,float) and math.isfinite(value) and value>=0
+                    and (name not in {'check_timeout_s','max_output_bytes'} or value>0)
+                    and (name!='max_output_bytes' or type(value) is int))
+            except OverflowError:
+                valid=False
+            if not valid:
+                raise ValueError('Invalid evolution Supervisor execution settings: '+name)
+        self._cycle_account_usage(monitor,state.get('usage'))
+        return state
+
+    def _recovery_quiesce(self, monitor, work, state):
+        """Use the existing recovery kernel, leaving checkpoint and heartbeat bytes alone."""
+        path=monitor/'process.json'
+        if path.exists() or path.is_symlink():
+            saved=read(path)
+            if (set(saved)!={'pid','started','boot','namespace','uid'}
+                    or type(saved['pid']) is not int or saved['pid']<=1
+                    or type(saved['started']) is not int or saved['started']<0
+                    or type(saved['uid']) is not int or saved['uid']<0
+                    or not isinstance(saved['boot'],str) or str(uuid.UUID(saved['boot']))!=saved['boot']
+                    or not isinstance(saved['namespace'],str) or not saved['namespace'].startswith('pid:[')
+                    or not saved['namespace'].endswith(']') or not saved['namespace'][5:-1].isdigit()):
+                raise ValueError('Invalid evolution recovery process identity')
+            # A prior boot's PID may now belong to an unrelated process. Let
+            # the original kernel take its previous_boot path without probing it.
+            if saved['boot']==Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+                current=process_identity(saved['pid'])
+                if (current and current!=saved) or (not current and _members(saved['pid'])):
+                    raise ValueError('Evolution recovery process ownership cannot be verified')
+        state=state or {}
+        for role,provider,key in (('worker',self.config.provider,'session_id'),
+                                  ('reviewer',self.config.reviewer,'reviewer_session_id')):
+            session=state.get('active_reviewer_session_id') or state.get(key,'') if role=='reviewer' else state.get(key,'')
+            if provider is not None and provider.name=='paseo' and session:
+                from auto_moniter.providers import _looks_like_id
+                if not isinstance(session,str) or not _looks_like_id(session):
+                    raise ValueError('Invalid evolution recovery daemon session identity')
+        output=state.get('execution_settings',{}).get('max_output_bytes',self.config.max_output_bytes)
+        proxy=SimpleNamespace(run_dir=monitor,config=replace(self.config,cwd=work,max_output_bytes=output),
+            worker_session_id=state.get('session_id',''),reviewer_session_id=state.get('reviewer_session_id',''),
+            _active_reviewer_id=state.get('active_reviewer_session_id',''),log=self.log,
+            _beat=lambda note:self.log('evolution recovery: '+note))
+        # This method only stops existing local/daemon work. In particular its
+        # heartbeat callback must not turn recovery downtime into active usage.
+        _RecoverySupervisor._recover_interrupted_run(proxy)
+
+    def recover(self, directory, *, allow_implementation=False):
+        """Recover publication by default; implementation requires an explicit internal opt-in."""
+        if type(allow_implementation) is not bool:
+            raise ValueError('Evolution implementation recovery mode must be boolean')
+        directory=Path(directory).absolute()
         if directory.parent!=self.directory:
             raise ValueError('Evolution recovery directory does not belong to this project')
+        context=load_checkpoint(directory/'evolution.json',self.source,purpose='inspect')
+        publishing={'ready','promoting','activating','rolling_back','recovery_required',
+                    'promoted','rolled_back','rollback_activation_failed'}
+        if not allow_implementation and context['phase'] not in publishing:
+            raise ValueError('Evolution does not have a recoverable promotion; implementation recovery is disabled')
+        entered=time.monotonic()
         with file_lock(self.directory/'evolution.lock'):
-            self.path=directory/'evolution.json'
-            self.record=read(self.path)
-            if self.record.get('source')!=str(self.source) or self.record.get('phase') not in {'ready','promoting','activating','rolling_back','recovery_required'}:
-                raise ValueError('Evolution does not have a recoverable promotion')
+            context=load_checkpoint(directory/'evolution.json',self.source,purpose='inspect')
+            publication=context['phase'] in publishing
+            if not publication and (not allow_implementation or context['legacy']
+                    or context['resume_phase'] not in {'selected','baseline','implementing','reviewed','validating','candidate'}
+                    or context['phase'] in {'baseline_failed','candidate_failed','rejected'}):
+                raise ValueError('Evolution checkpoint is not eligible for implementation recovery')
+            if context['config_identity'] is not None and not self._cycle_config_matches(context['config_identity']):
+                raise ValueError('Evolution recovery configuration does not match its frozen identity')
+            if context['legacy'] and context['phase'] not in {'promoted','rolled_back'}:
+                raise ValueError('Legacy evolution lacks original configuration and budgets; checkpoint retained')
+            previous=(self.path,self.record,self.started,getattr(self,'_checkpoint_clock',None))
+            self.path=context['path'];self.record=context['record']
+            if not context['legacy']:
+                self.record['usage']=context['usage']
+                self.record['agent_calls']=context['usage']['agent_calls']
+            self.started=entered-context['usage']['elapsed_s']
+            self._checkpoint_clock=((self.path,self.started),0)
+            work=context['workspace']
+            monitor=directory/'monitor'
+            try:
+                with ExitStack() as locks:
+                    locks.enter_context(workspace_lease(self.source))
+                    locks.enter_context(file_lock(self.source/'.auto-moniter/workspace.lock'))
+                    if work.exists():
+                        self._cycle_worktree(work)
+                        if not publication and git(work,'symbolic-ref','-q','HEAD')!='refs/heads/evolution/'+directory.name:
+                            raise ValueError('Evolution recovery implementation branch changed')
+                        locks.enter_context(workspace_lease(work))
+                        locks.enter_context(file_lock(work/'.auto-moniter/workspace.lock'))
+                    elif context['resume_phase']!='selected':
+                        raise ValueError('Evolution recovery worktree is missing')
+                    if monitor.exists():
+                        for name in ('guardian.lock','supervisor.lock'):
+                            if (monitor/name).is_symlink():
+                                raise ValueError('Unsafe evolution monitor lock')
+                            locks.enter_context(file_lock(monitor/name))
+                    state=self._recovery_monitor(context) if not context['legacy'] else read(monitor/'state.json')
+                    if publication:
+                        load_checkpoint(self.path,self.source,purpose='promotion')
+                    if publication or self.record.get('candidate') or state and state.get('status')=='done':
+                        candidate=self._candidate(work)
+                        if (publication and not candidate) or self.record.get('candidate',candidate)!=candidate:
+                            raise ValueError('Evolution recovery candidate changed')
+                        review_commit=candidate or git(work,'rev-parse','HEAD')
+                    if state is not None and state.get('status')=='done':
+                        report=read(monitor/'report.json')
+                        if (not valid_report(report) or report.get('status')!='done'
+                                or any(not isinstance(evidence.get('git_history'),dict)
+                                    or any(not isinstance(evidence['git_history'].get(key),dict)
+                                        or evidence['git_history'][key].get('commit')!=review_commit
+                                        for key in ('business_head','last_business_commit'))
+                                    for evidence in (state,report))):
+                            raise ValueError('Evolution recovery final review evidence changed')
+                    rollback=self.record.get('rollback_commit')
+                    if rollback and (git(self.source,'rev-parse',rollback+'^{tree}')!=git(self.source,'rev-parse',self.record['base']['commit']+'^{tree}')
+                            or git(self.source,'rev-list','--parents','-n','1',rollback).split()!=[rollback,candidate]):
+                        raise ValueError('Evolution recovery rollback evidence changed')
+                    if not publication and (self._identity()!=self.record['base'] or not self._clean(self.source)):
+                        raise ValueError('Evolution recovery source changed; checkpoint retained')
+                    if monitor.exists():
+                        self._recovery_quiesce(monitor,work,state)
+                if state is not None and state.get('status')=='done':
+                    self._confirm_review(monitor,review_commit)
+                if not publication:
+                    self._save(self.record['phase'],stop_reason=self.record.get('stop_reason',''))
+                    return self._run(self.record['issue'],self.record['base'],context=context)
+            except Exception:
+                self.path,self.record,self.started,clock=previous
+                if clock is None:
+                    self.__dict__.pop('_checkpoint_clock',None)
+                else:
+                    self._checkpoint_clock=clock
+                raise
             candidate=self.record['candidate']
-            work=directory/'workspace'
             if self.record.get('workspace')!=str(work) or self._candidate(work)!=candidate:
                 raise ValueError('Evolution recovery candidate changed')
             self._confirm_review(Path(self.record['monitor_run']),candidate)
@@ -438,6 +602,16 @@ class Evolution:
             with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
                 actual=self._identity()
                 rollback=self.record.get('rollback_commit')
+                if self.record['phase']=='promoted':
+                    if actual!={'ref':self.record['base']['ref'],'commit':candidate} or not self._clean(self.source):
+                        raise ValueError('Completed evolution promotion no longer matches source')
+                    return self.record
+                if self.record['phase']=='rolled_back':
+                    if (not rollback or actual!={'ref':self.record['base']['ref'],'commit':rollback}
+                            or not self._clean(self.source)
+                            or git(self.source,'rev-parse',rollback+'^{tree}')!=git(self.source,'rev-parse',self.record['base']['commit']+'^{tree}')):
+                        raise ValueError('Completed evolution rollback no longer matches source')
+                    return self.record
                 if (actual['ref']==self.record['base']['ref'] and actual['commit'] in {candidate,rollback}
                         and not self._clean(self.source)):
                     self._save('recovery_required',summary='Local source changes preserved; promotion recovery deferred')
@@ -447,9 +621,15 @@ class Evolution:
                         raise ValueError('Evolution rollback tree changed')
                     self._save('rolling_back')
                     rolled_back=True
+                elif rollback and actual=={'ref':self.record['base']['ref'],'commit':candidate} and self._clean(self.source):
+                    self._save('rolling_back')
+                    git(self.source,'merge','--ff-only','--no-edit',rollback)
+                    if self._identity()!= {'ref':self.record['base']['ref'],'commit':rollback} or not self._clean(self.source):
+                        raise ValueError('Evolution interrupted rollback could not be reconciled')
+                    rolled_back=True
                 else:
                     rolled_back=False
-                if actual=={'ref':self.record['base']['ref'],'commit':candidate} and self._clean(self.source):
+                if not rolled_back and actual=={'ref':self.record['base']['ref'],'commit':candidate} and self._clean(self.source):
                     self._save('activating',promoted_commit=candidate,previous_commit=self.record['base']['commit'])
                     advanced=True
                 else:

@@ -1,10 +1,11 @@
 import {i18n} from '../i18n.js';
-import {$,escape,bytes,percent} from '/ui.js';
+import {$,escape,bytes,percent,stateLabel} from '/ui.js';
 import {api,watch} from '/core.js';
 const state={resources:null,tasks:[],history:[]};
 function renderResources() {
   const r = state.resources;
   if (!r) return;
+  $('#resource-sampling').innerHTML=stateLabel('complete',i18n('已采样 · 每 3 秒更新'));
   const memory = (r.memory_used / r.memory_total) * 100,
     disk = (r.disk_used / r.disk_total) * 100;
   $("#chart-cpu-value").textContent = percent(r.cpu_percent);
@@ -55,7 +56,8 @@ function drawChart(el, values) {
     const d = points
       .map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`)
       .join(" ");
-    html += `<path class="area" d="${d} L${points.at(-1)[0]} 155 L${points[0][0]} 155Z"/><path class="trend" d="${d}"/>`;
+    const [x,y]=points.at(-1);
+    html += `<path class="area" d="${d} L${x} 155 L${points[0][0]} 155Z"/><path class="trend" d="${d}"/><circle class="sample-point" cx="${Math.max(4,Math.min(596,x))}" cy="${y}" r="3"/>`;
   }
   el.innerHTML = html;
 }

@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from '../i18n.js';
-import {$,escape,bytes,percent,duration,badge,taskButtons,phases,roleStatuses,taskPriority,stableHTML} from '/ui.js';
+import {$,escape,bytes,percent,duration,badge,taskButtons,phases,taskPriority,stableHTML,rolesHTML,taskNarrative,taskMotion,stateLabel} from '/ui.js';
 import {api,watch} from '/core.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 let tasks=[];
@@ -7,7 +7,7 @@ function renderTasks(){
  const query=$('#board-search').value.toLowerCase();
  const visible=tasks.filter(t=>`${t.title} ${t.project_cwd||''} ${t.cwd}`.toLowerCase().includes(query)).sort((a,b)=>taskPriority(a)-taskPriority(b));
  const page=paginate('overview',visible,{rowHeight:260});
- const html=page.items.map(t=>i18nHTML`<article class="task-board-card" data-task-url="/tasks/${t.id}" tabindex="0"><div class="board-card-head"><a class="board-title" href="/tasks/${t.id}">${escape(t.title)}</a>${badge(t)}</div><div class="board-project">${escape(t.project_cwd||t.cwd)}</div><p class="board-focus">${escape(t.summary||t.roles?.worker?.current_work||t.roles?.reviewer?.current_work||i18n('等待执行记录'))}</p><div class="board-roles">${Object.entries(t.roles||{}).map(([role,r])=>`<span>${role} · ${escape(roleStatuses[r.status]||i18n('等待'))}</span>`).join('')}</div><div class="board-meta"><span>${escape(phases[t.health.phase]||t.status)} · 第 ${t.health.rounds||0} 轮</span><span>${duration(t.health.usage?.elapsed_s)}</span></div><div class="board-actions"><a class="button primary small-button" href="/progress?task=${t.id}">实时跟进 →</a>${taskButtons(t,true)}${t.can_direct?i18nHTML`<button class="detail-button" data-direction="${t.id}">调整方向</button>`:""}<a class="detail-button" href="/tasks/${t.id}">任务详情</a></div></article>`).join('')||i18nHTML('<p class="live-empty">暂无匹配的运行任务。可在开发任务列表启动或恢复任务。</p>');
+ const html=page.items.map(t=>i18nHTML`<article class="task-board-card" data-motion="${taskMotion(t)}" data-task-url="/tasks/${t.id}" tabindex="0"><div class="board-card-head"><a class="board-title" href="/tasks/${t.id}">${escape(t.title)}</a>${badge(t)}</div><div class="board-project">${escape(t.project_cwd||t.cwd)}</div><p class="board-focus">${escape(t.summary||t.roles?.worker?.current_work||t.roles?.reviewer?.current_work||taskNarrative(t).title)}</p><div class="board-roles">${rolesHTML(t)}</div><p class="board-next">${escape(taskNarrative(t).next)}</p><div class="board-meta"><span>${escape(phases[t.health.phase]||taskNarrative(t).title)} · 第 ${t.health.rounds||0} 轮</span><span>${duration(t.health.usage?.elapsed_s)}</span></div><div class="board-actions"><a class="button primary small-button" href="/progress?task=${t.id}">实时跟进 →</a>${taskButtons(t,true)}${t.can_direct?i18nHTML`<button class="detail-button" data-direction="${t.id}">调整方向</button>`:""}<a class="detail-button" href="/tasks/${t.id}">任务详情</a></div></article>`).join('')||i18nHTML('<p class="live-empty">暂无匹配的运行任务。可在开发任务列表启动或恢复任务。</p>');
  stableHTML($('#task-board'),html);$('#overview-pagination').innerHTML=page.controls;
 }
 export function mount(){
@@ -18,6 +18,9 @@ export function mount(){
   for(const [key,value]of Object.entries(d.counts)){const el=$(`#stat-${key}`);if(el)el.textContent=value;}
   $('#stat-waiting').textContent=d.counts.paused;$('#waiting-note').textContent=i18n('暂停任务，可从任务列表恢复');
   $('#board-count').textContent=tasks.length;renderTasks();
+  $('#stats').dataset.running=String(d.counts.running>0);
+  $('#running-note').textContent=d.counts.running?i18n('正在执行，状态随任务更新'):i18n('当前没有任务在执行');
+  $('#resource-status').innerHTML=stateLabel('complete',i18n('已读取本机资源'));
   const r=d.resources,memory=r.memory_used/r.memory_total*100,disk=r.disk_used/r.disk_total*100;
   for(const [key,value]of [['cpu',r.cpu_percent],['memory',memory],['disk',disk]]){$(`#${key}-value`).textContent=percent(value);$(`#${key}-meter`).style.width=`${Math.min(100,value||0)}%`;}
   $('#cpu-description').textContent=i18n`${r.cpu_count} 核心 · 本机`;$('#memory-description').textContent=`${bytes(r.memory_used)} / ${bytes(r.memory_total)}`;$('#disk-description').textContent=i18n`${bytes(r.disk_free)} 可用`;

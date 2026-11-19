@@ -1,5 +1,5 @@
 import {i18n,i18nHTML,locale} from '../i18n.js';
-import {$,$$,escape,icon,active,attention,phases,duration,percent,bytes,badge,taskButtons} from '/ui.js';
+import {$,$$,escape,icon,active,attention,duration,percent,bytes,badge,taskButtons,taskNarrative,stableHTML} from '/ui.js';
 import {api,watch,refresh,selectNavigation} from '/core.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const state = {tasks:[],search:new URLSearchParams(location.search).get('q') || '',filter:new URLSearchParams(location.search).get('status') || 'all'};
@@ -37,7 +37,7 @@ function renderTasks() {
   const page=paginate('tasks',tasks,{rowHeight:85});
   $("#tasks-pagination").innerHTML=page.controls;
   $("#task-rows").dataset.pageList='tasks';
-  $("#task-rows").innerHTML = page.items
+  stableHTML($("#task-rows"), page.items
     .map((t, index) => {
       const progress = t.total_modules
         ? Math.round((t.accepted_modules / t.total_modules) * 100)
@@ -50,11 +50,11 @@ function renderTasks() {
           ? i18n("正在停止")
           : t.control === "pause" && t.status !== "paused"
             ? i18n("本轮结束后暂停")
-          : phases[t.health.phase] || "";
+          : taskNarrative(t).title;
       const failure = t.failure ? `<small class="phase" title="${escape(t.failure.reason)}">${escape(t.failure.title)}</small>` : '';
       return i18nHTML`<tr data-task-url="/tasks/${t.id}" tabindex="0" aria-label="查看任务 ${escape(t.title)}"><td><div class="task-name"><span class="task-avatar ${["", "blue", "purple"][index % 3]}">${icon("terminal")}</span><div><a class="task-title" href="/tasks/${t.id}" title="${escape(t.title)}">${escape(t.title)}</a><div class="task-path" title="${escape(t.project_cwd||t.cwd)}">${icon("folder")}<span>${escape(t.project_cwd || t.cwd || i18n("目录未知"))}</span></div></div></div></td><td>${badge(t)}${failure}${active(t) && phase ? `<small class="phase">${escape(phase)}</small>` : ""}</td><td><span class="provider-name">${escape(t.provider)}</span><span class="reviewer-name">审查 · ${escape(t.reviewer)}</span></td><td><div class="module-progress"><div>${t.total_modules ? i18nHTML`${t.accepted_modules}<small>/ ${t.total_modules} 模块</small>` : `<small>${t.status === "done" ? i18n("已验收") : i18n("等待模块计划")}</small>`}</div><div class="meter"><span data-width="${progress}"></span></div></div></td><td class="duration">${duration(t.health.usage?.elapsed_s)}</td><td><div class="resource-cell"><span>${resource.process_count ? `CPU ${percent(resource.cpu_percent)}` : "—"}</span><span>${resource.process_count ? bytes(resource.rss_bytes) : i18n("无本地进程")}</span></div></td><td><div class="row-actions">${taskButtons(t, true)}<a class="detail-button" href="/tasks/${t.id}">工作详情 →</a></div></td></tr>`;
     })
-    .join("");
+    .join(""));
   $$("#task-rows [data-width]").forEach(
     (el) => (el.style.width = `${el.dataset.width}%`),
   );

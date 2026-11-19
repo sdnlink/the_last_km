@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from './i18n.js';
-import {$,$$,escape,pending} from './ui.js';
+import {$,$$,escape,pending,stateLabel} from './ui.js';
 let controller = new AbortController();
 let leaving = false, configPromise, refreshJob, timer, busy = false, toastTimer;
 export function toast(message, error = false) {
@@ -52,11 +52,13 @@ export async function refresh() {
   if(leaving||busy||!refreshJob)return;
   if(document.hidden){timer=setTimeout(refresh,3000);return;}
   busy=true;
+  if(document.body.dataset.sync!=='offline')document.body.dataset.sync='syncing';
   try {
     await refreshJob();
-    $('#connection').innerHTML=i18nHTML('<span class="live-dot"></span>本地服务在线');$('#connection').classList.remove('offline');$('#connection-error').hidden=true;
+    document.body.dataset.sync='online';
+    $('#connection').innerHTML=stateLabel('complete',i18n('已同步 · 每 3 秒更新'));$('#connection').classList.remove('offline');$('#connection-error').hidden=true;
   }catch(error){
-    if(!leaving&&error.name!=='AbortError'){$('#connection').textContent=i18n('同步失败');$('#connection').classList.add('offline');$('#connection-error').textContent=i18n`无法同步当前页面：${error.message}。正在自动重连…`;$('#connection-error').hidden=false;}
+    if(!leaving&&error.name!=='AbortError'){document.body.dataset.sync='offline';$('#connection').innerHTML=stateLabel('attention',i18n('同步中断 · 显示上次记录'));$('#connection').classList.add('offline');$('#connection-error').textContent=i18n`无法同步当前页面：${error.message}。正在自动重连…`;$('#connection-error').hidden=false;}
   }finally{busy=false;if(!leaving)timer=setTimeout(refresh,3000);}
 }
 export function watch(job){refreshJob=job;refresh();}
@@ -77,6 +79,9 @@ export function selectNavigation(page, filter='all', section='home') {
   });
 }
 export function initialize() {
+  document.body.dataset.sync='connecting';
+  document.body.dataset.hidden=String(document.hidden);
+  $('#connection').innerHTML=stateLabel('running',i18n('正在连接本地服务'));
   $('#workspace-name').textContent=document.body.dataset.workspace.split('/').filter(Boolean).at(-1)||'/';
   const filter=new URLSearchParams(globalThis.location?.search||'').get('status')||'all';
   selectNavigation(document.body.dataset.page,filter,document.querySelector('[data-section]')?.dataset?.section||'home');
@@ -103,7 +108,7 @@ export function initialize() {
     const row=e.target.closest('[data-task-url]');if(row&&!e.target.closest('a,button,input,select'))location.assign(row.dataset.taskUrl);
   });
   document.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)&&e.target.matches('[data-task-url]')){e.preventDefault();location.assign(e.target.dataset.taskUrl);}});
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+  document.addEventListener('visibilitychange',()=>{document.body.dataset.hidden=String(document.hidden);if(!document.hidden)refresh();});
   window.addEventListener('pagehide',()=>{leaving=true;clearTimeout(timer);controller.abort();});
   window.addEventListener('pageshow',e=>{if(e.persisted)location.reload();});
 }

@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from '../i18n.js';
-import {$,$$,escape,badge,taskButtons,stableHTML} from '/ui.js';
+import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel} from '/ui.js';
 import {api,watch,toast} from '/core.js';
 import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
@@ -33,7 +33,7 @@ function render(t){
  $('#detail-open-requirement-queue').dataset.requirementQueue=id;
  $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
- if(section==='home')renderWorkflow(t,{role});
+ if(section==='home'){stableHTML($('#detail-current-state'),taskNarrativeHTML(t));renderWorkflow(t,{role});}
  if(section==='conclusions')renderConclusions(t,{groupByRound:true});
  if(section==='git')stableHTML($('#detail-git'),gitHistoryHTML(t));
  if(section==='requirements')renderRequirements(t);
@@ -81,9 +81,9 @@ function renderRequirements(t){
  const plan=t.acceptance_plan,results=t.acceptance_results;
  const checkLabels={passed:i18n('检查通过'),check_failed:i18n('检查未通过（需核对输出）'),environment_unavailable:i18n('运行环境不可用'),timed_out:i18n('检查超时'),interrupted:i18n('检查被中断')};
  const acceptanceHTML=plan?.criteria?i18nHTML`<h3>完成标准</h3><div class="requirement-text">${escape(plan.criteria)}</div><p>${t.verification_mode==='planning'?i18n('本任务仅制定验收方案，不代表原目标验收。'):t.verification_mode==='review_only'?i18n('仅语义审核：未提供运行测试通过证明。'):i18n('检查通过仍须结合独立审核、模块及审计门禁。')}</p><h3>选定检查</h3>${pagedList('acceptance-selected',plan.selected||[],c=>`<li><span>${escape(c.title)}</span><span>${escape(c.purpose)}</span></li>`,{empty:i18nHTML('<li>未选择项目自动检查；如有高级命令，结果在下面单列。</li>')})}`:'';
- const resultHTML=results?.checks?i18nHTML`<h3>上次实际检查结果 · 第 ${escape(results.round)} 轮</h3><p>这是检查快照，不代表当前版本已经最终交付。版本：${escape(results.tree)}${results.source_changed?i18n('；检查改变源码，原审核证据已失效。'):''}${results.invalidated?i18n('；业务版本已更新，此结果需要重新验收。'):''}</p>${pagedList('acceptance-results',results.checks,c=>i18nHTML`<details><summary>${escape(checkLabels[c.status]||c.status)} · ${escape((plan?.selected||[]).find(x=>x.command===c.command)?.title||i18n('验收检查'))}</summary><pre class="requirement-text">${escape(c.command)}</pre><p>退出码 ${escape(c.exit_code)}；输出见原始日志 ${escape(c.log)}</p></details>`,{tag:'div',className:'acceptance-results'})}`:'';
- const modules=pagedList('modules',t.modules||[],m=>`<li><span class="module-id">${escape(m.id)}</span><span>${escape(m.title)}</span><span>${m.status==='accepted'?i18n('已验收'):m.invalidated_reason?.startsWith('Revalidation')?i18n('待复核（历史已验收）'):i18n('待完成')}</span></li>`);
- stableHTML($('#detail-body'),i18nHTML`${deliveryDiagnosis(t)}${functionHTML}<h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${t.modules?.length?i18nHTML`<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3>${modules}`:''}${briefHTML}${t.acceptance_warning?`<p class="detail-alert">${escape(t.acceptance_warning)}</p>`:''}${acceptanceHTML}${resultHTML}${coverageHTML}<h3>审计问题</h3>${pagedList('audit-issues',t.audit_issues?.items||[],i=>`<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description||i.text||i.summary||'')}</span><span>${['closed','resolved'].includes(i.status)?i18n('已关闭'):i.status==='needs_review'?i18n('待复核（保留关闭证据）'):i18n('待解决')}</span></li>`,{empty:i18nHTML('<li>暂无审计问题</li>')})}<h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`);
+ const resultHTML=results?.checks?i18nHTML`<h3>上次实际检查结果 · 第 ${escape(results.round)} 轮</h3><p>这是检查快照，不代表当前版本已经最终交付。版本：${escape(results.tree)}${results.source_changed?i18n('；检查改变源码，原审核证据已失效。'):''}${results.invalidated?i18n('；业务版本已更新，此结果需要重新验收。'):''}</p>${pagedList('acceptance-results',results.checks,c=>i18nHTML`<details><summary>${stateLabel(c.status==='passed'?'complete':c.status==='check_failed'?'error':'attention',checkLabels[c.status]||c.status)} · ${escape((plan?.selected||[]).find(x=>x.command===c.command)?.title||i18n('验收检查'))}</summary><pre class="requirement-text">${escape(c.command)}</pre><p>退出码 ${escape(c.exit_code)}；输出见原始日志 ${escape(c.log)}</p></details>`,{tag:'div',className:'acceptance-results'})}`:'';
+ const modules=pagedList('modules',t.modules||[],m=>`<li><span class="module-id">${escape(m.id)}</span><span>${escape(m.title)}</span><span>${stateLabel(m.status==='accepted'?'complete':'waiting',m.status==='accepted'?i18n('已验收'):m.invalidated_reason?.startsWith('Revalidation')?i18n('待复核（历史已验收）'):i18n('待完成'))}</span></li>`);
+ stableHTML($('#detail-body'),i18nHTML`${deliveryDiagnosis(t)}${functionHTML}<h3>原始开发需求</h3><div class="requirement-text">${escape(t.requirement)}</div>${t.modules?.length?i18nHTML`<h3>模块验收 · ${t.accepted_modules} / ${t.total_modules}</h3>${modules}`:''}${briefHTML}${t.acceptance_warning?`<p class="detail-alert">${escape(t.acceptance_warning)}</p>`:''}${acceptanceHTML}${resultHTML}${coverageHTML}<h3>审计问题</h3>${pagedList('audit-issues',t.audit_issues?.items||[],i=>`<li><span class="module-id">${escape(i.id)}</span><span>${escape(i.description||i.text||i.summary||'')}</span><span>${stateLabel(['closed','resolved'].includes(i.status)?'complete':'attention',['closed','resolved'].includes(i.status)?i18n('已关闭'):i.status==='needs_review'?i18n('待复核（保留关闭证据）'):i18n('待解决'))}</span></li>`,{empty:i18nHTML('<li>暂无审计问题</li>')})}<h3>运行记录目录</h3><div class="requirement-text">${escape(t.run_dir)}</div>`);
 }
 async function loadLogs(){
  const seq=++logSequence;
@@ -105,7 +105,7 @@ async function loadLogs(){
 export function mount(){
  onPaginationChange((key,reason)=>{if(key==='dispatch-plan'){void loadDispatch();}else if(key==='logs'){if(reason==='page')$('#log-follow').checked=false;loadLogs().catch(e=>toast(e.message,true));}else if(task)render(task);});
  $('#dispatch-filters')?.addEventListener('click',event=>{const button=event.target.closest('[data-dispatch-filter]');if(!button)return;dispatchFilter=button.dataset.dispatchFilter;resetPage('dispatch-plan');dispatchData=null;void loadDispatch();});
- document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;resetPage('workflow');if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:'smooth',block:'start'});});
+ document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;resetPage('workflow');if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});
  $('#log-select')?.addEventListener('change',e=>{log=e.target.value;resetPage('logs');logTotal=0;loadLogs().catch(e=>toast(e.message,true));});
  $('#log-follow')?.addEventListener('change',()=>loadLogs().catch(e=>toast(e.message,true)));
  watch(async()=>{

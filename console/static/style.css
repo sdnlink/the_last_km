@@ -680,7 +680,7 @@ h2 {
   border: 1px solid var(--line);
 }
 
-.status:before {
+.status:not([data-motion]):before {
   content: "";
   width: 4px;
   height: 4px;
@@ -1729,6 +1729,74 @@ html[lang="en"] .button { white-space:normal; text-align:center; }
 .nav-section { display:grid; gap:5px; }
 .nav-section > p { margin:0 10px 7px; color:var(--muted); font-size:11px; }
 .detail-edit-actions { display:flex; flex-wrap:wrap; gap:8px; }
+
+/* One visual vocabulary for live work, waiting, paused and final states. */
+.component-state { display:inline-flex; align-items:center; gap:7px; line-height:1.5; }
+.component-state[data-motion="running"] { color:var(--accent); }
+.component-state[data-motion="paused"] { color:var(--amber); }
+.component-state[data-motion="error"], .component-state[data-motion="attention"] { color:var(--red); }
+.connection .component-state { color:inherit; }
+.state-glyph { display:inline-block; position:relative; width:12px; height:12px; flex:0 0 12px; border:1.5px solid currentColor; border-radius:50%; box-sizing:border-box; vertical-align:middle; }
+[data-motion="running"] > .state-glyph { border-color:currentColor; border-right-color:transparent; animation:state-turn 1.1s linear infinite; }
+[data-motion="waiting"] > .state-glyph { border-style:dotted; opacity:.7; animation:state-breathe 2.8s ease-in-out infinite; }
+[data-motion="paused"] > .state-glyph { border:0; border-radius:0; background:linear-gradient(90deg,currentColor 0 32%,transparent 32% 68%,currentColor 68%); width:10px; height:10px; flex-basis:10px; }
+[data-motion="complete"] > .state-glyph { border:0; animation:state-settle .35s ease-out both; }
+[data-motion="complete"] > .state-glyph::after { content:""; position:absolute; width:8px; height:4px; border:solid currentColor; border-width:0 0 2px 2px; transform:rotate(-45deg); top:2px; left:1px; }
+[data-motion="error"] > .state-glyph, [data-motion="attention"] > .state-glyph { font-size:10px; line-height:10px; text-align:center; font-weight:700; }
+[data-motion="error"] > .state-glyph::after, [data-motion="attention"] > .state-glyph::after { content:"!"; }
+[data-motion="idle"] > .state-glyph { opacity:.45; }
+.status[data-motion] { font-size:11px; gap:7px; padding:4px 9px; white-space:nowrap; }
+.status[data-motion="waiting"], .status[data-motion="paused"] { color:var(--amber); background:var(--warning-soft); border-color:var(--warning-line); }
+.status[data-motion="attention"], .status[data-motion="error"] { color:var(--red); background:var(--danger-soft); border-color:var(--danger-line); }
+.task-narrative { display:flex; align-items:center; gap:16px; padding:20px 22px; margin:0 0 20px; border:1px solid var(--accent-line); border-radius:12px; background:var(--accent-soft); color:var(--accent); }
+.narrative-icon { display:grid; place-items:center; width:42px; height:42px; flex:0 0 42px; border-radius:12px; background:var(--surface); border:1px solid var(--accent-line); }
+.narrative-icon .state-glyph { width:20px; height:20px; flex-basis:20px; }
+.task-narrative strong { display:block; font-size:14px; line-height:1.6; }
+.task-narrative p { margin:4px 0 0; font-size:12px; line-height:1.8; color:var(--muted); }
+.task-narrative[data-motion="paused"], .task-narrative[data-motion="waiting"] { color:var(--amber); background:var(--warning-soft); border-color:var(--warning-line); }
+.task-narrative[data-motion="error"], .task-narrative[data-motion="attention"] { color:var(--red); background:var(--danger-soft); border-color:var(--danger-line); }
+.task-narrative[data-motion="idle"] { color:var(--muted); background:var(--surface-2); border-color:var(--line); }
+.task-narrative[data-motion="running"] .narrative-icon > .state-glyph { border-right-color:transparent; animation:state-turn 1.3s linear infinite; }
+.task-narrative[data-motion="waiting"] .narrative-icon > .state-glyph { border-style:dotted; animation:state-breathe 2.8s ease-in-out infinite; }
+.task-narrative[data-motion="paused"] .narrative-icon > .state-glyph { width:14px; height:17px; border:0; border-radius:0; background:linear-gradient(90deg,currentColor 0 32%,transparent 32% 68%,currentColor 68%); }
+.task-narrative[data-motion="complete"] .narrative-icon > .state-glyph { border:0; }
+.task-narrative[data-motion="complete"] .narrative-icon > .state-glyph::after { content:"✓"; font-size:22px; line-height:20px; }
+.board-roles .component-state { font-size:11px; }
+.board-next { color:var(--muted); font-size:11px; line-height:1.7; margin:10px 0; }
+.task-board-card { position:relative; overflow:hidden; }
+.task-board-card[data-motion="running"]::before { content:""; position:absolute; top:0; left:0; width:35%; height:2px; background:linear-gradient(90deg,transparent,var(--accent),transparent); animation:state-travel 3s ease-in-out infinite; }
+.role-card[data-motion="running"] { border-color:var(--accent-line); box-shadow:inset 0 3px 0 var(--accent); }
+.role-card[data-motion="paused"] { box-shadow:inset 0 3px 0 var(--amber); }
+.role-card-title strong small { display:block; font-size:10px; font-weight:400; opacity:.65; margin-top:4px; }
+.workflow-stage { position:relative; overflow:hidden; }
+.workflow-stage[data-motion="running"]::after { content:""; position:absolute; bottom:0; left:0; height:2px; width:40%; background:linear-gradient(90deg,transparent,var(--accent),transparent); animation:state-travel 2.5s ease-in-out infinite; }
+.workflow-stage .component-state { font-size:10px; }
+.workflow-stage .state-glyph { width:10px; height:10px; flex-basis:10px; }
+.workflow-stage[data-motion="paused"] { color:var(--amber); background:var(--warning-soft); border-color:var(--warning-line); }
+.workflow-stage[data-motion="attention"] { color:var(--red); background:var(--danger-soft); border-color:var(--danger-line); }
+.sample-point { fill:var(--accent); stroke:var(--surface); stroke-width:1.5px; animation:state-sample .6s ease-out; }
+.blue-chart .sample-point { fill:#5488c2; }
+.meter > span, .module-progress > span { transition:width .6s ease; }
+.running-stat .live-dot { background:var(--muted); box-shadow:none; }
+[data-running="true"] .running-stat .live-dot { background:var(--accent); animation:state-breathe 2.8s ease-in-out infinite; }
+[data-motion="running"] .install-progress > span { animation:install-progress 1.7s ease-in-out infinite; }
+@keyframes state-turn { to { transform:rotate(360deg); } }
+@keyframes state-breathe { 0%,100% { opacity:.45; } 50% { opacity:1; } }
+@keyframes state-settle { from { opacity:.3; transform:scale(.7); } to { opacity:1; transform:scale(1); } }
+@keyframes state-travel { from { transform:translateX(-110%); } to { transform:translateX(390%); } }
+@keyframes state-sample { from { opacity:.3; } to { opacity:1; } }
+/* Stale snapshots never look live. The connection banner explains why. */
+body[data-sync="offline"] *, body[data-sync="offline"] *::before, body[data-sync="offline"] *::after,
+body[data-hidden="true"] *, body[data-hidden="true"] *::before, body[data-hidden="true"] *::after { animation-play-state:paused !important; }
+body[data-sync="offline"] [data-motion="running"] { filter:saturate(.25); }
+@media (prefers-reduced-motion:reduce) {
+  *, *::before, *::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; }
+}
+@media (max-width:640px) {
+  .task-narrative { padding:16px; gap:12px; }
+  .narrative-icon { width:34px; height:34px; flex-basis:34px; }
+  .connection { max-width:155px; }
+}
 @media (max-width:640px) {
   .navigation-toggle { display:inline-flex; position:absolute; top:13px; right:18px; }
   .primary-navigation[data-expanded="false"] { display:none; }

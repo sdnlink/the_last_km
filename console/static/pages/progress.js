@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from '../i18n.js';
-import {$,escape,badge,taskButtons,active,taskPriority,phases,roleStatuses,duration,stableHTML} from '/ui.js';
+import {$,escape,badge,taskButtons,active,taskPriority,duration,stableHTML,rolesHTML,taskNarrativeHTML,taskNarrative} from '/ui.js';
 import {api,watch} from '/core.js';
 import {failureHTML,renderWorkflow,renderConclusions} from '/task-view.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
@@ -11,7 +11,7 @@ function renderPicker(){
  $('#progress-task-count').textContent=i18n`${visible.length} 个可跟进任务`;
  const page=paginate('progress-tasks',visible,{rowHeight:135});
  $('#progress-pagination').innerHTML=page.controls;
- stableHTML($('#progress-tasks'),page.items.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.project_cwd||t.cwd)}</small><p>${escape(t.failure?.title||phases[t.health.phase]||t.summary||i18n('等待启动'))}</p></a>`).join('')||i18nHTML('<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>'));
+ stableHTML($('#progress-tasks'),page.items.map(t=>`<a class="progress-task ${t.id===selected?'selected':''}" href="/progress?task=${t.id}" ${t.id===selected?'aria-current="true"':''}><div><strong>${escape(t.title)}</strong>${badge(t)}</div><small>${escape(t.project_cwd||t.cwd)}</small><p>${escape(t.failure?.title||taskNarrative(t).title)}</p></a>`).join('')||i18nHTML('<div class="live-empty">暂无匹配任务。可切换“全部任务”查看停止或已完成的工作。</div>'));
 }
 function renderCurrent(t){
  current=t;$('#progress-empty').hidden=true;$('#progress-selected').hidden=false;
@@ -22,7 +22,7 @@ function renderCurrent(t){
  const work=t.failure?.reason||role?.current_work||roles.watcher?.current_work||(isLive?i18n('等待当前轮次发出公开进展'):i18n('当前任务未在执行'));
  $('#progress-notice').innerHTML=failureHTML(t)+`${!isLive?`<p class="detail-alert">${t.status==='paused'?i18n('任务已暂停，当前展示最近一轮记录。'):t.status==='done'?i18n('任务已完成，当前展示最终工作记录。'):i18n('任务当前未在执行，以下为最近工作记录。')}</p>`:''}${t.control_message?`<p class="control-hint">${escape(t.control_message)}</p>`:''}`;
  if(roles.reviewer?.wait_reason)$('#progress-notice').insertAdjacentHTML('beforeend',i18nHTML`<p class="control-hint"><strong>审核调度：</strong>${escape(roles.reviewer.wait_reason)}</p>`);
- $('#progress-focus').innerHTML=i18nHTML`<div class="progress-focus-label">${isLive?i18n('当前工作'):i18n('最近工作')} · 第 ${t.activity?.round||t.health.rounds||0} 轮</div><h3>${escape(work)}</h3><div class="board-roles">${Object.entries(roles).map(([name,r])=>`<span>${name} · ${escape(roleStatuses[r.status]||r.status)}</span>`).join('')}</div>`;
+ stableHTML($('#progress-focus'),i18nHTML`${taskNarrativeHTML(t)}<div class="progress-focus-label">${isLive?i18n('当前工作'):i18n('最近工作')} · 第 ${t.activity?.round||t.health.rounds||0} 轮</div><h3>${escape(work)}</h3><div class="board-roles">${rolesHTML(t,roles)}</div>`);
  $('#progress-freshness').textContent=t.activity?.last_output_at?i18n`最近输出 ${duration(t.activity.output_age_s)} 前 · 每 3 秒更新`:i18n('尚未收到本轮公开输出；有新活动时自动显示');
  renderWorkflow(t,{role:$('#progress-role').value,currentOnly:$('#progress-round').value==='current',showRoles:false});renderConclusions(t);
 }

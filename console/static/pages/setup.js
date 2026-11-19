@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from '../i18n.js';
-import {$,$$,escape,stableHTML,dateTimeLabel} from '/ui.js';
+import {$,$$,escape,stableHTML,dateTimeLabel,stateLabel,motionState} from '/ui.js';
 import {api,config,watch,toast} from '/core.js';
 import {pagedList,onPaginationChange} from '/pagination.js';
 
@@ -13,7 +13,7 @@ function cardHTML(agent){
  const label=escape(agent.label),id=escape(agent.id);
  return i18nHTML`<fieldset class="agent-card ${agent.enabled?'selected':''}" data-agent="${id}">
   <div class="agent-card-head"><span class="agent-avatar" aria-hidden="true">${escape(agent.label.slice(0,2).toUpperCase())}</span><div><button type="button" class="agent-name" data-configure aria-haspopup="dialog" aria-controls="config-${id}">${label}<svg><use href="#i-arrow"/></svg></button><span class="agent-role">${agent.can_review?'Worker · Reviewer':'Worker'}</span></div><label class="agent-select"><input type="checkbox" name="enabled" aria-label="启用 ${label}" ${agent.enabled?'checked':''}/><span>启用</span></label></div>
-  <div class="agent-card-summary"><span class="agent-detected ${agent.installed?'installed':''}" data-status>${agent.installed?i18n('已检测到 CLI'):i18n('尚未安装')}</span><span class="agent-draft" data-draft hidden>有未保存配置</span></div>
+  <div class="agent-card-summary"><span class="agent-detected ${agent.installed?'installed':''}" data-status>${stateLabel(agent.installed?'complete':'idle',agent.installed?i18n('已检测到 CLI'):i18n('尚未安装'))}</span><span class="agent-draft" data-draft hidden>有未保存配置</span></div>
   <button type="button" class="agent-model-summary" data-configure><span>默认模型</span><strong data-model-summary>${escape(c.model||i18n('执行器默认'))}</strong><span aria-hidden="true">›</span></button>
   <div class="agent-summary-bottom"><span data-auth-summary>${agent.auth_mode==='api_key'?'API Key / Token':i18n('沿用 CLI 登录')}</span><button type="button" data-configure class="agent-settings-link">配置模型与认证</button></div>
   <dialog class="agent-config-dialog" id="config-${id}" aria-labelledby="config-title-${id}"><div class="dialog-heading"><div><span class="eyebrow">智能体设置</span><h2 id="config-title-${id}">${label}</h2><p>${agent.can_review?i18n('可用于实现与独立审核'):i18n('可作为 Worker；审核请选择支持只读模式的执行器')}</p></div><button type="button" class="icon-button" data-close-agent aria-label="关闭 ${label} 配置"><svg><use href="#i-x"/></svg></button></div>
@@ -47,8 +47,8 @@ async function save(cards,complete=false){
  await config(true);return result;
 }
 function jobHTML(job){
- const active=['queued','running'].includes(job.status);
- return i18nHTML`<article class="setup-job ${escape(job.status)}"><div class="setup-job-heading"><span class="install-status" aria-hidden="true">${job.status==='succeeded'?'✓':job.status==='failed'?'!':'↻'}</span><strong>${escape(agentLabels.get(job.agent)||job.agent)}</strong><span class="job-state">${escape(jobLabels[job.status]||job.status)}</span><time>${escape(dateTimeLabel(job.started_at))}</time></div><p class="job-message">${escape(job.message||'')}</p>${active?i18nHTML('<div class="install-progress" aria-label="安装处理中，尚无百分比进度"><span></span></div>'):''}<details class="setup-job-output" data-key="job-${escape(job.id)}"><summary>查看安装输出</summary><pre>${escape(job.output||i18n('等待安装程序输出…'))}</pre></details></article>`;
+ const active=job.status==='running';
+ return i18nHTML`<article class="setup-job ${escape(job.status)}" data-motion="${motionState(job.status)}"><div class="setup-job-heading"><strong>${escape(agentLabels.get(job.agent)||job.agent)}</strong><span class="job-state">${stateLabel(motionState(job.status),jobLabels[job.status]||job.status)}</span><time>${escape(dateTimeLabel(job.started_at))}</time></div><p class="job-message">${escape(job.message||'')}</p>${active?i18nHTML('<div class="install-progress" aria-label="安装处理中，尚无百分比进度"><span></span></div>'):''}<details class="setup-job-output" data-key="job-${escape(job.id)}"><summary>查看安装输出</summary><pre>${escape(job.output||i18n('等待安装程序输出…'))}</pre></details></article>`;
 }
 function renderJobs(rows,snapshot=false){
  if(snapshot)jobs.clear();
@@ -63,14 +63,14 @@ function renderJobs(rows,snapshot=false){
  $$('[data-agent]').forEach(card=>{const button=card.querySelector('[data-install]');if(button)button.disabled=installing.has(card.dataset.agent);});
 }
 function revealJobs(){
- $('#setup-jobs-panel').scrollIntoView({behavior:'smooth',block:'start'});
+ $('#setup-jobs-panel').scrollIntoView({behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});
  $('#setup-jobs-panel').focus({preventScroll:true});
 }
 async function load(){
  const data=await api('/api/agents/setup');
  for(const agent of data.agents)agentLabels.set(agent.id,agent.label);
  if(!loaded){$('#setup-agents').innerHTML=data.agents.map(cardHTML).join('');loaded=true;$('#setup-title').textContent=data.initialized?i18n('管理你的 Agent'):i18n('初始化：选择你的 Agent');}
- for(const agent of data.agents){const status=$(`[data-agent="${agent.id}"] [data-status]`);status.textContent=agent.installed?i18n('已检测到 CLI'):i18n('尚未安装');status.classList.toggle('installed',agent.installed);}
+ for(const agent of data.agents){const status=$(`[data-agent="${agent.id}"] [data-status]`);status.innerHTML=stateLabel(agent.installed?'complete':'idle',agent.installed?i18n('已检测到 CLI'):i18n('尚未安装'));status.classList.toggle('installed',agent.installed);}
  $('#setup-count').textContent=i18n`${data.agents.filter(a=>a.installed).length} / ${data.agents.length} 已检测到 CLI`;
  renderJobs(data.jobs,true);
 }

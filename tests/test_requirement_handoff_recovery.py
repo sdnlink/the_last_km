@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from auto_moniter import candidate_checks, requirements_review
 from auto_moniter.directions import Directions
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
@@ -31,11 +32,13 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         self.run_dir = self.root / 'run'
         self.counter = self.run_dir / 'check-count'
 
-    def supervisor(self, worker, reviewer, *, resume=False, max_rounds=0):
+    def supervisor(self, worker, reviewer, *, resume=False, max_rounds=0,
+                   requirement=FOLLOW, max_agent_calls=0):
         return Supervisor(RunConfig(
-            FOLLOW, self.root, worker, reviewer=reviewer,
+            requirement, self.root, worker, reviewer=reviewer,
             workflow='auto' if resume else 'review-first', resume=resume,
             run_dir=self.run_dir, git_history='required', retry_delay_s=0, max_rounds=max_rounds,
+            max_agent_calls=max_agent_calls,
             checks=[] if resume else [f'echo check >> {shlex.quote(str(self.counter))} && test -f app.py'],
         ), log=lambda _: None)
 
@@ -221,3 +224,255 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         self.assertEqual(receipt['context']['commands'], updated['checks'])
         self.assertEqual(receipt['context']['configured_checks'], updated['checks'])
         self.assertEqual(extra_counter.read_text().splitlines(), ['added'])
+
+    def publish_new_commit(self, *, requirement=FOLLOW, scope='requirement', max_agent_calls=0):
+        base = _git(self.root, 'rev-parse', 'HEAD')
+        worker = ScriptedProvider('worker', [
+            {'verdict': outcome(['A'], scope=scope, plan=PLAN[:1]), 'touch': 'app.py'},
+        ])
+        reviewer = CitingReviewer([
+            {'verdict': {}, 'text': json.dumps(BRIEF)},
+            {'verdict': outcome(['A'], scope=scope), 'cite': True},
+        ], self.root)
+        monitor = self.supervisor(worker, reviewer, requirement=requirement,
+                                  max_rounds=1, max_agent_calls=max_agent_calls)
+        if scope == 'requirement':
+            with patch.object(monitor, '_begin_follow_up', side_effect=ProcessExit):
+                with self.assertRaises(ProcessExit):
+                    report = monitor.run()
+                    self.fail(report.summary)
+        else:
+            monitor.log = lambda message: monitor.request_stop() if 'module accepted' in message else None
+            report = monitor.run()
+            self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual([call['read_only'] for call in reviewer.calls], [True, True])
+        self.assertIn('Worker checkpoint:', reviewer.calls[-1]['prompt'])
+        saved = self.state()
+        self.assertEqual(saved['requirement_cycles'], [])
+        submitted, reviewed = saved['rounds']
+        publication = reviewed['git_checkpoint']['business_commit']
+        self.assertTrue(publication['created'])
+        self.assertEqual(publication['parent'], base)
+        self.assertEqual(publication['changed_files'], ['app.py'])
+        self.assertEqual(publication['commit'], _git(self.root, 'rev-parse', 'HEAD'))
+        self.assertEqual(_git(self.root, 'show', 'HEAD:app.py'), 'changed')
+        receipt = submitted['watcher_result']['candidate_checks']
+        self.assertEqual(receipt['context']['tree'], submitted['tree'])
+        self.assertEqual(receipt['context']['final'], scope == 'requirement')
+        self.assertEqual(receipt['context']['commands'], saved['checks'])
+        self.assertTrue(candidate_checks.valid(receipt, self.run_dir, receipt['context']))
+        self.assertEqual(reviewed['watcher_result']['candidate_approval']['checks_digest'], receipt['digest'])
+        self.assertEqual(self.counter.read_text().splitlines(), ['check'])
+        return saved
+
+    def publication_evidence(self, saved):
+        receipt = saved['rounds'][0]['watcher_result']['candidate_checks']
+        files = ['git-history.json', *receipt['logs']]
+        return {name: (self.run_dir / name).read_bytes() for name in files}
+
+    def assert_publication_preserved(self, saved, evidence, *, next_worker=False):
+        publication = saved['rounds'][1]['git_checkpoint']['business_commit']
+        self.assertEqual(_git(self.root, 'rev-parse', 'HEAD'), publication['commit'])
+        self.assertEqual(_git(self.root, 'rev-list', '--count', 'HEAD'), '2')
+        self.assertEqual(_git(self.root, 'rev-parse', saved['git_history']['ref']),
+                         saved['git_history']['head'])
+        current = self.state()['rounds']
+        for original, retained in zip(saved['rounds'], current[:2], strict=True):
+            self.assertEqual(retained['git_checkpoint'], original['git_checkpoint'])
+            self.assertEqual(retained['watcher_result'], original['watcher_result'])
+        retained = self.publication_evidence(saved)
+        expected = dict(evidence)
+        if next_worker:
+            # A new draft updates the candidate and work ref, while the
+            # published Git records and check logs still describe round 1.
+            original_history = json.loads(expected.pop('git-history.json'))
+            current_history = json.loads(retained.pop('git-history.json'))
+            self.assertEqual(current_history['candidate']['round'], 2)
+            for key in ('candidate', 'work_head'):
+                current_history[key] = original_history[key]
+            self.assertEqual(current_history, original_history)
+        self.assertEqual(retained, expected)
+        self.assertEqual(self.counter.read_text().splitlines(), ['check'])
+
+    def test_new_commit_handoff_precedes_next_worker(self):
+        saved = self.publish_new_commit()
+        evidence = self.publication_evidence(saved)
+        worker = ScriptedProvider('worker', [
+            {'verdict': _verdict('continue', ['next requirement needs work'])},
+        ])
+        reviewer = CitingReviewer([{'verdict': {}, 'text': json.dumps(NEXT)}], self.root)
+        report = self.supervisor(worker, reviewer, resume=True, max_rounds=2).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn(NEXT['refined_requirement'], worker.calls[0]['prompt'])
+        self.assertEqual([call['read_only'] for call in reviewer.calls], [True])
+        publication = saved['rounds'][1]['git_checkpoint']['business_commit']
+        self.assertIn('Accepted deliveries already committed', reviewer.calls[0]['prompt'])
+        self.assertIn(publication['commit'], reviewer.calls[0]['prompt'])
+        state = self.state()
+        self.assertEqual(state['requirements_review']['status'], 'ready')
+        self.assertEqual(state['requirements_review']['refined_requirement'], NEXT['refined_requirement'])
+        self.assertEqual(len(state['requirement_cycles']), 1)
+        handoff = state['requirement_cycles'][0]['handoff']
+        receipt = saved['rounds'][0]['watcher_result']['candidate_checks']
+        self.assertEqual((handoff['cycle'], handoff['round']), (1, 1))
+        self.assertEqual(handoff['tree'], receipt['context']['tree'])
+        self.assertEqual(handoff['checks_digest'], receipt['digest'])
+        self.assertEqual(handoff['commit'], publication['commit'])
+        self.assertEqual(handoff['ref'], publication['ref'])
+        self.assertEqual([item['id'] for item in handoff['modules']], ['A'])
+        self.assert_publication_preserved(saved, evidence, next_worker=True)
+
+    def test_module_publication_resumes_original_requirement(self):
+        saved = self.publish_new_commit(scope='module')
+        evidence = self.publication_evidence(saved)
+        remaining = _verdict('continue', ['original requirement still needs work'])
+        remaining.update(modules=[], module_ids=[])
+        worker = ScriptedProvider('worker', [{'verdict': remaining}])
+        reviewer = CitingReviewer([], self.root)
+        report = self.supervisor(worker, reviewer, resume=True, max_rounds=2).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn(FOLLOW, worker.calls[0]['prompt'])
+        self.assertEqual(reviewer.calls, [])
+        state = self.state()
+        self.assertEqual(state['requirement_cycles'], [])
+        self.assertEqual(state['requirements_review'], saved['requirements_review'])
+        module, = state['modules']
+        for key in ('id', 'status', 'round', 'tree', 'evidence'):
+            self.assertEqual(module[key], saved['modules'][0][key])
+        self.assert_publication_preserved(saved, evidence, next_worker=True)
+
+    def test_published_ordinary_requirement_finishes_without_follow_up(self):
+        requirement = '实现当前需求并退出'
+        saved = self.publish_new_commit(requirement=requirement)
+        evidence = self.publication_evidence(saved)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        report = self.supervisor(worker, reviewer, resume=True, requirement=requirement).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        self.assertEqual(self.state()['requirement_cycles'], [])
+        self.assert_publication_preserved(saved, evidence)
+
+    def assert_handoff_refused(self, saved, expected_message):
+        evidence = self.publication_evidence(saved)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        report = self.supervisor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'recovery_failed', report.summary)
+        self.assertIn(expected_message, report.summary)
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        self.assertEqual(self.state()['requirement_cycles'], [])
+        self.assert_publication_preserved(saved, evidence)
+
+    def test_changed_workspace_cannot_authorize_handoff(self):
+        saved = self.publish_new_commit()
+        (self.root / 'app.py').write_text('change after publication\n')
+        self.assert_handoff_refused(saved, 'saved candidate, approval or checks')
+        self.assertEqual((self.root / 'app.py').read_text(), 'change after publication\n')
+
+    def test_mismatched_publication_record_cannot_authorize_handoff(self):
+        saved = self.publish_new_commit()
+        publication = saved['rounds'][1]['git_checkpoint']['business_commit']
+        wrong_tree = _git(self.root, 'rev-parse', 'HEAD~1^{tree}')
+        self.assertNotEqual(publication['candidate_tree'], wrong_tree)
+        publication['candidate_tree'] = wrong_tree
+        write_json(self.run_dir / 'state.json', saved, durable=True)
+        self.assert_handoff_refused(saved, 'saved Git checkpoints')
+
+    def test_mismatched_independent_approval_cannot_authorize_handoff(self):
+        saved = self.publish_new_commit()
+        approval = saved['rounds'][1]['watcher_result']['candidate_approval']
+        approval['review']['summary'] += ' (modified after publication)'
+        write_json(self.run_dir / 'state.json', saved, durable=True)
+        self.assert_handoff_refused(saved, 'immutable review record')
+
+    def test_mismatched_check_log_cannot_authorize_handoff(self):
+        saved = self.publish_new_commit()
+        receipt = saved['rounds'][0]['watcher_result']['candidate_checks']
+        log, = receipt['logs']
+        with (self.run_dir / log).open('ab') as stream:
+            stream.write(b'changed after publication\n')
+        self.assert_handoff_refused(saved, 'saved candidate, approval or checks')
+
+    def test_mismatched_check_receipt_cannot_authorize_handoff(self):
+        saved = self.publish_new_commit()
+        receipt = saved['rounds'][0]['watcher_result']['candidate_checks']
+        receipt['digest'] = '0' * 64
+        write_json(self.run_dir / 'state.json', saved, durable=True)
+        self.assert_handoff_refused(saved, 'saved candidate, approval or checks')
+
+    def test_stop_during_recovery_preserves_publication(self):
+        saved = self.publish_new_commit()
+        evidence = self.publication_evidence(saved)
+        write_json(self.run_dir / 'control.json', {'action': 'stop'}, durable=True)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        report = self.supervisor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertIn('stop command', report.summary)
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        self.assertEqual(len(self.state()['requirement_cycles']), 1)
+        self.assert_publication_preserved(saved, evidence)
+
+    def test_pause_during_recovery_waits_before_model_dispatch(self):
+        saved = self.publish_new_commit()
+        evidence = self.publication_evidence(saved)
+        control = self.run_dir / 'control.json'
+        write_json(control, {'action': 'pause'}, durable=True)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        resumed = self.supervisor(worker, reviewer, resume=True)
+        paused = []
+        beat = resumed._beat
+
+        def stop_after_observing_pause(note):
+            beat(note)
+            if note == 'paused at a turn boundary':
+                paused.append((len(worker.calls), len(reviewer.calls)))
+                write_json(control, {'action': 'stop'}, durable=True)
+
+        with patch.object(resumed, '_beat', side_effect=stop_after_observing_pause):
+            report = resumed.run()
+        self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertEqual(paused, [(0, 0)])
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        self.assertEqual(len(self.state()['requirement_cycles']), 1)
+        self.assert_publication_preserved(saved, evidence)
+
+    def test_exhausted_call_budget_survives_publication_recovery(self):
+        saved = self.publish_new_commit(max_agent_calls=3)
+        evidence = self.publication_evidence(saved)
+        self.assertEqual(saved['usage']['agent_calls'], 3)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        report = self.supervisor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'budget_exceeded', report.summary)
+        self.assertIn('Agent call budget exhausted', report.summary)
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        usage = self.state()['usage']
+        self.assertEqual((usage['agent_calls'], usage['max_agent_calls']), (3, 3))
+        self.assertEqual(len(self.state()['requirement_cycles']), 1)
+        self.assert_publication_preserved(saved, evidence)
+
+    def test_cycle_limit_blocks_follow_up_after_recovering_last_handoff(self):
+        saved = self.publish_new_commit()
+        evidence = self.publication_evidence(saved)
+        worker = ScriptedProvider('worker', [])
+        reviewer = CitingReviewer([], self.root)
+        self.assertEqual(requirements_review.MAX_CYCLES, 32)
+        # Reach the same boundary with one real publication instead of 32.
+        with patch.object(requirements_review, 'MAX_CYCLES', 1):
+            report = self.supervisor(worker, reviewer, resume=True).run()
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('Requirement cycle limit reached', report.summary)
+            cycles = self.state()['requirement_cycles']
+            self.assertEqual(len(cycles), 1)
+            report = self.supervisor(worker, reviewer, resume=True).run()
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('Requirement cycle limit reached', report.summary)
+            self.assertEqual(self.state()['requirement_cycles'], cycles)
+        self.assertEqual((worker.calls, reviewer.calls), ([], []))
+        self.assert_publication_preserved(saved, evidence)

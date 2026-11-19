@@ -883,7 +883,8 @@ class Supervisor:
                     if not _accepted(verdict):
                         last_worker = verdict
                         continue
-            if self._uses_candidate_checks(record):
+            screened_review = self._repair_preflight(record, reviewer, last_review)
+            if self._uses_candidate_checks(record) and screened_review is None:
                 self._prepare_candidate_checks(record)
                 self._write_state(records, 'running', stall, previous_gap_key, tree)
                 if self._stop:
@@ -913,7 +914,7 @@ class Supervisor:
                         rounds_since_review=self._rounds_since_review)
             review_session = "" if self.config.fresh_review else self.reviewer_session_id
             try:
-                review_turn = self._invoke_review(
+                review_turn = screened_review or self._invoke_review(
                     reviewer,
                     review_prompt,
                     review_session,
@@ -2402,6 +2403,8 @@ class Supervisor:
             catalog = self._function_check_catalog(task)
             selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
+                'requirement_cycle':len(self.requirement_cycles)+1,
+                'business_update_count':self._business_update_count,
                 **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
                    if self.config.task_type == 'deployment' else {}),
                 'module_ids':sorted(ids), 'commands':self._acceptance_commands(final, ids, selected),
@@ -2412,6 +2415,136 @@ class Supervisor:
                 'acceptance':self.config.acceptance, 'quality_policy':self.config.quality_policy,
                 'direction_ids':[message['id'] for message in self.directions.messages()]}
 
+    def _repair_preflight(self, record, reviewer, last_review):
+        """Reject an incomplete repair before repeating costly delivery checks.
+
+        Readiness is never approval: it still requires checks and a fresh review.
+        Keep function dispatch on its existing check/review contract.
+        """
+        if (not self._uses_candidate_checks(record) or self.config.function_dispatch or reviewer.name == 'paseo'
+                or self.config.task_type != 'code' or not self.audit.pending(set(record.verdict.module_ids))
+                or record.watcher_result.get('candidate_checks')):
+            return None
+        rejected = 0
+        for previous in reversed(self._records):
+            if previous.role != 'reviewer':
+                continue
+            if previous.delivery.get('status') == 'accepted':
+                break
+            if (not previous.failure and not previous.interruption and not previous.verdict.parse_error
+                    and previous.verdict.status == 'continue' and previous.verdict.gaps
+                    and set(previous.verdict.module_ids) & set(record.verdict.module_ids)):
+                rejected += 1
+        if rejected < 2:
+            return None
+        context_digest = candidate_checks.digest(self._candidate_check_context(record))
+        saved = record.watcher_result.get('repair_preflight', {})
+        if saved.get('status') == 'ready' and saved.get('context_digest') == context_digest:
+            return None  # Only skip another preliminary screen, never the final gate.
+        self._process_control()
+        if self._stop:
+            return None  # The normal check boundary handles the saved stop.
+        prompt = self._review_prompt(record.index, record.verdict, Path(record.output_path), record.tree, last_review)
+        prompt += (
+            '\n\nREPAIR PREFLIGHT ONLY: previous candidates repeatedly failed code review. '
+            'Check all named repairs, entry points, callers and failure paths together BEFORE expensive checks. '
+            'List every currently known concrete blocker for the submitted modules in one response; '
+            'do not expand the original requirements or block these modules on unrelated future work. '
+            'Use status=continue with gaps for incomplete code, and preserve existing AUD IDs. '
+            'Use status=done only to indicate code is ready for watcher checks, never delivery approval. '
+            'No fixed checks have run for this candidate yet: their absence is not a preflight gap. '
+            'Return issue_resolutions=[]; audit closures require the subsequent check-backed review. '
+            'Do not run tests, edit files, publish, or request identical worker resubmission if ready. '
+            'Watcher must run the mandatory checks and obtain a fresh independent review before acceptance.')
+        self._event('repair_preflight_started', round=record.index, role='reviewer')
+        turn = self._invoke(reviewer, prompt, '', role='reviewer', index=record.index,
+            model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args, read_only=True)
+        # Preserve the preliminary transcript when the formal review uses the
+        # normal reviewer filenames later in this same round.
+        for suffix in ('.log', '-text.md', '-prompt.md'):
+            source = self.run_dir/f'{record.index:03d}-reviewer{suffix}'
+            if source.is_file() and not source.is_symlink():
+                source.replace(self.run_dir/f'{record.index:03d}-reviewer-preflight{suffix}')
+        turn.output_path = self.run_dir/f'{record.index:03d}-reviewer-preflight.log'
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree:
+            if self._business_head_changed():
+                raise BusinessHeadChanged('Business HEAD changed during repair preflight')
+            raise RecoveryError('Workspace changed during read-only repair preflight; no approval applied')
+        value = self._verdict_from_turn(turn, role='reviewer')
+        failure = _failure_reason(turn, value) or turn.interruption
+        actionable = (not failure and not value.parse_error and value.status in {'continue','blocked'}
+                      and bool(value.gaps or value.blockers) and not value.issue_resolutions)
+        record.watcher_result['repair_preflight'] = {
+            'status':'changes_required' if actionable else 'ready' if _accepted(value) and not failure else 'invalid',
+            'tree':record.tree, 'context_digest':context_digest, 'output_file':turn.output_path.name,
+            'summary':value.summary, 'rejected_candidates':rejected}
+        self._event('repair_preflight', round=record.index, **record.watcher_result['repair_preflight'])
+        self._write_state(self._records, 'running', 0, '', record.tree)
+        if actionable:
+            # Existing review processing records these findings without granting
+            # delivery. The next worker sees one complete repair handoff.
+            return turn
+        if failure:
+            return turn  # Authentication, stop and transport retain normal handling.
+        return None
+
+    def _reuse_module_checks(self, record, context):
+        """Carry an accepted module's exact checks into an unchanged final candidate."""
+        if (self.config.task_type != 'code' or self.config.function_dispatch or not context['final']
+                or any(item['status'] != 'accepted' for item in self.modules.items.values())
+                or self._pending_directions()
+                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
+            return False
+        previous = next((item for item in reversed(self._records) if item.role == 'worker'
+                         and item.index < record.index and item.watcher_result.get('candidate_checks')), None)
+        if previous is None:
+            return False
+        receipt = previous.watcher_result['candidate_checks']
+        old = receipt.get('context')
+        # Reporting scope changes; all execution inputs, commands and source
+        # must match. Never reuse an approval, partial result or old failed log.
+        if (not candidate_checks.valid(receipt, self.run_dir, old) or not receipt['passed']
+                or not receipt['complete'] or receipt['source_changed'] or old.get('task') is not None
+                or old.get('final') is not False):
+            return False
+        execution = lambda value: {k:v for k,v in value.items() if k not in {'round','final','module_ids'}}
+        if execution(old) != execution(context):
+            return False
+        approved = next((item for item in reversed(self._records)
+                         if item.role == 'reviewer' and item.index == previous.index
+                         and item.delivery.get('status') == 'accepted'), None)
+        if (approved is None or approved.failure or approved.interruption
+                or approved.delivery.get('status') != 'accepted'
+                or not self._candidate_approval(approved, previous)):
+            return False
+        # Keep a current-round copy so retention of older rounds cannot remove
+        # the final review's evidence. These are historical executions, not reruns.
+        import copy
+        results = copy.deepcopy(receipt['checks'])
+        copies = []
+        for index, result in enumerate(results, 1):
+            source = self.run_dir/result['log']
+            content = source.read_bytes()
+            target = self.run_dir/f'{record.index:03d}-check-{index:02d}.log'
+            if (target.exists() or target.is_symlink()
+                    or hashlib.sha256(content).hexdigest() != receipt['logs'].get(result['log'])):
+                return False
+            result['log'] = target.name
+            copies.append((target, content))
+        for target, content in copies:
+            with target.open('xb') as stream:
+                stream.write(content)
+        self._write_acceptance_snapshot(record.index, record.tree, True, results, [], False, False)
+        reused = candidate_checks.create(self.run_dir, context, {'checks':results}, True)
+        reused.update(scope_gaps=[], target_hashes={}, failures=[],
+                      reused_from={'round':previous.index,'checks_digest':receipt['digest']})
+        reused['digest'] = candidate_checks.digest({k:v for k,v in reused.items() if k != 'digest'})
+        record.watcher_result['candidate_checks'] = reused
+        self._passed_function_checks = dict(reused['passed_commands'])
+        self._delivery_tree = record.tree
+        self._event('module_checks_reused_for_final', round=record.index, from_round=previous.index, tree=record.tree)
+        return True
+
     def _prepare_candidate_checks(self, record):
         """Execute checks before review; a successful receipt survives a restart."""
         import copy
@@ -2421,6 +2554,8 @@ class Supervisor:
             self._passed_function_checks = dict(previous['passed_commands'])
             self._delivery_tree = record.tree
             self._event('candidate_checks_reused', round=record.index, tree=record.tree)
+            return
+        if not previous and self._reuse_module_checks(record, context):
             return
         if previous:
             archived = candidate_checks.archive(self.run_dir,previous)
@@ -3878,6 +4013,9 @@ class Supervisor:
                 "A person stated the requirement below. Implement it in the working directory.",
                 "Work through the original requirement module by module. A completed module uses scope=module; "
                 "only completion of ALL original modules and their integration uses scope=requirement.",
+                "Choose the earliest pending module whose prerequisites can be accepted. Hand off that bounded "
+                "module before implementing later ones; do not bundle independent unfinished modules into one repair. "
+                "Check the whole entry/caller/failure-path chain of the chosen change before claiming it complete.",
                 "Do the work yourself with tools. Do not ask the person to continue, confirm, or choose among reasonable options.",
                 "The person authorized continuous work on this requirement. Resolve routine choices yourself within that scope.",
                 "If you asked a question or requested confirmation, continue immediately using reasonable defaults; no reply is needed.",
@@ -3923,7 +4061,10 @@ class Supervisor:
                 "from the original requirement. Recheck the whole original requirement for remaining modules; "
                 "a module milestone is not completion of the entire requirement.",
                 "This is a fresh session if you do not remember earlier edits. Read the workspace before changing it.",
-                "Close every open gap. Add the missing behavior, tests, and checks.",
+                "Repair one bounded module at a time, following the saved dependency order. "
+                "Use the current module's open AUD findings as a complete repair checklist; inspect their shared "
+                "entry points, callers, cleanup and failure paths together. Keep unrelated findings in the ledger "
+                "for their own modules; do not expand this implementation to close every project-wide gap at once.",
                 "Address the named blocking findings as a bounded repair. Preserve verified behavior and unchanged "
                 "evidence; do not rewrite it simply because another round started. Run focused checks for the changed "
                 "behavior, then one relevant regression suite. Do not run equivalent full discovery commands twice "
@@ -4205,6 +4346,12 @@ class Supervisor:
             rescope['pending'] = False
             return worker  # Checks and independent review must run under the new manifest.
         review = next((r for r in reversed(records) if r.role == 'reviewer' and r.index == worker.index), None)
+        if (not self.config.function_dispatch and worker.verdict.scope == 'module'
+                and review and review.delivery.get('status') == 'accepted'):
+            # An accepted module's cached approval is not an unfinished review.
+            # Move to the next worker/final handoff instead of replaying and
+            # rejecting that same module for having no newly accepted modules.
+            return None
         if review and review.watcher_result.get('function_gate') == 'repair' and not self._check_retry_review(review):
             # Older monitors mislabeled failed checks as implementation repair.
             # Keep the submitted worker candidate, but obtain a fresh review:

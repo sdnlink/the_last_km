@@ -1377,5 +1377,8 @@ export default {
   "运行详情与更多操作": "Runtime details and more actions",
   "执行器 / 审查器": "Worker / reviewer",
   "本地资源": "Local resources",
-  "完整任务详情": "Full task details"
+  "完整任务详情": "Full task details",
+  "修复预检开始，先核对代码缺口再运行全量检查": "Repair preflight started: review code gaps before full checks",
+  "修复预检结束，正式验收尚未确认": "Repair preflight finished; delivery is not yet accepted",
+  "源码与检查输入未变，最终验收复用已通过的模块检查": "Source and check inputs unchanged; final acceptance reuses passed module checks"
 };

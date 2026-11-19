@@ -58,7 +58,7 @@ def purge_run_logs(directory: int | None) -> dict:
     if directory is not None:
         for name in sorted(os.listdir(directory)):
             if not (re.search(r'\.(?:log|jsonl)(?:\.\d+)?(?:\.gz)?$', name)
-                    or re.fullmatch(r'\d+-(?:worker|reviewer(?:-repair-\d+)?)-(?:text|prompt)\.md', name)):
+                    or re.fullmatch(r'\d+-(?:worker|reviewer(?:-repair-\d+|-preflight)?)-(?:text|prompt)\.md', name)):
                 continue
             try:
                 info = os.stat(name, dir_fd=directory, follow_symlinks=False)

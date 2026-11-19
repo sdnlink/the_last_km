@@ -61,7 +61,7 @@ from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
 from auto_moniter.publication import StagedChangesConflict, check_unborn_staging
-from auto_moniter.business_recovery import BusinessHeadChanged
+from auto_moniter.business_recovery import BusinessHeadChanged, validate_change
 from auto_moniter.project_workspace import ProjectInputsChanged
 from auto_moniter.locking import workspace_lease
 from auto_moniter.quality import Quality
@@ -487,6 +487,20 @@ class Supervisor:
         if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
             return self._finish('action_required',
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
+        if loaded:
+            published_review = self._recover_requirement_handoff(records)
+            if published_review:
+                if not self._record_follow_up(records, published_review.verdict, published_review):
+                    self._process_control(active=True)
+                    if self._stop:
+                        return self._finish('stopped', self._stop_reason, records, published_review.verdict)
+                    return self._finish('done', published_review.verdict.summary, records, published_review.verdict)
+                if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
+                    return self._finish('action_required',
+                        'Requirement cycle limit reached; committed work saved. Start a new run to continue.',
+                        records, published_review.verdict)
+            if self.requirement_cycles:
+                self._process_control()
         self._wait_project_dependencies()
         if self.project and not self._stop:
             self._sync_business_head(records)
@@ -1387,7 +1401,125 @@ class Supervisor:
             raise ProjectInputsChanged('Final project inputs need fresh review')
 
     def _begin_follow_up(self, records, review, review_record=None):
-        """Start an explicitly queued requirement or an authorized automatic follow-up.
+        if not self._record_follow_up(records, review, review_record):
+            return False
+        if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
+            self._stop = True
+            self._stop_reason = 'Next requirement not ready: requirement cycle limit reached; committed work saved. Start a new run to continue.'
+            return True
+        if not self._elaborate_requirement(records):
+            self._stop = True
+            if not self._stop_requested and not self._stop_reason.startswith('Next requirement not ready'):
+                self._stop_reason = 'Next requirement not ready: ' + self.requirements_review.get(
+                    'summary', 'Next requirement elaboration did not become ready; worker was not started.')
+            return True
+        if self.requirements_review.get('status') != 'ready':
+            self._stop = True
+            self._stop_reason = self._stop_reason or 'Next requirement review stopped before it was ready'
+        return True
+
+    def _recover_requirement_handoff(self, records):
+        """Recover final bookkeeping from the published audit pair and saved check receipt."""
+        history = self.git_history
+        if (self.config.workflow != 'review-first' or self.config.no_review
+                or self.config.function_dispatch or self.project
+                or not getattr(history, 'business_commits', False)):
+            return None
+        worker = next((record for record in reversed(records) if record.role == 'worker'), None)
+        if not worker or worker.verdict.scope != 'requirement':
+            return None
+        if self.requirement_cycles and worker.index <= self.requirement_cycles[-1]['handoff']['round']:
+            return None
+        review = next((record for record in reversed(records)
+                       if record.role == 'reviewer' and record.index == worker.index), None)
+        publication = history.last_business_commit
+        if (not review or review.verdict.scope != 'requirement'
+                or (history.last_record.get('round') != worker.index
+                    and publication.get('round') != worker.index
+                    and not review.git_checkpoint.get('business_commit'))):
+            return None
+
+        history.verify()
+        checkpoint = history.last_record
+        if (not checkpoint or checkpoint.get('round') != worker.index
+                or checkpoint.get('commit') != history.head
+                or checkpoint != review.git_checkpoint or history.last_worker != worker.git_checkpoint
+                or checkpoint.get('business_commit') != publication
+                or history.last_worker.get('business_commit') != publication
+                or publication.get('round') != worker.index
+                or not publication.get('commit') or not publication.get('candidate_tree')):
+            raise RecoveryError('Published requirement does not match the saved Git checkpoints')
+
+        path = (self.config.cwd.relative_to(history.root) / checkpoint['record']).as_posix()
+        audit_record = json.loads(history.git('show', history.head + ':' + path))
+        result = audit_record['result']
+        saved_approval = result.get('watcher_result', {}).get('candidate_approval')
+        if (audit_record.get('role') != 'reviewer' or audit_record.get('round') != worker.index
+                or audit_record.get('before') != history.last_worker['commit']
+                or result.get('tree') != worker.tree or result.get('business_commit') != publication
+                or not isinstance(saved_approval, dict)
+                or saved_approval != review.watcher_result.get('candidate_approval')
+                or not isinstance(saved_approval.get('context'), dict)):
+            raise RecoveryError('Published requirement does not match the immutable review record')
+
+        published_head = {key: publication[key] for key in ('ref', 'commit')}
+        saved_context = saved_approval['context']
+        published_update_count = saved_context.get('business_update_count')
+        if (published_head != history.business_head and not history.candidate
+                and self._business_input.get('after') == history.business_head
+                and type(published_update_count) is int
+                and 0 <= published_update_count < self._business_update_count):
+            # Reconciliation clears the candidate. This also covers a restart
+            # after the new business input was saved but before a Worker ran.
+            validate_change(history.git, published_head, history.business_head)
+            return None
+
+        context = self._candidate_check_context(worker)
+        direction_ids = saved_context.get('direction_ids')
+        if (not isinstance(direction_ids, list)
+                or direction_ids != context['direction_ids'][:len(direction_ids)]):
+            raise RecoveryError('Published requirement does not match the saved direction history')
+        old_checks = saved_context.get('configured_checks')
+        current_checks = context['configured_checks']
+        if not isinstance(old_checks, list) or old_checks != current_checks[:len(old_checks)]:
+            raise RecoveryError('Published requirement does not match the saved acceptance check history')
+        added_checks = current_checks[len(old_checks):]
+        if added_checks:
+            recorded_additions = [command for change in self._check_changes for command in change['added']]
+            if added_checks != recorded_additions[-len(added_checks):]:
+                raise RecoveryError('New acceptance checks are missing their saved addition record')
+
+        # Git binds the receipt to the configuration used at publication.
+        # Resume has already authorized any new role assignment independently.
+        approval = self._verified_candidate_approval(review, worker, saved_context)
+        receipt = worker.watcher_result.get('candidate_checks')
+        resume_fields = {'provider_config', 'worker_model', 'reviewer_model', 'direction_ids',
+                         'configured_checks', 'commands', 'check_timeout_s'}
+        if (published_head != history.business_head
+                or publication['candidate_tree'] != history.candidate.get('commit')
+                or history.git('rev-parse', publication['commit'] + '^{tree}').decode().strip()
+                    != history.candidate.get('business_tree')
+                or not approval or {**approval.to_dict(), 'modules': []} != review.verdict.to_dict()
+                or any(saved_context.get(key) != value for key, value in context.items() if key not in resume_fields)
+                or not saved_context.get('final') or not receipt['passed']
+                or not _accepted(worker.verdict) or worker.tree != review.tree
+                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree
+                or self.modules.coverage(worker.verdict, approval) or self.audit.pending()
+                or self.requirements_review.get('status') != 'ready'
+                or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
+            raise RecoveryError('Published requirement does not match the saved candidate, approval or checks')
+
+        self._delivery_tree = worker.tree
+        review.delivery = {'status': 'accepted', 'reasons': []}
+        self.modules.accept(worker.verdict, approval, worker.index, worker.tree)
+        if (direction_ids != context['direction_ids'] or self._pending_directions()
+                or added_checks or saved_context['commands'] != context['commands']
+                or saved_context.get('check_timeout_s') != context['check_timeout_s']):
+            return None
+        return review
+
+    def _record_follow_up(self, records, review, review_record):
+        """Save an explicitly queued requirement or an authorized automatic follow-up.
 
         A jointly accepted requirement still finishes the run unless the original
         request asks to continue, or the person queued a concrete requirement. Repair
@@ -1402,24 +1534,12 @@ class Supervisor:
             return False
         self._close_follow_up_sessions()
         with self.directions.lock():
+            if self._pending_directions():
+                return False
             queued = self.requirement_queue.snapshot(self._requirement_queue_state())['waiting']
             if not queued and not requirements_review.requests_follow_up(self.config.requirement):
                 return False
             self._save_requirement_handoff(records, review, review_record, queued[0] if queued else None)
-        if len(self.requirement_cycles) >= requirements_review.MAX_CYCLES:
-            self._stop = True
-            self._stop_reason = 'Next requirement not ready: requirement cycle limit reached; committed work saved. Start a new run to continue.'
-            return True
-        if not self._elaborate_requirement(records):
-            self._stop = True
-            if not self._stop_requested and not self._stop_reason.startswith('Next requirement not ready'):
-                self._stop_reason = 'Next requirement not ready: ' + self.requirements_review.get(
-                    'summary', 'Next requirement elaboration did not become ready; worker was not started.')
-            return True
-        if self.requirements_review.get('status') != 'ready':
-            self._stop = True
-            self._stop_reason = self._stop_reason or 'Next requirement review stopped before it was ready'
-            return True
         return True
 
     def _requirement_queue_state(self):
@@ -1438,6 +1558,10 @@ class Supervisor:
             'acceptance': self.config.acceptance,
             'modules': self.modules.export(),
         }
+        if review_record is not None:
+            approval = review_record.watcher_result.get('candidate_approval', {})
+            if approval.get('checks_digest'):
+                handoff['checks_digest'] = approval['checks_digest']
         if self.active_queued_requirement or next_queued:
             handoff['queued_requirement'] = self.active_queued_requirement
             handoff['next_queued_requirement'] = next_queued['id'] if next_queued else None
@@ -1840,6 +1964,10 @@ class Supervisor:
                 self.project.mark_reviewed(project_signature)
                 self._project_replan = False
             self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
+            if follow_up and not self.config.function_dispatch and brief['status'] == 'ready':
+                # The run checkpoint is authoritative on resume. Save it before
+                # publishing the separate brief so a ready plan is not reviewed twice.
+                self._write_state(records, 'running', 0, '', before)
             write_json(self.run_dir/'reviewed-requirement.json',safe(brief),durable=True)
             self._event('requirements_reviewed',status=brief['status'])
             return brief['status']=='ready'
@@ -2665,13 +2793,18 @@ class Supervisor:
             approval['invalidated'] = list(reasons)
 
     def _candidate_approval(self, record, worker):
+        approval = self._verified_candidate_approval(record, worker, self._candidate_check_context(worker))
+        if (not approval or workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) != worker.tree
+                or self._pending_directions()):
+            return None
+        return approval
+
+    def _verified_candidate_approval(self, record, worker, context):
         approval = record.watcher_result.get('candidate_approval')
         receipt = worker.watcher_result.get('candidate_checks')
         if (not isinstance(approval,dict) or approval.get('invalidated') or not isinstance(approval.get('review'),dict)
-                or not candidate_checks.valid(receipt,self.run_dir,self._candidate_check_context(worker))
-                or approval.get('context') != receipt['context'] or approval.get('checks_digest') != receipt['digest']
-                or workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) != worker.tree
-                or self._pending_directions()):
+                or not candidate_checks.valid(receipt,self.run_dir,context)
+                or approval.get('context') != receipt['context'] or approval.get('checks_digest') != receipt['digest']):
             return None
         value = parse_verdict(json.dumps(approval['review']),function_gate=self._function_gate)
         return value if (not value.parse_error and (_accepted(value) or value.task_status=='accepted')

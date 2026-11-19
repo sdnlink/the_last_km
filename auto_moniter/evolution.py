@@ -38,6 +38,7 @@ from auto_moniter.workspace import LockError, file_lock
 # Keep the recovery command from this controller available across a source
 # fast-forward or rollback. The command starts the server from the target tree.
 _RECOVERY_RESTART = (Path(__file__).resolve().parents[1]/'console'/'restart.py').read_text(encoding='utf-8')
+_MISSING_MONITOR_STATE = 'Previously observed evolution Supervisor checkpoint is missing'
 
 
 def git(cwd, *args):
@@ -103,7 +104,7 @@ class Evolution:
         self.log=log or (lambda text:print(text,flush=True))
         self.stop=threading.Event()
         self._shared_budget_started=shared_budget_started
-        self._automatic_recovery_started=None
+        self._automatic_recovery=(None,None)
         self.started=time.monotonic() if shared_budget_started is None else shared_budget_started
         self.record={}
         self.path=None
@@ -320,8 +321,12 @@ class Evolution:
             raise ValueError('Evolution changed files outside monitor implementation, tests and documentation')
         return tip
 
-    def _promote(self,candidate, *, recovering=False):
+    def _promote(self,candidate, *, recovering=False, recovery_started=None):
         with workspace_lease(self.source), file_lock(self.source/'.auto-moniter/workspace.lock'):
+            if recovering:
+                refusal=self._recovery_handoff(self.path,self.record['base'],recovery_started,candidate=candidate)
+                if refusal:
+                    return refusal
             if self._cancelled():
                 self._save('stopped',summary='Stopped before source promotion; original version retained')
                 return self.record
@@ -438,7 +443,7 @@ class Evolution:
         if self.directory.is_relative_to(self.source):
             raise ValueError('Evolution state and worktrees must remain outside the source repository')
         def select(base):
-            pending,refusal,records=self._pending_cycle(base)
+            pending,refusal,attempted,previous_attempts=self._pending_cycle(base)
             if pending or refusal:
                 return None,pending,refusal
             candidates=issues(self.roots)
@@ -449,10 +454,8 @@ class Evolution:
                           'weaken acceptance, perform cosmetic churn or repeat an unchanged unsuccessful attempt. '
                           'If no improvement can be established, report that explicitly.',
                 'previous_attempts':[{'kind':old.get('issue',{}).get('kind'),'phase':old.get('phase'),
-                    'summary':str(old.get('summary',''))[:600]} for old in records[-8:]]}
-            selected=next((item for item in [*candidates,discovery] if not any(
-                old.get('base')==base and old.get('issue',{}).get('id')==item['id']
-                and old.get('phase') not in {'deferred','baseline_failed'} for old in records)),None)
+                    'summary':str(old.get('summary',''))[:600]} for old in previous_attempts]}
+            selected=next((item for item in [*candidates,discovery] if item['id'] not in attempted),None)
             return selected,None,None
         lock=self.directory/'evolution.lock'
         if lock.is_symlink() or (lock.exists() and not lock.is_file()):
@@ -500,11 +503,13 @@ class Evolution:
             if pending is None:
                 return self._run(selected,base)
         # Recovery rechecks history after acquiring the same non-reentrant lock.
-        previous_start,self._automatic_recovery_started=self._automatic_recovery_started,entered
+        previous_recovery=self._automatic_recovery
+        observed_directory=pending['directory'] if pending.get('monitor_state_observed') else None
+        self._automatic_recovery=(entered,observed_directory)
         try:
             outcome=self.recover(pending['directory'],allow_implementation=True)
         finally:
-            self._automatic_recovery_started=previous_start
+            self._automatic_recovery=previous_recovery
         if self._shared_budget_started is not None:
             # The old grant may already exclude other cycles from the previous
             # CLI invocation. Finish that cycle without issuing any new grant.
@@ -523,11 +528,9 @@ class Evolution:
         return phase in {'selected','baseline','implementing','reviewed','validating','candidate',
                          'ready','promoting','activating','rolling_back','recovery_required'}
 
-    def _continuation_barrier(self, context, *, check_locks):
-        """Inspect refusal evidence without changing checkpoint accounting or files."""
-        directory=context['directory']
+    @staticmethod
+    def _continuation_control(directory, record):
         monitor=directory/'monitor'
-        record=context['record']
         if monitor.is_symlink() or (monitor.exists() and not monitor.is_dir()):
             raise ValueError('Unsafe evolution monitor directory')
         actions=set()
@@ -538,10 +541,22 @@ class Evolution:
                 actions.add(read_control(path).get('action'))
             except ValueError as exc:
                 return 'deferred',str(exc)
-        if self.stop.is_set() or record['phase']=='stopped' or 'stop' in actions:
+        if record['phase']=='stopped' or 'stop' in actions:
             return 'stopped','Explicit stop or exhausted cycle retained; automatic continuation disabled'
         if record.get('paused') is True or 'pause' in actions:
             return 'deferred','Explicit pause retained; automatic continuation disabled'
+
+    def _continuation_barrier(self, context, *, check_locks, account_usage=False, recovery_started=None,
+                              require_monitor_state=False):
+        """Inspect refusal evidence without writing checkpoints or other files."""
+        directory=context['directory']
+        monitor=directory/'monitor'
+        record=context['record']
+        control=self._continuation_control(directory,record)
+        if control:
+            return control
+        if self.stop.is_set():
+            return 'stopped','Stop requested; automatic continuation disabled'
 
         for name in ('supervisor.lock','guardian.lock'):
             path=monitor/name
@@ -556,6 +571,8 @@ class Evolution:
             state=_object(state_path) if state_path.exists() or state_path.is_symlink() else None
         except CheckpointError as exc:
             raise ValueError('Invalid evolution Supervisor checkpoint or execution settings: '+str(exc)) from exc
+        if state is None and (require_monitor_state or context.get('monitor_state_observed')):
+            return 'deferred',_MISSING_MONITOR_STATE
         try:
             report=_object(report_path) if report_path.exists() or report_path.is_symlink() else None
         except CheckpointError as exc:
@@ -592,20 +609,47 @@ class Evolution:
             raise ValueError('Pending evolution configuration or original budgets cannot be verified')
         if state is not None:
             self._validate_monitor_state(context,state)
-            calls,elapsed,runtime,call_limit=self._child_usage(monitor,state.get('usage'),usage['agent_calls'],
+            # Once read, this state must remain available through subsequent recovery checks.
+            context['monitor_state_observed']=True
+            previous_calls=usage['agent_calls']
+            if account_usage:
+                previous_calls=max(previous_calls,self.record['agent_calls'])
+            child_usage=self._child_usage(monitor,state.get('usage'),previous_calls,
                 max_runtime_s=limits['max_runtime_s'],max_agent_calls=limits['max_agent_calls'])
+            calls,elapsed,runtime,call_limit=child_usage
             if elapsed>=runtime or calls>=call_limit:
                 return 'stopped','Pending evolution Supervisor budget exhausted'
+            if account_usage:
+                self._account_child_usage(child_usage,recovery_started=recovery_started)
         if context['resume_phase']!='selected' and not context['workspace'].is_dir():
             raise ValueError('Evolution recovery worktree is missing')
         return None
 
+    def _recovery_handoff(self, path, base, recovery_started, *, candidate=None, require_monitor_state=False):
+        try:
+            context=load_checkpoint(path,self.source,purpose='inspect')
+            barrier=self._continuation_barrier(context,check_locks=True,account_usage=True,
+                                               recovery_started=recovery_started,
+                                               require_monitor_state=require_monitor_state)
+            if barrier is None and candidate is not None:
+                publication=load_checkpoint(path,self.source,purpose='promotion')
+                if publication['record']['candidate']!=candidate:
+                    raise ValueError('Evolution recovery candidate changed')
+                self._confirm_review(publication['monitor_run'],candidate)
+        except (OSError,ValueError,RecursionError,OverflowError) as exc:
+            barrier='deferred','Unverifiable evolution checkpoint: '+str(exc)
+        if barrier:
+            return self._continuation_result(base,path.parent,*barrier)
+
     def _pending_cycle(self, base, *, locking_monitor=None):
         """Select the first eligible history only after all refusal evidence is inspected."""
         pending=None
-        records=deque(maxlen=128)
+        _,observed_directory=self._automatic_recovery
+        # The prompt shows recent attempts, while deduplication covers the full base history.
+        attempted=set()
+        previous_attempts=deque(maxlen=8)
         if not self.directory.exists():
-            return None,None,[]
+            return None,None,attempted,[]
         for directory in sorted(self.directory.iterdir()):
             try:
                 if not directory.is_dir():
@@ -618,27 +662,31 @@ class Evolution:
                 issue=record.get('issue')
                 if not isinstance(issue,dict) or not isinstance(issue.get('id'),str):
                     raise ValueError('Invalid evolution checkpoint issue')
-                barrier=self._continuation_barrier(context,check_locks=directory!=locking_monitor)
+                barrier=self._continuation_barrier(context,check_locks=directory!=locking_monitor,
+                    require_monitor_state=directory==locking_monitor==observed_directory)
                 if barrier:
-                    return None,self._continuation_result(base,directory,*barrier),[]
+                    return None,self._continuation_result(base,directory,*barrier),set(),[]
                 if self._continuation_cursor(context):
                     original=record['base']
                     if self._rollback_source_changed(record,base):
                         self._validate_recovery_rollback(record,record.get('candidate'))
                         return None,self._continuation_result(base,directory,'deferred',
-                            'Evolution rollback source is neither the candidate nor the saved rollback commit'),[]
+                            'Evolution rollback source is neither the candidate nor the saved rollback commit'),set(),[]
                     if original['ref']!=base['ref'] or base['commit'] not in {
                             original['commit'],record.get('candidate'),record.get('rollback_commit')}:
                         raise ValueError('Pending evolution source identity advanced; checkpoint retained')
                     if pending is None:
                         pending=context
-                records.append(record)
+                phase=record['phase']
+                if record['base']==base and phase not in {'deferred','baseline_failed'}:
+                    attempted.add(issue['id'])
+                previous_attempts.append(record)
             except (OSError,ValueError,RecursionError,OverflowError) as exc:
                 if locking_monitor is not None:
                     raise
                 refusal=self._continuation_result(base,directory,'deferred','Unverifiable evolution checkpoint: '+str(exc))
-                return None,refusal,[]
-        return pending,None,list(records)
+                return None,refusal,set(),[]
+        return pending,None,attempted,list(previous_attempts)
 
     def _validate_recovery_checks(self, context):
         record=context['record']
@@ -754,7 +802,8 @@ class Evolution:
             if context['phase'] not in _PROMOTION:
                 raise ValueError('Evolution does not have a recoverable promotion; implementation recovery is disabled')
         shared_budget=self._shared_budget_started is not None
-        entered=self._shared_budget_started if shared_budget else self._automatic_recovery_started
+        automatic_started,_=self._automatic_recovery
+        entered=self._shared_budget_started if shared_budget else automatic_started
         if entered is None:
             entered=time.monotonic()
         with file_lock(self.directory/'evolution.lock'), ExitStack() as budget:
@@ -764,7 +813,7 @@ class Evolution:
                     budget.callback(signal.signal,sig,previous_handler)
             if allow_implementation:
                 base=self._identity()
-                context,refusal,_=self._pending_cycle(base,locking_monitor=directory)
+                context,refusal,_,_=self._pending_cycle(base,locking_monitor=directory)
                 if refusal:
                     return refusal
                 if context is None or context['directory']!=directory:
@@ -814,6 +863,8 @@ class Evolution:
                     self.started=entered-context['usage']['elapsed_s']
                     self._checkpoint_clock=((self.path,self.started),0)
                     state=self._recovery_monitor(context,entered=entered) if not context['legacy'] else read(monitor/'state.json')
+                    if allow_implementation and state is None and context.get('monitor_state_observed'):
+                        return self._continuation_result(base,directory,'deferred',_MISSING_MONITOR_STATE)
                     if publication or self.record.get('candidate') or state and state.get('status')=='done':
                         candidate=self._candidate(work)
                         if (publication and not candidate) or self.record.get('candidate',candidate)!=candidate:
@@ -841,11 +892,14 @@ class Evolution:
                 if state is not None and state.get('status')=='done':
                     self._confirm_review(monitor,review_commit)
                 if not publication:
+                    control=self._continuation_control(directory,self.record)
+                    if control:
+                        return self._continuation_result(base,directory,*control)
                     if self._cancelled():
                         self._save('stopped',summary='Shared runtime budget or stop reached during recovery; Supervisor retained')
                         return self.record
-                    self._save(self.record['phase'],stop_reason=self.record.get('stop_reason',''))
-                    return self._run(self.record['issue'],self.record['base'],context=context,recovery_clock=self.started)
+                    return self._run(self.record['issue'],self.record['base'],context=context,recovery_started=entered,
+                                     require_monitor_state=state is not None)
             except Exception:
                 self.path,self.record,self.started,clock=previous
                 if clock is None:
@@ -868,6 +922,10 @@ class Evolution:
                     raise ValueError('Evolution recovery check evidence changed')
             with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
                 actual=self._identity()
+                if allow_implementation:
+                    refusal=self._recovery_handoff(self.path,actual,entered,candidate=candidate)
+                    if refusal:
+                        return refusal
                 rollback=self.record.get('rollback_commit')
                 if self._rollback_source_changed(self.record,actual):
                     return self._continuation_result(actual,directory,'deferred',
@@ -916,7 +974,8 @@ class Evolution:
                 return self.record
             if advanced:
                 return self._finish_activation(candidate,recovering=allow_implementation)
-            return self._promote(candidate,recovering=allow_implementation)
+            return self._promote(candidate,recovering=allow_implementation,
+                                 recovery_started=entered if allow_implementation else None)
 
     def _validate_recovery_rollback(self, record, candidate):
         rollback=record.get('rollback_commit')
@@ -1037,36 +1096,43 @@ class Evolution:
                 or not 0<runtime<=max_runtime_s or type(call_limit) is not int
                 or not 0<call_limit<=max_agent_calls):
             raise ValueError('Cannot verify evolution Supervisor usage and remaining budget')
+        heartbeat_path=monitor/'heartbeat'
         try:
-            heartbeat=read(monitor/'heartbeat')
-        except FileNotFoundError:
-            heartbeat={}
-        try:
-            last_tick=datetime.fromisoformat(heartbeat['at'])
             recorded=datetime.fromisoformat(usage['recorded_at'])
-            elapsed+=max(0,(last_tick-recorded).total_seconds())
-        except (KeyError,ValueError,TypeError):
-            pass  # Match Supervisor: absent timestamps prove no additional active time.
+            if recorded.tzinfo is None:
+                raise ValueError('Missing timestamp timezone')
+            try:
+                heartbeat_path.lstat()
+            except FileNotFoundError:
+                pass  # A missing heartbeat proves no additional active time.
+            else:
+                last_tick=datetime.fromisoformat(_object(heartbeat_path)['at'])
+                elapsed+=max(0,(last_tick-recorded).total_seconds())
+        except (KeyError,ValueError,TypeError,OverflowError) as exc:
+            raise ValueError('Invalid evolution Supervisor budget timestamp evidence') from exc
         if not math.isfinite(elapsed):
             raise ValueError('Invalid evolution Supervisor cumulative runtime')
         return calls,elapsed,runtime,call_limit
 
     def _cycle_account_usage(self, monitor, usage, *, recovery_started=None):
-        calls,elapsed,runtime,call_limit=self._child_usage(monitor,usage,self.record.get('agent_calls',0),
+        child_usage=self._child_usage(monitor,usage,self.record.get('agent_calls',0),
             max_runtime_s=self.config.max_runtime_s,max_agent_calls=self.config.max_agent_calls)
+        self._account_child_usage(child_usage,recovery_started=recovery_started)
+        return child_usage
+
+    def _account_child_usage(self, child_usage, *, recovery_started):
+        calls,elapsed,runtime,_=child_usage
         self.record['agent_calls']=calls
         child_spent=self.config.max_runtime_s-runtime+elapsed
         if recovery_started is not None:
-            # Reconcile overlapping historical evidence before adding this invocation's time.
-            historical_spent=max(self.record['usage']['elapsed_s'],child_spent)
-            self.started=recovery_started-historical_spent
+            # The existing clock already includes the saved outer history and any earlier child evidence.
+            self.started=min(self.started,recovery_started-child_spent)
         else:
             # During execution the child grant already reflects time spent this invocation.
             self.started=min(self.started,time.monotonic()-child_spent)
         self._checkpoint_clock=((self.path,self.started),0)
-        return calls,elapsed,runtime,call_limit
 
-    def _run(self,issue,base,*,context=None,recovery_clock=None):
+    def _run(self,issue,base,*,context=None,recovery_started=None,require_monitor_state=False):
         if context is None:
             ident=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:8]
             directory=self.directory/ident
@@ -1082,13 +1148,15 @@ class Evolution:
                     or restored['phase'] in {'baseline_failed','candidate_failed','rejected'}
                     or not self._cycle_config_matches(restored['config_identity'])):
                 raise ValueError('Evolution cycle identity, configuration or resumable phase does not match')
+            calls=self.record['agent_calls'] if recovery_started is not None else restored['usage']['agent_calls']
             self.path=restored['path']
             self.record=restored['record']
             self.record['usage']=restored['usage']
+            self.record['agent_calls']=max(calls,restored['usage']['agent_calls'])
             directory=restored['directory']
             ident=directory.name
-            self.started=(time.monotonic()-restored['usage']['elapsed_s']
-                          if recovery_clock is None else recovery_clock)
+            if recovery_started is None:
+                self.started=time.monotonic()-restored['usage']['elapsed_s']
             self._checkpoint_clock=((self.path,self.started),0)
         work=directory/'workspace'
         monitor=directory/'monitor'
@@ -1100,9 +1168,19 @@ class Evolution:
             if context is None:
                 self._save('selected')
             with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
+                if recovery_started is not None:
+                    refusal=self._recovery_handoff(self.path,base,recovery_started,
+                                                   require_monitor_state=require_monitor_state)
+                    if refusal:
+                        return refusal
+                    if self._cancelled():
+                        self._save('stopped',summary='Shared runtime budget or stop reached during recovery; Supervisor retained')
+                        return self.record
                 if self._identity()!=base or not self._clean(self.source):
                     self._save('deferred',summary='Source is busy or changed; no upgrade was attempted')
                     return self.record
+                if recovery_started is not None:
+                    self._save(self.record['phase'],stop_reason=self.record.get('stop_reason',''))
                 if not work.exists():
                     if work.is_symlink() or (context is not None and restored['resume_phase']!='selected'):
                         raise ValueError('Evolution implementation worktree is missing; preserve its checkpoint')
@@ -1121,14 +1199,18 @@ class Evolution:
             if git(work,'symbolic-ref','-q','HEAD')!='refs/heads/evolution/'+ident:
                 raise ValueError('Evolution implementation branch changed')
             snapshot=None
-            state=None
-            if (monitor/'state.json').exists():
+            try:
                 state=read(monitor/'state.json')
+            except FileNotFoundError:
+                if require_monitor_state:
+                    return self._continuation_result(base,directory,'deferred',_MISSING_MONITOR_STATE)
+                state=None
+            if state is not None:
                 snapshot=read_run_snapshot(monitor)
                 if snapshot['lock_held'] is not False or snapshot['guardian_lock_held'] is not False:
                     raise LockError('Evolution monitor is active or its lock ownership is unknown')
                 usage=state.get('usage',{})
-                calls,elapsed,runtime,call_limit=self._cycle_account_usage(monitor,usage)
+                calls,elapsed,runtime,call_limit=self._cycle_account_usage(monitor,usage,recovery_started=recovery_started)
             baseline=directory/'baseline-verification'
             if not self._cycle_checks_reusable('baseline',base['commit'],(work,baseline),
                                                record=self.record,directory=directory):
@@ -1163,7 +1245,10 @@ class Evolution:
                 resume=state is not None,checks=['git diff --check'],quality_policy={'protect_tests':True},
                 max_runtime_s=child_runtime,max_agent_calls=call_limit if state is not None else self.config.max_agent_calls)
             resumable_statuses={'running','stopped','blocked','budget_exceeded','recovery_failed','action_required'}
-            if snapshot is not None and snapshot['finished'] and snapshot['state']['status'] not in resumable_statuses:
+            reused_outcome=(snapshot is not None and snapshot['finished']
+                            and snapshot['state']['status'] not in resumable_statuses)
+            child_recovery_started=recovery_started if reused_outcome else None
+            if reused_outcome:
                 report_status=snapshot['state']['status']
                 report_summary=snapshot['state']['summary']
             else:
@@ -1172,6 +1257,10 @@ class Evolution:
                 if state is not None and calls>=config.max_agent_calls:
                     self._save('stopped',agent_calls=calls,summary='Shared agent-call budget exhausted; Supervisor retained')
                     return self.record
+                if recovery_started is not None:
+                    control=self._continuation_control(directory,self.record)
+                    if control:
+                        return self._continuation_result(base,directory,*control)
                 self._save('implementing',monitor_run=str(config.run_dir))
                 if context is not None and self._cancelled():
                     self._save('stopped',summary='Shared runtime budget or stop reached before Supervisor dispatch')
@@ -1180,7 +1269,7 @@ class Evolution:
                 report_status,report_summary=report.status,report.summary
             usage=read(config.run_dir/'state.json').get('usage',{}) if (config.run_dir/'state.json').exists() else {}
             if usage or state is not None:
-                self._cycle_account_usage(config.run_dir,usage)
+                self._cycle_account_usage(config.run_dir,usage,recovery_started=child_recovery_started)
             self._save('reviewed',monitor_run=str(config.run_dir),monitor_status=report_status,agent_calls=usage.get('agent_calls',0))
             if self._cancelled():
                 self._save('stopped',summary='Shared runtime budget or stop reached after Supervisor; candidate retained')
@@ -1209,7 +1298,7 @@ class Evolution:
                 raise ValueError('Evolution source changed during independent regression')
             self._save('ready',candidate=candidate)
             if context is not None:
-                return self._promote(candidate,recovering=True)
+                return self._promote(candidate,recovering=True,recovery_started=child_recovery_started)
             return self._promote(candidate)
         except LockError as exc:
             self._save('deferred',summary=str(exc))

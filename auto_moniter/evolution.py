@@ -599,6 +599,19 @@ class Evolution:
             return None
         if check_locks:
             self._require_monitor_checkpoint(monitor)
+        if state is None:
+            cursor=context['resume_phase']
+            work=context['workspace']
+            # ApprovedHistory pins the child run's input before any model call,
+            # so even a no-change run leaves a ref outside the monitor directory.
+            work_key=hashlib.sha256(os.fsencode(monitor.resolve())).hexdigest()[:20]
+            work_ref='refs/auto-moniter-work/'+work_key
+            if (cursor not in {'selected','baseline','implementing'} or usage['agent_calls']
+                    or 'monitor_status' in record or 'candidate' in record
+                    or work_ref in git(self.source,'for-each-ref','--format=%(refname)',work_ref).splitlines()
+                    or (cursor=='implementing' and work.is_dir()
+                        and git(work,'rev-parse','HEAD')!=record['base']['commit'])):
+                return 'deferred','Expected evolution Supervisor checkpoint is missing'
         if any(status not in ('running','done') for status in statuses):
             return 'deferred','Evolution Supervisor requires explicit recovery: '+str(statuses[0])
         if (report is not None and (state is None or state.get('status')!=report['status'])

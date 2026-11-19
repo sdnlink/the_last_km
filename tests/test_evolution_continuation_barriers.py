@@ -12,6 +12,7 @@ from auto_moniter.evolution import git
 from auto_moniter.storage import write_json
 from auto_moniter.workspace import file_lock
 from tests import test_evolution_phase_execution as phase_fixtures
+from tests import test_evolution_recover_phases as recovery_fixtures
 
 
 class EvolutionContinuationBarrierTests(unittest.TestCase):
@@ -306,6 +307,96 @@ class EvolutionContinuationBarrierTests(unittest.TestCase):
         self.assertFalse(config.resume)
         self.assertEqual(config.run_dir, monitor)
         self.phases.assert_promoted_once(fixture, engine, result, record)
+
+    def test_implementing_cycle_can_start_its_first_supervisor(self):
+        fixture = self.phases.fixture()
+        record = self.phases.interrupt(fixture, 'implementing')
+        engine, _ = self.phases.resumer(fixture)
+        monitor = record.parent / 'monitor'
+        self.assertFalse(monitor.exists())
+        self.assertEqual(engine.run(plan_only=True)['action'], 'recover')
+
+        with patch('auto_moniter.evolution.Supervisor', wraps=phase_fixtures.Supervisor) as supervisor:
+            result = engine.run()
+
+        supervisor.assert_called_once()
+        self.assertFalse(supervisor.call_args.args[0].resume)
+        self.assertEqual(supervisor.call_args.args[0].run_dir, monitor)
+        self.phases.assert_promoted_once(fixture, engine, result, record)
+
+    def test_missing_completed_supervisor_before_selection_defers_recovery(self):
+        for stage in ('reviewed', 'validating', 'implementing'):
+            with self.subTest(stage=stage):
+                fixture = self.phases.fixture()
+                if stage == 'implementing':
+                    self.phases.finished_child(fixture)
+                    record = fixture.engine.path
+                else:
+                    record = self.phases.interrupt(fixture, stage)
+                monitor = record.parent / 'monitor'
+                archived = monitor.with_name('monitor-retained')
+                state = (monitor / 'state.json').read_bytes()
+                self.assertEqual(json.loads(state)['status'], 'done')
+                monitor.rename(archived)
+                before = record.read_bytes()
+                refs = git(fixture.source, 'show-ref')
+
+                for plan_only in (True, False):
+                    with self.subTest(plan_only=plan_only):
+                        engine, _ = self.phases.resumer(fixture)
+                        with patch.object(engine, '_recovery_quiesce',
+                                          side_effect=AssertionError('cleanup started')) as cleanup, \
+                             patch('auto_moniter.evolution.Supervisor',
+                                   side_effect=AssertionError('Supervisor dispatched')) as supervisor:
+                            result = engine.run(plan_only=plan_only)
+                        cleanup.assert_not_called()
+                        supervisor.assert_not_called()
+                        self.assertEqual(result['phase'], 'deferred', result)
+                        self.assertIn('Supervisor checkpoint is missing', result['summary'])
+                        self.assertEqual(record.read_bytes(), before)
+                        self.assertEqual((archived / 'state.json').read_bytes(), state)
+                        self.assertFalse(monitor.exists())
+                        self.assertEqual(list(engine.directory.glob('*/evolution.json')), [record])
+                        self.assertEqual(git(fixture.source, 'show-ref'), refs)
+                        self.assertEqual(git(fixture.source, 'rev-parse', 'HEAD'), fixture.base)
+
+    def test_missing_completed_no_change_supervisor_defers_recovery(self):
+        recovery = recovery_fixtures.EvolutionRecoveryPhaseTests()
+        recovery.phases = self.phases
+        fixture = self.phases.fixture()
+        monitor = recovery.completed_no_change(fixture)
+        record = fixture.engine.path
+        before = record.read_bytes()
+        saved = json.loads(before)
+        self.assertEqual(saved['resume_phase'], 'implementing')
+        self.assertEqual(saved['usage']['agent_calls'], 0)
+        self.assertEqual(git(monitor.parent / 'workspace', 'rev-parse', 'HEAD'), fixture.base)
+        history = json.loads((monitor / 'git-history.json').read_bytes())
+        self.assertEqual(git(fixture.source, 'rev-parse', '--verify', history['work_ref']), history['work_head'])
+        evidence = {name: (monitor / name).read_bytes() for name in ('state.json', 'report.json')}
+        self.assertEqual(json.loads(evidence['state.json'])['status'], 'done')
+        archived = monitor.with_name('monitor-retained')
+        monitor.rename(archived)
+        refs = git(fixture.source, 'show-ref')
+
+        for plan_only in (True, False):
+            with self.subTest(plan_only=plan_only):
+                engine, _ = self.phases.resumer(fixture)
+                with patch.object(engine, '_recovery_quiesce',
+                                  side_effect=AssertionError('cleanup started')) as cleanup, \
+                     patch('auto_moniter.evolution.Supervisor',
+                           side_effect=AssertionError('Supervisor dispatched')) as supervisor:
+                    result = engine.run(plan_only=plan_only)
+                cleanup.assert_not_called()
+                supervisor.assert_not_called()
+                self.assertEqual(result['phase'], 'deferred', result)
+                self.assertIn('Supervisor checkpoint is missing', result['summary'])
+                self.assertEqual(record.read_bytes(), before)
+                self.assertEqual({name: (archived / name).read_bytes() for name in evidence}, evidence)
+                self.assertFalse(monitor.exists())
+                self.assertEqual(list(engine.directory.glob('*/evolution.json')), [record])
+                self.assertEqual(git(fixture.source, 'show-ref'), refs)
+                self.assertEqual(git(fixture.source, 'rev-parse', 'HEAD'), fixture.base)
 
     def test_removed_supervisor_at_early_recovery_locks_defers_dispatch(self):
         for lock_kind, target_acquisition in (('cycle', 2), ('source', 1)):

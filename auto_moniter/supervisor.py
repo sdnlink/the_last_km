@@ -815,9 +815,13 @@ class Supervisor:
                         )
                     if _accepted(verdict) and not worker_problems and verdict.scope == "module":
                         if self._delivery_checks(round_index, verdict, final=False, expected_tree=tree):
-                            self.modules.accept(verdict, None, round_index, tree)
-                            self._complete_module(verdict)
+                            accepted_ids = self.modules.accept(verdict, None, round_index, tree)
+                            self._complete_module(verdict, accepted_ids, round_index)
+                            last_worker, last_review = verdict, None
+                            stall, previous_gap_key, previous_tree = 0, "", tree
+                            self._write_state(records, "running", stall, previous_gap_key, tree)
                             self.log(f"round {round_index}: module completed; continuing original requirement")
+                            continue
                     if _accepted(verdict) and worker_problems:
                         verdict.status = "continue"
                         verdict.gaps.extend(worker_problems)
@@ -1280,13 +1284,17 @@ class Supervisor:
                     joint_ids = set(verdict.module_ids) & set(review.module_ids)
                     if self._candidate_delivery_gate(record, review, final=False, module_ids=joint_ids) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
                         review_record.delivery = {'status': 'accepted', 'reasons': []}
-                        self.modules.accept(verdict, review, round_index, review_tree)
+                        accepted_ids = self.modules.accept(verdict, review, round_index, review_tree)
                         if next_functions is not None:
                             self._advance_function(next_functions, review_record)
                         review.scope = "module"
                         review.module_ids = sorted(joint_ids)
-                        self._complete_module(review)
+                        self._complete_module(review, accepted_ids, round_index)
+                        last_worker, last_review = verdict, review
+                        stall, previous_gap_key, previous_tree = 0, "", review_tree
+                        self._write_state(records, "running", stall, previous_gap_key, review_tree)
                         self.log(f"round {round_index}: module accepted; continuing original requirement")
+                        continue
                     else:
                         review_record.verdict = review
                 if review_record.delivery['status'] == 'validating':
@@ -3732,8 +3740,10 @@ class Supervisor:
                 errors.append(f"{role} {session_id}: stop={stopped} archive={archived}")
         return errors
 
-    def _complete_module(self, verdict: Verdict) -> None:
-        self._event("module_accepted", modules=verdict.module_ids, tree=self._delivery_tree)
+    def _complete_module(self, verdict: Verdict, accepted_ids: tuple[str, ...] = (), round_index: int = 0) -> None:
+        if not accepted_ids:
+            return
+        self._event("module_accepted", modules=list(accepted_ids), round=round_index, tree=self._delivery_tree)
         errors = self._close_delivered_sessions()
         if errors:
             raise RuntimeError("Module accepted, but agent cleanup failed: " + "; ".join(errors))
@@ -3746,10 +3756,12 @@ class Supervisor:
         self._active_reviewer_id = ""
         self._drop_worker_session = False
         self._recovery_note = ""
-        new_progress = any([self.quality.milestone('module:' + key) for key in verdict.module_ids])
-        if new_progress or not self.quality.config.get('verified_progress'):
-            self._no_progress = 0
-        self._progress_reset |= new_progress
+        # A real ledger transition advances scheduling even if this module's
+        # first acceptance already recorded its historical milestone.
+        for key in accepted_ids:
+            self.quality.milestone('module:' + key)
+        self._no_progress = 0
+        self._progress_reset = False
         _continue_remaining_modules(verdict)
 
     def _write_state(

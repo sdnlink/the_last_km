@@ -121,14 +121,16 @@ class ModuleLedger:
             errors.append("No new module was jointly accepted; implement the next pending module or verify the whole requirement.")
         return errors
 
-    def accept(self, worker, reviewer, index: int, tree: str = "") -> None:
+    def accept(self, worker, reviewer, index: int, tree: str = "") -> tuple[str, ...]:
+        """Record joint acceptance and return only modules that changed state."""
         covered = set(worker.module_ids)
         if reviewer is not None:
             covered &= set(reviewer.module_ids)
-        for key in covered:
-            if key in self.items and self.items[key]["status"] != "accepted":
-                evidence = [text.encode("utf-8")[:1024].decode("utf-8", errors="ignore") for text in (reviewer or worker).evidence[:4]]
-                self.items[key].update(status="accepted", evidence=evidence, round=index, tree=tree, invalidated_reason="")
+        accepted = tuple(sorted(key for key in covered & self.items.keys() if self.items[key]["status"] == "pending"))
+        for key in accepted:
+            evidence = [text.encode("utf-8")[:1024].decode("utf-8", errors="ignore") for text in (reviewer or worker).evidence[:4]]
+            self.items[key].update(status="accepted", evidence=evidence, round=index, tree=tree, invalidated_reason="")
+        return accepted
 
     def affected(self, changed_files: list[str] | None = None) -> set[str]:
         """Missing scopes and shared files conservatively require revalidation."""

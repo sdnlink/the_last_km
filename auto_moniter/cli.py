@@ -196,19 +196,21 @@ def main(argv: list[str] | None = None) -> int:
             started=time.monotonic()
             used=0
             results=[]
-            for _ in range(args.cycles):
-                remaining=limit-(time.monotonic()-started)
+            for index in range(args.cycles):
+                cycle_started=started if index==0 else time.monotonic()
+                remaining=limit-(cycle_started-started)
                 if remaining<=0 or used>=args.max_agent_calls:
                     break
                 config=RunConfig('',args.cwd,resolve_provider(args.provider),
                     reviewer=resolve_provider(args.reviewer,role='reviewer'),model=args.model,
                     reviewer_model=args.reviewer_model,max_runtime_s=remaining,
                     max_agent_calls=args.max_agent_calls-used)
-                engine=Evolution(config,evidence_roots=args.evidence_root,log=lambda msg:print(msg,file=sys.stderr,flush=True))
+                engine=Evolution(config,evidence_roots=args.evidence_root,shared_budget_started=cycle_started,
+                    log=lambda msg:print(msg,file=sys.stderr,flush=True))
                 result=engine.recover(args.recover) if args.recover else engine.run(plan_only=args.plan_only)
                 results.append(result)
                 used+=result.get('agent_calls',0)
-                if args.plan_only or args.recover or result['phase'] in {'idle','deferred','stopped','baseline_failed','recovery_required','rolled_back','rollback_activation_failed'}:
+                if args.plan_only or args.recover or result.get('resumed') or result['phase'] in {'idle','deferred','stopped','baseline_failed','recovery_required','rolled_back','rollback_activation_failed'}:
                     break
             print(json.dumps(safe({'cycles':results,'agent_calls':used,'elapsed_s':round(time.monotonic()-started,3)}),ensure_ascii=False,indent=2))
             return 0 if results and results[-1]['phase'] in {'promoted','planned','idle','no_change'} else 1

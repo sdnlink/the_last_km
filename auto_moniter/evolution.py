@@ -21,18 +21,23 @@ from types import SimpleNamespace
 import uuid
 
 from auto_moniter.control import read_control
-from auto_moniter.evolution_checkpoint import CheckpointError, _object, load_checkpoint
+from auto_moniter.evolution_checkpoint import CheckpointError, _PROMOTION, _bytes, _object, load_checkpoint
 from auto_moniter.health import _lock_held, read_run_snapshot, valid_report
 from auto_moniter.locking import workspace_lease
 from auto_moniter.paths import private_directory, project_runs_dir
 from auto_moniter.providers import PreparedCommand
-from auto_moniter.processes import process_identity, _members
+from auto_moniter.processes import process_identity, reap_background, _members
 from auto_moniter.quality import test_asset, policy as quality_policy
 from auto_moniter.redaction import safe
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor, run_command, _EXECUTION_DEFAULTS
 from auto_moniter.supervisor import Supervisor as _RecoverySupervisor
 from auto_moniter.workspace import LockError, file_lock
+
+
+# Keep the recovery command from this controller available across a source
+# fast-forward or rollback. The command starts the server from the target tree.
+_RECOVERY_RESTART = (Path(__file__).resolve().parents[1]/'console'/'restart.py').read_text(encoding='utf-8')
 
 
 def git(cwd, *args):
@@ -89,14 +94,17 @@ def issues(roots):
 
 
 class Evolution:
-    def __init__(self, config: RunConfig, *, evidence_roots=(), directory=None, log=None):
+    def __init__(self, config: RunConfig, *, evidence_roots=(), directory=None, log=None,
+                 shared_budget_started=None):
         self.source=config.cwd.resolve()
         self.config=config
         self.directory=Path(directory or project_runs_dir(self.source).parent/'evolution').resolve()
         self.roots=list(evidence_roots) or [self.source/'.auto-moniter/console/runs',project_runs_dir(self.source)]
         self.log=log or (lambda text:print(text,flush=True))
         self.stop=threading.Event()
-        self.started=time.monotonic()
+        self._shared_budget_started=shared_budget_started
+        self._automatic_recovery_started=None
+        self.started=time.monotonic() if shared_budget_started is None else shared_budget_started
         self.record={}
         self.path=None
 
@@ -242,11 +250,13 @@ class Evolution:
     def _clean(self,cwd):
         return not git(cwd,'status','--porcelain=v1','--untracked-files=all')
 
-    def _checks(self):
+    def _checks(self, *, base_commit=None):
         python=shlex.quote(sys.executable)
+        if base_commit is None:
+            base_commit=self.record['base']['commit']
         commands=[python+' -m compileall -q auto_moniter console tests',
                   python+' -m unittest discover -q',python+' -m auto_moniter selftest',
-                  'git diff --check '+self.record['base']['commit']+'..HEAD']
+                  'git diff --check '+base_commit+'..HEAD']
         if list((self.source/'tests').glob('*.mjs')):
             commands.append('node --test tests/*.mjs')
         return commands
@@ -291,9 +301,9 @@ class Evolution:
                 return False
         return self._clean(cwd)
 
-    def _candidate(self,cwd):
+    def _candidate(self,cwd, *, base_commit=None):
         tip=git(cwd,'rev-parse','HEAD')
-        base=self.record['base']['commit']
+        base=self.record['base']['commit'] if base_commit is None else base_commit
         if git(cwd,'merge-base',base,tip) != base or not self._clean(cwd):
             raise ValueError('Evolution candidate is not a clean continuation of its base')
         changed=git(cwd,'diff','--name-only',base,tip).splitlines()
@@ -310,7 +320,7 @@ class Evolution:
             raise ValueError('Evolution changed files outside monitor implementation, tests and documentation')
         return tip
 
-    def _promote(self,candidate):
+    def _promote(self,candidate, *, recovering=False):
         with workspace_lease(self.source), file_lock(self.source/'.auto-moniter/workspace.lock'):
             if self._cancelled():
                 self._save('stopped',summary='Stopped before source promotion; original version retained')
@@ -323,10 +333,25 @@ class Evolution:
             if self._identity()['commit'] != candidate or not self._clean(self.source):
                 raise ValueError('Evolution promotion needs recovery; preserve both worktrees')
             self._save('activating',promoted_commit=candidate,previous_commit=self.record['base']['commit'])
-        if not self._activate():
-            return self._rollback(candidate)
+        if recovering and self._stop_before_recovery_activation():
+            return self.record
+        return self._finish_activation(candidate,recovering=recovering)
+
+    def _finish_activation(self,candidate, *, recovering):
+        ready=self._activate(recovering=True) if recovering else self._activate()
+        if ready is None:
+            self._stop_before_recovery_activation()
+            return self.record
+        if not ready:
+            return self._rollback(candidate,recovering=recovering)
         self._complete_promotion(candidate)
         return self.record
+
+    def _stop_before_recovery_activation(self):
+        if not self._cancelled():
+            return False
+        self._save('stopped',summary='Shared runtime budget or stop reached before recovery activation; source retained')
+        return True
 
     def _complete_promotion(self,candidate):
         with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
@@ -336,29 +361,48 @@ class Evolution:
                 return
             self._save('promoted',summary='Independent review, full regression and activation passed; source upgraded')
 
-    def _activate(self):
+    def _activate(self, *, recovering=False):
         data=self.source/'.auto-moniter/console'
         held=_lock_held(data/'console.lock',missing=False)
+        timeout=90
+        should_stop=self.stop.is_set
+        if recovering:
+            timeout=min(timeout,self._remaining())
+            should_stop=self._cancelled
+            if not timeout or should_stop():
+                self.record['activation']='skipped'
+                return None
         if held is False:
             self.record['activation']='next_launch'
             return True
         if held is None:
             self.record['activation']='lock_ownership_unknown'
             return False
-        result=run_command(PreparedCommand([sys.executable,'-m','console.restart',
-            '--cwd',str(self.source),'--data-dir',str(data)]),self.source,
-            timeout_s=90,should_stop=self.stop.is_set,detect_input_requests=False)
+        argv=[sys.executable,'-m','console.restart','--cwd',str(self.source),'--data-dir',str(data)]
+        launched=[]
+        handoff={}
+        if recovering:
+            driver='import sys; sys.path.insert(0, ".")\n'+_RECOVERY_RESTART
+            argv=[sys.executable,'-c',driver,*argv[3:],'--supervised-activation']
+            handoff={'keep_background_on_success':True,'on_child':launched.append}
+        result=run_command(PreparedCommand(argv),self.source,
+            timeout_s=timeout,should_stop=should_stop,detect_input_requests=False,**handoff)
+        passed=not (result.exit_code or result.timed_out or result.interruption)
+        if passed and recovering and should_stop():
+            if launched:
+                reap_background(launched[0].pid)
+            passed=False
         name='rollback-activation.log' if self.record.get('phase')=='rolling_back' else 'activation.log'
         (self.path.parent/name).write_text(result.stdout+'\n'+result.stderr)
-        passed=not (result.exit_code or result.timed_out or result.interruption)
         self.record['activation']='ready' if passed else 'failed'
         return passed
 
-    def _rollback(self,candidate):
+    def _rollback(self,candidate, *, recovering=False):
         with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
             expected={'ref':self.record['base']['ref'],'commit':candidate}
             if self._identity()!=expected or not self._clean(self.source):
-                self._save('recovery_required',summary='Activation failed; concurrent source changes prevent automatic rollback')
+                self._save('stopped' if recovering and self.stop.is_set() else 'recovery_required',
+                           summary='Activation failed; concurrent source changes prevent automatic rollback')
                 return self.record
             tree=git(self.source,'rev-parse',self.record['base']['commit']+'^{tree}')
             rollback=git(self.source,'-c','user.name=auto-moniter','-c','user.email=auto-moniter@localhost',
@@ -367,8 +411,9 @@ class Evolution:
             git(self.source,'merge','--ff-only','--no-edit',rollback)
             if self._identity()['commit']!=rollback or not self._clean(self.source):
                 raise ValueError('Evolution rollback needs recovery')
-        ready=self._activate()
-        self._save('rolled_back' if ready else 'rollback_activation_failed',
+        ready=self._activate(recovering=True) if recovering else self._activate()
+        phase='stopped' if recovering and self.stop.is_set() else 'rolled_back' if ready else 'rollback_activation_failed'
+        self._save(phase,
             summary='New version failed activation; previous source tree restored without rewriting history')
         return self.record
 
@@ -382,6 +427,7 @@ class Evolution:
             raise ValueError('Evolution candidate lacks final watcher confirmation for its exact commit')
 
     def run(self, *, plan_only=False):
+        entered=time.monotonic() if not plan_only else None
         if self.config.no_review or self.config.reviewer is None:
             raise ValueError('Self-evolution requires an independent reviewer')
         if self.config.max_runtime_s<=0 or self.config.max_agent_calls<=0:
@@ -421,6 +467,21 @@ class Evolution:
             if refusal:
                 return refusal
             if pending:
+                try:
+                    self._validate_recovery_checks(pending)
+                    self._validate_recovery_worktree(pending)
+                    if pending['phase'] in _PROMOTION:
+                        work=pending['workspace']
+                        record=pending['record']
+                        if not self._clean(self.source):
+                            raise ValueError('Evolution publication source has local changes')
+                        if self._candidate(work,base_commit=record['base']['commit'])!=record['candidate']:
+                            raise ValueError('Evolution recovery candidate changed')
+                        self._validate_recovery_rollback(record,record['candidate'])
+                    else:
+                        self._validate_recovery_source(pending['record'])
+                except (OSError, ValueError) as exc:
+                    return self._continuation_result(base,pending['directory'],'deferred',str(exc))
                 return {'phase':'planned','action':'recover','base':pending['record']['base'],
                         'issue':pending['record']['issue'],'recovery_directory':str(pending['directory']),
                         'summary':'Resume the existing verified evolution cycle; read-only plan, no model called'}
@@ -439,7 +500,16 @@ class Evolution:
             if pending is None:
                 return self._run(selected,base)
         # Recovery rechecks history after acquiring the same non-reentrant lock.
-        return self.recover(pending['directory'],allow_implementation=True)
+        previous_start,self._automatic_recovery_started=self._automatic_recovery_started,entered
+        try:
+            outcome=self.recover(pending['directory'],allow_implementation=True)
+        finally:
+            self._automatic_recovery_started=previous_start
+        if self._shared_budget_started is not None:
+            # The old grant may already exclude other cycles from the previous
+            # CLI invocation. Finish that cycle without issuing any new grant.
+            return {**outcome,'resumed':True}
+        return outcome
 
     @staticmethod
     def _continuation_result(base, directory, phase, reason):
@@ -510,16 +580,20 @@ class Evolution:
                 return 'stopped','Pending evolution shared budget exhausted'
         if not pending:
             return None
+        if check_locks:
+            self._require_monitor_checkpoint(monitor)
         if any(status not in ('running','done') for status in statuses):
             return 'deferred','Evolution Supervisor requires explicit recovery: '+str(statuses[0])
         if (report is not None and (state is None or state.get('status')!=report['status'])
                 or state is not None and state.get('status')=='done' and report is None):
             raise ValueError('Evolution Supervisor checkpoint and final review report disagree')
-        if not context['budget_verified'] or not self._cycle_config_matches(context['config_identity']):
+        if not context['budget_verified'] or not self._cycle_config_matches(
+                context['config_identity'],allow_smaller_grant=self._shared_budget_started is not None):
             raise ValueError('Pending evolution configuration or original budgets cannot be verified')
         if state is not None:
             self._validate_monitor_state(context,state)
-            calls,elapsed,runtime,call_limit=self._child_usage(monitor,state.get('usage'),usage['agent_calls'])
+            calls,elapsed,runtime,call_limit=self._child_usage(monitor,state.get('usage'),usage['agent_calls'],
+                max_runtime_s=limits['max_runtime_s'],max_agent_calls=limits['max_agent_calls'])
             if elapsed>=runtime or calls>=call_limit:
                 return 'stopped','Pending evolution Supervisor budget exhausted'
         if context['resume_phase']!='selected' and not context['workspace'].is_dir():
@@ -549,6 +623,10 @@ class Evolution:
                     return None,self._continuation_result(base,directory,*barrier),[]
                 if self._continuation_cursor(context):
                     original=record['base']
+                    if self._rollback_source_changed(record,base):
+                        self._validate_recovery_rollback(record,record.get('candidate'))
+                        return None,self._continuation_result(base,directory,'deferred',
+                            'Evolution rollback source is neither the candidate nor the saved rollback commit'),[]
                     if original['ref']!=base['ref'] or base['commit'] not in {
                             original['commit'],record.get('candidate'),record.get('rollback_commit')}:
                         raise ValueError('Pending evolution source identity advanced; checkpoint retained')
@@ -562,34 +640,49 @@ class Evolution:
                 return None,refusal,[]
         return pending,None,list(records)
 
-    def _recovery_monitor(self, context):
-        """Validate execution inputs without constructing or running a Supervisor."""
-        monitor=context['directory']/'monitor'
+    def _validate_recovery_checks(self, context):
+        record=context['record']
+        directory=context['directory']
+        base_commit=record['base']['commit']
+        commands=self._checks(base_commit=base_commit)
         for stage in ('baseline','candidate'):
-            rows=self.record.get(stage+'_checks',[])
-            if not isinstance(rows,list) or len(rows)>len(self._checks()):
+            rows=record.get(stage+'_checks',[])
+            if not isinstance(rows,list) or len(rows)>len(commands):
                 raise ValueError('Evolution recovery check evidence is malformed: '+stage)
-            for index,row in enumerate(rows,1):
-                path=context['directory']/f'{stage}-{index:02d}.log'
-                if (not isinstance(row,dict) or row.get('command')!=self._checks()[index-1]
-                        or row.get('log')!=path.name or path.is_symlink() or path.stat().st_size>16*1024*1024
-                        or hashlib.sha256(path.read_bytes()).hexdigest()!=row.get('sha256')):
+            for index,(row,command) in enumerate(zip(rows,commands),1):
+                path=directory/f'{stage}-{index:02d}.log'
+                if not self._check_receipt_matches(row,command,path):
                     raise ValueError('Evolution recovery check evidence changed: '+stage)
-            if self.record.get(stage+'_checks_complete') is True:
-                commit=self.record['base']['commit'] if stage=='baseline' else self.record.get('candidate')
-                workspaces=(context['workspace'],context['directory']/'baseline-verification') if stage=='baseline' else (context['directory']/'validation',)
-                if not self._cycle_checks_reusable(stage,commit,workspaces):
+            if record.get(stage+'_checks_complete') is True:
+                commit=base_commit if stage=='baseline' else record.get('candidate')
+                workspaces=(context['workspace'],directory/'baseline-verification') if stage=='baseline' else (directory/'validation',)
+                if not self._cycle_checks_reusable(stage,commit,workspaces,record=record,directory=directory):
                     raise ValueError('Evolution recovery check identity changed: '+stage)
-        if not monitor.exists():
-            return None
+        if context['phase'] in _PROMOTION:
+            if len(record.get('candidate_checks',[]))!=len(commands):
+                raise ValueError('Promotion checkpoint lacks complete candidate checks')
+            load_checkpoint(context['path'],self.source,purpose='promotion')
+
+    def _recovery_monitor(self, context, *, entered):
+        """Validate execution inputs without constructing or running a Supervisor."""
+        self._validate_recovery_checks(context)
+        monitor=context['directory']/'monitor'
+        self._require_monitor_checkpoint(monitor)
         if not (monitor/'state.json').exists():
-            if any(monitor.iterdir()):
-                raise ValueError('Evolution monitor has artifacts but no resumable checkpoint')
             return None
         state=read(monitor/'state.json')
         self._validate_monitor_state(context,state)
-        self._cycle_account_usage(monitor,state.get('usage'))
+        self._cycle_account_usage(monitor,state.get('usage'),recovery_started=entered)
         return state
+
+    @staticmethod
+    def _require_monitor_checkpoint(monitor):
+        if monitor.exists() and not (monitor/'state.json').exists() and any(monitor.iterdir()):
+            raise ValueError('Evolution monitor has artifacts but no resumable checkpoint')
+
+    def _validate_recovery_source(self, record):
+        if self._identity()!=record['base'] or not self._clean(self.source):
+            raise ValueError('Evolution recovery source changed; checkpoint retained')
 
     def _validate_monitor_state(self, context, state):
         expected=_RecoverySupervisor._provider_config(SimpleNamespace(config=self.config))
@@ -656,14 +749,19 @@ class Evolution:
         directory=Path(directory).absolute()
         if directory.parent!=self.directory:
             raise ValueError('Evolution recovery directory does not belong to this project')
-        publishing={'ready','promoting','activating','rolling_back','recovery_required',
-                    'promoted','rolled_back','rollback_activation_failed'}
         if not allow_implementation:
             context=load_checkpoint(directory/'evolution.json',self.source,purpose='inspect')
-            if context['phase'] not in publishing:
+            if context['phase'] not in _PROMOTION:
                 raise ValueError('Evolution does not have a recoverable promotion; implementation recovery is disabled')
-        entered=time.monotonic()
-        with file_lock(self.directory/'evolution.lock'):
+        shared_budget=self._shared_budget_started is not None
+        entered=self._shared_budget_started if shared_budget else self._automatic_recovery_started
+        if entered is None:
+            entered=time.monotonic()
+        with file_lock(self.directory/'evolution.lock'), ExitStack() as budget:
+            if allow_implementation and threading.current_thread() is threading.main_thread():
+                for sig in (signal.SIGTERM,signal.SIGINT):
+                    previous_handler=signal.signal(sig,lambda *_:self.stop.set())
+                    budget.callback(signal.signal,sig,previous_handler)
             if allow_implementation:
                 base=self._identity()
                 context,refusal,_=self._pending_cycle(base,locking_monitor=directory)
@@ -673,12 +771,13 @@ class Evolution:
                     return self._continuation_result(base,directory,'deferred','Evolution history changed after selection')
             else:
                 context=load_checkpoint(directory/'evolution.json',self.source,purpose='inspect')
-            publication=context['phase'] in publishing
+            publication=context['phase'] in _PROMOTION
             if not publication and (not allow_implementation or context['legacy']
                     or context['resume_phase'] not in {'selected','baseline','implementing','reviewed','validating','candidate'}
                     or context['phase'] in {'baseline_failed','candidate_failed','rejected'}):
                 raise ValueError('Evolution checkpoint is not eligible for implementation recovery')
-            if context['config_identity'] is not None and not self._cycle_config_matches(context['config_identity']):
+            if context['config_identity'] is not None and not self._cycle_config_matches(
+                    context['config_identity'],allow_smaller_grant=shared_budget):
                 raise ValueError('Evolution recovery configuration does not match its frozen identity')
             if context['legacy'] and context['phase'] not in {'promoted','rolled_back'}:
                 raise ValueError('Legacy evolution lacks original configuration and budgets; checkpoint retained')
@@ -689,14 +788,10 @@ class Evolution:
                 with ExitStack() as locks:
                     locks.enter_context(workspace_lease(self.source))
                     locks.enter_context(file_lock(self.source/'.auto-moniter/workspace.lock'))
+                    self._validate_recovery_worktree(context)
                     if work.exists():
-                        self._cycle_worktree(work)
-                        if not publication and git(work,'symbolic-ref','-q','HEAD')!='refs/heads/evolution/'+directory.name:
-                            raise ValueError('Evolution recovery implementation branch changed')
                         locks.enter_context(workspace_lease(work))
                         locks.enter_context(file_lock(work/'.auto-moniter/workspace.lock'))
-                    elif context['resume_phase']!='selected':
-                        raise ValueError('Evolution recovery worktree is missing')
                     if monitor.exists():
                         for name in ('guardian.lock','supervisor.lock'):
                             path=monitor/name
@@ -707,15 +802,18 @@ class Evolution:
                         barrier=self._continuation_barrier(context,check_locks=False)
                         if barrier:
                             return self._continuation_result(base,directory,*barrier)
+                    if shared_budget and context['budget_verified']:
+                        limits=context['limits']
+                        budget.callback(setattr,self,'config',self.config)
+                        self.config=replace(self.config,max_runtime_s=limits['max_runtime_s'],
+                                            max_agent_calls=limits['max_agent_calls'])
                     self.path=context['path'];self.record=context['record']
                     if not context['legacy']:
                         self.record['usage']=context['usage']
                         self.record['agent_calls']=context['usage']['agent_calls']
                     self.started=entered-context['usage']['elapsed_s']
                     self._checkpoint_clock=((self.path,self.started),0)
-                    state=self._recovery_monitor(context) if not context['legacy'] else read(monitor/'state.json')
-                    if publication:
-                        load_checkpoint(self.path,self.source,purpose='promotion')
+                    state=self._recovery_monitor(context,entered=entered) if not context['legacy'] else read(monitor/'state.json')
                     if publication or self.record.get('candidate') or state and state.get('status')=='done':
                         candidate=self._candidate(work)
                         if (publication and not candidate) or self.record.get('candidate',candidate)!=candidate:
@@ -730,19 +828,24 @@ class Evolution:
                                         for key in ('business_head','last_business_commit'))
                                     for evidence in (state,report))):
                             raise ValueError('Evolution recovery final review evidence changed')
-                    rollback=self.record.get('rollback_commit')
-                    if rollback and (git(self.source,'rev-parse',rollback+'^{tree}')!=git(self.source,'rev-parse',self.record['base']['commit']+'^{tree}')
-                            or git(self.source,'rev-list','--parents','-n','1',rollback).split()!=[rollback,candidate]):
-                        raise ValueError('Evolution recovery rollback evidence changed')
-                    if not publication and (self._identity()!=self.record['base'] or not self._clean(self.source)):
-                        raise ValueError('Evolution recovery source changed; checkpoint retained')
+                    if self.record.get('rollback_commit'):
+                        self._validate_recovery_rollback(self.record,candidate)
+                        actual=self._identity()
+                        if self._rollback_source_changed(self.record,actual):
+                            return self._continuation_result(actual,directory,'deferred',
+                                'Evolution rollback source is neither the candidate nor the saved rollback commit')
+                    if not publication:
+                        self._validate_recovery_source(self.record)
                     if monitor.exists():
                         self._recovery_quiesce(monitor,work,state)
                 if state is not None and state.get('status')=='done':
                     self._confirm_review(monitor,review_commit)
                 if not publication:
+                    if self._cancelled():
+                        self._save('stopped',summary='Shared runtime budget or stop reached during recovery; Supervisor retained')
+                        return self.record
                     self._save(self.record['phase'],stop_reason=self.record.get('stop_reason',''))
-                    return self._run(self.record['issue'],self.record['base'],context=context)
+                    return self._run(self.record['issue'],self.record['base'],context=context,recovery_clock=self.started)
             except Exception:
                 self.path,self.record,self.started,clock=previous
                 if clock is None:
@@ -766,6 +869,9 @@ class Evolution:
             with workspace_lease(self.source),file_lock(self.source/'.auto-moniter/workspace.lock'):
                 actual=self._identity()
                 rollback=self.record.get('rollback_commit')
+                if self._rollback_source_changed(self.record,actual):
+                    return self._continuation_result(actual,directory,'deferred',
+                        'Evolution rollback source is neither the candidate nor the saved rollback commit')
                 if self.record['phase']=='promoted':
                     if actual!={'ref':self.record['base']['ref'],'commit':candidate} or not self._clean(self.source):
                         raise ValueError('Completed evolution promotion no longer matches source')
@@ -775,6 +881,9 @@ class Evolution:
                             or not self._clean(self.source)
                             or git(self.source,'rev-parse',rollback+'^{tree}')!=git(self.source,'rev-parse',self.record['base']['commit']+'^{tree}')):
                         raise ValueError('Completed evolution rollback no longer matches source')
+                    return self.record
+                if allow_implementation and self._cancelled():
+                    self._save('stopped',summary='Shared runtime budget or stop reached during publication recovery; source retained')
                     return self.record
                 if (actual['ref']==self.record['base']['ref'] and actual['commit'] in {candidate,rollback}
                         and not self._clean(self.source)):
@@ -798,18 +907,41 @@ class Evolution:
                     advanced=True
                 else:
                     advanced=False
+            if (rolled_back or advanced) and allow_implementation and self._stop_before_recovery_activation():
+                return self.record
             if rolled_back:
-                ready=self._activate()
-                self._save('rolled_back' if ready else 'rollback_activation_failed',summary='Recovered rollback without duplicate commits')
+                ready=self._activate(recovering=True) if allow_implementation else self._activate()
+                phase='stopped' if allow_implementation and self.stop.is_set() else 'rolled_back' if ready else 'rollback_activation_failed'
+                self._save(phase,summary='Recovered rollback without duplicate commits')
                 return self.record
             if advanced:
-                if not self._activate():
-                    return self._rollback(candidate)
-                self._complete_promotion(candidate)
-                return self.record
-            return self._promote(candidate)
+                return self._finish_activation(candidate,recovering=allow_implementation)
+            return self._promote(candidate,recovering=allow_implementation)
 
-    def _cycle_config_matches(self, identity):
+    def _validate_recovery_rollback(self, record, candidate):
+        rollback=record.get('rollback_commit')
+        if rollback and (git(self.source,'rev-parse',rollback+'^{tree}')!=git(self.source,'rev-parse',record['base']['commit']+'^{tree}')
+                or git(self.source,'rev-list','--parents','-n','1',rollback).split()!=[rollback,candidate]):
+            raise ValueError('Evolution recovery rollback evidence changed')
+
+    @staticmethod
+    def _rollback_source_changed(record, actual):
+        rollback=record.get('rollback_commit')
+        return rollback is not None and (actual['ref']!=record['base']['ref']
+                or actual['commit'] not in {record.get('candidate'),rollback})
+
+    def _validate_recovery_worktree(self, context):
+        work=context['workspace']
+        if not work.exists():
+            if context['resume_phase']!='selected':
+                raise ValueError('Evolution recovery worktree is missing')
+            return
+        self._cycle_worktree(work)
+        if (context['phase'] not in _PROMOTION
+                and git(work,'rev-parse','--symbolic-full-name','HEAD')!='refs/heads/evolution/'+context['directory'].name):
+            raise ValueError('Evolution recovery implementation branch changed')
+
+    def _cycle_config_matches(self, identity, *, allow_smaller_grant=False):
         """Compare the live execution inputs with E1's frozen, non-executable identity."""
         def digest(value):
             return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
@@ -832,9 +964,17 @@ class Evolution:
             'quality_policy','checks','workflow','git_history','function_dispatch','full_function_plan',
             'max_rounds','turn_timeout_s','idle_timeout_s','retry_delay_s','stall_limit','failure_limit',
             'check_timeout_s','restart_after_stall','review_every','task_type')}
-        return (identity['policy_sha256']==digest(policy) and all(
-            value==(self.config.quality_policy.get(name,0) if name in {'max_tokens','max_cost_usd'}
-                    else getattr(self.config,name,None)) for name,value in identity['limits'].items()))
+        if identity['policy_sha256']!=digest(policy):
+            return False
+        for name,value in identity['limits'].items():
+            current=(self.config.quality_policy.get(name,0) if name in {'max_tokens','max_cost_usd'}
+                     else getattr(self.config,name,None))
+            if allow_smaller_grant and name in {'max_runtime_s','max_agent_calls'}:
+                if not 0<value<=current:
+                    return False
+            elif value!=current:
+                return False
+        return True
 
     def _cycle_worktree(self, path, commit=None):
         """An existing cycle tree must belong to this repository; never reset it."""
@@ -848,25 +988,29 @@ class Evolution:
         if commit is not None and (git(path,'rev-parse','HEAD')!=commit or not self._clean(path)):
             raise ValueError('Evolution validation worktree changed; preserve it for inspection')
 
-    def _cycle_checks_reusable(self, stage, commit, workspaces):
-        identity=self.record.get(stage+'_identity')
-        rows=self.record.get(stage+'_checks')
-        commands=self._checks()
-        if (self.record.get(stage+'_checks_complete') is not True or not isinstance(identity,dict)
+    @staticmethod
+    def _check_receipt_matches(row, command, path):
+        if not isinstance(row,dict) or row.get('command')!=command or row.get('log')!=path.name:
+            return False
+        try:
+            return hashlib.sha256(_bytes(path,limit=16*1024*1024)).hexdigest()==row.get('sha256')
+        except CheckpointError:
+            return False
+
+    def _cycle_checks_reusable(self, stage, commit, workspaces, *, record, directory):
+        identity=record.get(stage+'_identity')
+        rows=record.get(stage+'_checks')
+        commands=self._checks(base_commit=record['base']['commit'])
+        if (record.get(stage+'_checks_complete') is not True or not isinstance(identity,dict)
                 or identity.get('commit')!=commit or identity.get('workspace') not in {str(p) for p in workspaces}
                 or not isinstance(rows,list) or len(rows)!=len(commands)):
             return False
-        try:
-            for index,(row,command) in enumerate(zip(rows,commands),1):
-                path=self.path.parent/f'{stage}-{index:02d}.log'
-                if (not isinstance(row,dict) or row.get('command')!=command or type(row.get('exit_code')) is not int
-                        or row['exit_code']!=0 or row.get('timed_out') is not False
-                        or row.get('source_changed') is not False or row.get('interruption')!=''
-                        or row.get('log')!=path.name or path.is_symlink() or path.stat().st_size>16*1024*1024
-                        or hashlib.sha256(path.read_bytes()).hexdigest()!=row.get('sha256')):
-                    return False
-        except OSError:
-            return False
+        for index,(row,command) in enumerate(zip(rows,commands),1):
+            path=directory/f'{stage}-{index:02d}.log'
+            if (not self._check_receipt_matches(row,command,path) or type(row.get('exit_code')) is not int
+                    or row['exit_code']!=0 or row.get('timed_out') is not False
+                    or row.get('source_changed') is not False or row.get('interruption')!=''):
+                return False
         return True
 
     def _cycle_validate(self, cwd, stage, commit):
@@ -879,7 +1023,7 @@ class Evolution:
                            stage+'_identity':{'commit':commit,'workspace':str(cwd)}})
         return True
 
-    def _child_usage(self, monitor, usage, previous_calls):
+    def _child_usage(self, monitor, usage, previous_calls, *, max_runtime_s, max_agent_calls):
         """Read the child's cumulative usage, including its last proven tick."""
         if not isinstance(usage,dict):
             raise ValueError('Cannot verify evolution Supervisor usage')
@@ -890,8 +1034,8 @@ class Evolution:
         if (type(calls) is not int or calls<previous_calls
                 or type(elapsed) not in (int,float) or not math.isfinite(elapsed) or elapsed<0
                 or type(runtime) not in (int,float) or not math.isfinite(runtime)
-                or not 0<runtime<=self.config.max_runtime_s or type(call_limit) is not int
-                or not 0<call_limit<=self.config.max_agent_calls):
+                or not 0<runtime<=max_runtime_s or type(call_limit) is not int
+                or not 0<call_limit<=max_agent_calls):
             raise ValueError('Cannot verify evolution Supervisor usage and remaining budget')
         try:
             heartbeat=read(monitor/'heartbeat')
@@ -907,18 +1051,22 @@ class Evolution:
             raise ValueError('Invalid evolution Supervisor cumulative runtime')
         return calls,elapsed,runtime,call_limit
 
-    def _cycle_account_usage(self, monitor, usage):
-        calls,elapsed,runtime,call_limit=self._child_usage(monitor,usage,self.record.get('agent_calls',0))
+    def _cycle_account_usage(self, monitor, usage, *, recovery_started=None):
+        calls,elapsed,runtime,call_limit=self._child_usage(monitor,usage,self.record.get('agent_calls',0),
+            max_runtime_s=self.config.max_runtime_s,max_agent_calls=self.config.max_agent_calls)
         self.record['agent_calls']=calls
-        now=time.monotonic()
-        # The grant pins time spent outside the child. Take a high water mark,
-        # never add the same persisted usage/heartbeat again on another resume.
-        spent=max(now-self.started,self.config.max_runtime_s-runtime+elapsed)
-        self.started=now-spent
+        child_spent=self.config.max_runtime_s-runtime+elapsed
+        if recovery_started is not None:
+            # Reconcile overlapping historical evidence before adding this invocation's time.
+            historical_spent=max(self.record['usage']['elapsed_s'],child_spent)
+            self.started=recovery_started-historical_spent
+        else:
+            # During execution the child grant already reflects time spent this invocation.
+            self.started=min(self.started,time.monotonic()-child_spent)
         self._checkpoint_clock=((self.path,self.started),0)
         return calls,elapsed,runtime,call_limit
 
-    def _run(self,issue,base,*,context=None):
+    def _run(self,issue,base,*,context=None,recovery_clock=None):
         if context is None:
             ident=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:8]
             directory=self.directory/ident
@@ -939,7 +1087,8 @@ class Evolution:
             self.record['usage']=restored['usage']
             directory=restored['directory']
             ident=directory.name
-            self.started=time.monotonic()-restored['usage']['elapsed_s']
+            self.started=(time.monotonic()-restored['usage']['elapsed_s']
+                          if recovery_clock is None else recovery_clock)
             self._checkpoint_clock=((self.path,self.started),0)
         work=directory/'workspace'
         monitor=directory/'monitor'
@@ -981,7 +1130,8 @@ class Evolution:
                 usage=state.get('usage',{})
                 calls,elapsed,runtime,call_limit=self._cycle_account_usage(monitor,usage)
             baseline=directory/'baseline-verification'
-            if not self._cycle_checks_reusable('baseline',base['commit'],(work,baseline)):
+            if not self._cycle_checks_reusable('baseline',base['commit'],(work,baseline),
+                                               record=self.record,directory=directory):
                 baseline_work=work
                 if git(work,'rev-parse','HEAD')!=base['commit'] or not self._clean(work):
                     if state is None:
@@ -1023,6 +1173,9 @@ class Evolution:
                     self._save('stopped',agent_calls=calls,summary='Shared agent-call budget exhausted; Supervisor retained')
                     return self.record
                 self._save('implementing',monitor_run=str(config.run_dir))
+                if context is not None and self._cancelled():
+                    self._save('stopped',summary='Shared runtime budget or stop reached before Supervisor dispatch')
+                    return self.record
                 report=Supervisor(config,log=self.log).run()
                 report_status,report_summary=report.status,report.summary
             usage=read(config.run_dir/'state.json').get('usage',{}) if (config.run_dir/'state.json').exists() else {}
@@ -1048,13 +1201,15 @@ class Evolution:
                 git(self.source,'worktree','add','--detach',str(validation),candidate)
             self._cycle_worktree(validation,candidate)
             self.record['validation_workspace']=str(validation)
-            if (not self._cycle_checks_reusable('candidate',candidate,(validation,))
+            if (not self._cycle_checks_reusable('candidate',candidate,(validation,),record=self.record,directory=directory)
                     and not self._cycle_validate(validation,'candidate',candidate)):
                 self._save('stopped' if self._cancelled() else 'candidate_failed',summary='Candidate full regression failed; original version retained')
                 return self.record
             if self._candidate(work)!=candidate:
                 raise ValueError('Evolution source changed during independent regression')
             self._save('ready',candidate=candidate)
+            if context is not None:
+                return self._promote(candidate,recovering=True)
             return self._promote(candidate)
         except LockError as exc:
             self._save('deferred',summary=str(exc))

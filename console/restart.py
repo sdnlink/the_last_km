@@ -60,11 +60,13 @@ def running_options(pid: int, data_dir: Path):
     return args
 
 
-def restart(options, *, stop_timeout=15, start_timeout=60) -> int:
+def restart(options, *, stop_timeout=15, start_timeout=60, supervised=False) -> int:
     cwd = (options.cwd or Path.cwd()).expanduser().resolve()
     data_dir = (options.data_dir or cwd / '.auto-moniter/console').expanduser().resolve()
     if not cwd.is_dir() or options.port is not None and not 0 <= options.port <= 65535:
         raise ValueError('项目目录必须存在，端口必须在 0 到 65535 之间')
+    if supervised and not all((cwd / 'console' / name).is_file() for name in ('__init__.py', '__main__.py')):
+        raise ValueError('激活目标缺少控制台启动模块')
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (data_dir / 'console-restart.lock').open('a') as restart_lock:
         try:
@@ -114,9 +116,16 @@ def restart(options, *, stop_timeout=15, start_timeout=60) -> int:
         with log_path.open('ab') as log:
             log.write(f'\n[{datetime.now(timezone.utc).isoformat()}] 启动控制台\n'.encode())
             log.flush()
-            child = subprocess.Popen(arguments, cwd=Path(__file__).resolve().parent.parent,
+            launch_cwd = cwd if supervised else Path(__file__).resolve().parent.parent
+            env = None
+            if supervised:
+                paths = [str(launch_cwd)]
+                if os.environ.get('PYTHONPATH'):
+                    paths.append(os.environ['PYTHONPATH'])
+                env = {**os.environ, 'PYTHONPATH': os.pathsep.join(paths)}
+            child = subprocess.Popen(arguments, cwd=launch_cwd, env=env,
                                      stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                     start_new_session=True)
+                                     start_new_session=not supervised)
         deadline = time.monotonic() + start_timeout
         process_file = data_dir / 'console-process.json'
         while time.monotonic() < deadline:
@@ -147,9 +156,10 @@ def main(argv=None) -> int:
     parser.description = '重启指定数据目录的控制台并在后台运行；保留任务和队列'
     parser.epilog = '重启已有实例时，未指定的端口和扫描目录沿用原配置；未运行时直接启动。自定义数据目录需传入同一个 --data-dir。'
     parser.set_defaults(port=None, cwd=None, runs_dir=None)
+    parser.add_argument('--supervised-activation', action='store_true', help='Stay in the activation runner process group')
     options = parser.parse_args(argv)
     try:
-        return restart(options)
+        return restart(options, supervised=options.supervised_activation)
     except (OSError, ValueError) as exc:
         print(f'重启失败：{exc}', file=sys.stderr)
         return 1

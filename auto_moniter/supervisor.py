@@ -5171,6 +5171,7 @@ def run_command(
     file_bytes: int = 0,
     on_output: Callable[[int, bytes], None] | None = None,
     network_retry_s: float = 0,
+    keep_background_on_success: bool = False,
 ) -> TurnResult:
     if max_output_bytes <= 0:
         raise ValueError("max_output_bytes must be positive")
@@ -5224,7 +5225,7 @@ def run_command(
                 elif idle_timeout_s and idle_s >= idle_timeout_s:
                     timed_out = True
                     interruption = "no output"
-                if child.poll() is not None and not interruption and reap_background(child.pid):
+                if not keep_background_on_success and child.poll() is not None and not interruption and reap_background(child.pid):
                     interruption = "background processes"
                 if stopped or timed_out or interruption:
                     interruption = interruption or ("stop requested" if stopped else "turn limit")
@@ -5280,8 +5281,15 @@ def run_command(
                         interruption = "output limit"
                         break
             child.wait()
-            if not interruption and reap_background(child.pid):
-                interruption = "background processes"
+            if keep_background_on_success and not interruption:
+                timed_out = deadline is not None and time.monotonic() >= deadline
+                if should_stop is not None and should_stop():
+                    interruption = "stop requested"
+                elif timed_out:
+                    interruption = "turn limit"
+            keep_background = keep_background_on_success and child.returncode == 0 and not interruption
+            if not keep_background and (not interruption or keep_background_on_success) and reap_background(child.pid):
+                interruption = interruption or "background processes"
     except BaseException:
         _terminate(child)
         raise

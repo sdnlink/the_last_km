@@ -7,6 +7,7 @@ import json
 import math
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from auto_moniter import __version__
@@ -170,8 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument('--reviewer-model',default='')
     evolve.add_argument('--evidence-root',type=Path,action='append',default=[])
     evolve.add_argument('--cycles',type=_positive_int,default=3,help='Maximum evolution cycles sharing the same budget (default 3)')
-    evolve.add_argument('--max-runtime',default='1h')
-    evolve.add_argument('--max-agent-calls',type=_positive_int,default=20)
+    evolve.add_argument('--max-runtime',help='Shared runtime budget (default 1h)')
+    evolve.add_argument('--max-agent-calls',type=_positive_int,help='Shared model call budget (default 20)')
+    evolve.add_argument('--new-session',action='store_true',
+                        help='Start a separately authorized evolution session after verifying prior history')
     evolution_mode=evolve.add_mutually_exclusive_group()
     evolution_mode.add_argument('--plan-only',action='store_true')
     evolution_mode.add_argument('--recover',type=Path,help='Reconcile an interrupted promotion without calling models')
@@ -182,6 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == 'evolve' and args.new_session:
+        if args.recover:
+            parser.error('--new-session cannot be combined with --recover')
+        if not args.plan_only and (args.max_runtime is None or args.max_agent_calls is None):
+            parser.error('--new-session requires explicit --max-runtime and --max-agent-calls for execution')
     if args.command == "providers":
         found = discover_providers()
         for name, ok in found.items():
@@ -190,24 +198,31 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command=='evolve':
             from auto_moniter.evolution import Evolution
-            limit=_parse_duration(args.max_runtime)
+            limit=_parse_duration(args.max_runtime if args.max_runtime is not None else '1h')
+            call_limit=args.max_agent_calls if args.max_agent_calls is not None else 20
             if limit<=0:
                 raise ValueError('Self-evolution requires a positive shared runtime budget')
             started=time.monotonic()
             used=0
             results=[]
+            session_id=uuid.uuid4().hex if args.new_session and not args.plan_only else None
             for index in range(args.cycles):
                 cycle_started=started if index==0 else time.monotonic()
                 remaining=limit-(cycle_started-started)
-                if remaining<=0 or used>=args.max_agent_calls:
+                if remaining<=0 or used>=call_limit:
                     break
                 config=RunConfig('',args.cwd,resolve_provider(args.provider),
                     reviewer=resolve_provider(args.reviewer,role='reviewer'),model=args.model,
                     reviewer_model=args.reviewer_model,max_runtime_s=remaining,
-                    max_agent_calls=args.max_agent_calls-used)
+                    max_agent_calls=call_limit-used)
                 engine=Evolution(config,evidence_roots=args.evidence_root,shared_budget_started=cycle_started,
                     log=lambda msg:print(msg,file=sys.stderr,flush=True))
-                result=engine.recover(args.recover) if args.recover else engine.run(plan_only=args.plan_only)
+                if args.recover:
+                    result=engine.recover(args.recover)
+                elif args.new_session:
+                    result=engine.run(plan_only=args.plan_only,new_session=True,session_id=session_id)
+                else:
+                    result=engine.run(plan_only=args.plan_only)
                 results.append(result)
                 used+=result.get('agent_calls',0)
                 if args.plan_only or args.recover or result.get('resumed') or result['phase'] in {'idle','deferred','stopped','baseline_failed','recovery_required','rolled_back','rollback_activation_failed'}:

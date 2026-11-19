@@ -27,6 +27,7 @@ _COMPLETE = {'promoted', 'rolled_back', 'no_change'}
 _PHASES = _ACTIVE | _WRAPPERS | _COMPLETE
 _PROMOTION = {'ready', 'promoting', 'activating', 'rolling_back', 'recovery_required',
               'promoted', 'rolled_back', 'rollback_activation_failed'}
+_LEGACY_TERMINAL = {'baseline_failed', 'rejected'}
 
 
 class CheckpointError(ValueError):
@@ -226,13 +227,15 @@ def _promotion_evidence(record, directory, workspace, monitor):
 def load_checkpoint(path, expected_source, *, allowed_versions=(1, 2), purpose='resume'):
     """Return a validated context with Path locations and the untouched decoded record.
 
-    Purposes are ``resume``, ``promotion`` and ``inspect``. General resume requires
+    General resume requires
     the complete version-2 identity/usage schema. Version-1 publication records
     are accepted only for promotion or inspection with final review and hashed
     log evidence; absent identity/budgets remain None, never current defaults.
+    The separate ``new-session-history`` purpose can decode legacy terminal
+    records for additional quiescence checks by the new-session admission path.
     This validates saved data, not current Git/lock state or permission to promote.
     """
-    if not isinstance(purpose, str) or purpose not in {'resume', 'promotion', 'inspect'}:
+    if not isinstance(purpose, str) or purpose not in {'resume', 'promotion', 'inspect', 'new-session-history'}:
         raise CheckpointError('Unknown checkpoint recovery purpose')
     if (not isinstance(allowed_versions, (tuple, list, set, frozenset)) or not allowed_versions
             or any(type(version) is not int or version not in {1, 2} for version in allowed_versions)):
@@ -262,6 +265,7 @@ def load_checkpoint(path, expected_source, *, allowed_versions=(1, 2), purpose='
     phase = record.get('phase')
     if not isinstance(phase, str) or phase not in _PHASES:
         raise CheckpointError('Unknown checkpoint phase')
+    legacy_terminal = version == 1 and purpose == 'new-session-history' and phase in _LEGACY_TERMINAL
     if version == 2:
         if 'resume_phase' not in record or not isinstance(record.get('stop_reason'), str):
             raise CheckpointError('Missing versioned checkpoint cursor or stop reason')
@@ -270,7 +274,7 @@ def load_checkpoint(path, expected_source, *, allowed_versions=(1, 2), purpose='
                 or phase not in _WRAPPERS and cursor != phase):
             raise CheckpointError('Invalid checkpoint resume phase')
     else:
-        if purpose == 'resume' or phase not in _PROMOTION:
+        if not legacy_terminal and (purpose == 'resume' or phase not in _PROMOTION):
             raise CheckpointError('Legacy checkpoint supports evidenced promotion only')
         cursor = phase if phase not in _WRAPPERS else None
     locations = {}
@@ -301,9 +305,9 @@ def load_checkpoint(path, expected_source, *, allowed_versions=(1, 2), purpose='
         if name in record:
             amount = _number(record[name], name, integer=name == 'agent_calls')
             usage[name] = max(usage.get(name, amount), amount)
-        elif name not in usage:
+        elif name not in usage and not (legacy_terminal and phase == 'baseline_failed' and name == 'agent_calls'):
             raise CheckpointError('Missing known checkpoint usage: ' + name)
-    if version == 1 or purpose == 'promotion':
+    if (version == 1 and not legacy_terminal) or purpose == 'promotion':
         if phase not in _PROMOTION:
             raise CheckpointError('Checkpoint is not in a promotion phase')
         _promotion_evidence(record, directory, locations['workspace'], locations.get('monitor_run'))

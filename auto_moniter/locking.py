@@ -28,21 +28,35 @@ def workspaces_overlap(left: Path, right: Path) -> bool:
 
 
 @contextmanager
-def workspace_lease(cwd: Path):
+def workspace_lease(cwd: Path, *, read_only=False):
     root = workspace_root(cwd)
     # State directories can differ between consoles. A per-user rendezvous in
     # /tmp keeps those instances mutually exclusive too; never unlink lock files.
     shared = Path('/tmp') / f'auto-moniter-leases-{os.getuid()}'
-    shared.mkdir(mode=0o700, exist_ok=True)
-    info = shared.lstat()
-    if shared.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise LockError('Unsafe shared workspace lease directory')
+    if not read_only:
+        shared.mkdir(mode=0o700, exist_ok=True)
+    try:
+        info = shared.lstat()
+    except FileNotFoundError:
+        if not read_only:
+            raise
+    else:
+        if shared.is_symlink() or not shared.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise LockError('Unsafe shared workspace lease directory')
     with ExitStack() as stack:
         for path in [*reversed(root.parents), root]:
             key = hashlib.sha256(os.fsencode(path)).hexdigest()
             for lock in (shared / (key + '.lock'), workspace_lock(path)):
-                lock.parent.mkdir(parents=True, exist_ok=True)
-                handle = stack.enter_context(lock.open('a+'))
+                if lock.is_symlink() or (lock.exists() and not lock.is_file()):
+                    raise LockError('Unsafe workspace lease: ' + str(lock))
+                if not read_only:
+                    lock.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    handle = stack.enter_context(lock.open('r' if read_only else 'a+'))
+                except FileNotFoundError:
+                    if not read_only:
+                        raise
+                    continue
                 try:
                     fcntl.flock(handle, (fcntl.LOCK_EX if path == root else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                 except BlockingIOError as exc:

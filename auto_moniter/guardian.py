@@ -16,7 +16,7 @@ from pathlib import Path
 from auto_moniter.storage import write_json
 from auto_moniter.paths import default_run_dir, private_directory, state_root
 from auto_moniter.redaction import redact
-from auto_moniter.health import delivery_recovery_warning, valid_report
+from auto_moniter.health import confirms_follow_up_wait, delivery_recovery_warning, valid_report
 from auto_moniter.control import ControlError, read_control
 from auto_moniter.supervisor import RunConfig, RunReport, Supervisor
 from auto_moniter.workspace import LockError, file_lock
@@ -208,7 +208,9 @@ class Guardian:
                 return None
             report = json.loads(path.read_text(encoding="utf-8"))
             state = json.loads((self.run_dir / "state.json").read_text(encoding="utf-8"))
-            if not valid_report(report) or not isinstance(state, dict) or state.get("status") != report["status"]:
+            if not valid_report(report) or not isinstance(state, dict):
+                return None
+            if state.get("status") != report["status"] and not confirms_follow_up_wait(self.run_dir, state, report):
                 return None
             if report.get("status") == "done" and delivery_recovery_warning(self.run_dir):
                 return None

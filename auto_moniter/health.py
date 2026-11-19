@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,41 @@ def delivery_recovery_warning(run_dir: Path) -> str:
         if path.exists() or path.is_symlink():
             return warning
     return ''
+
+
+def follow_up_wait_digest(run_dir: Path, state: object, report: dict) -> str:
+    """Bind a waiting report to the running checkpoint it is about to replace."""
+    if (not isinstance(state, dict) or state.get("status") != "running"
+            or state.get("workflow") != "review-first" or report.get("workflow") != "review-first"
+            or report.get("status") != "action_required" or report.get("stop_reason") != "action_required"):
+        return ""
+    cycles = state.get("requirement_cycles")
+    review = state.get("requirements_review")
+    reported_review = report.get("requirements_review")
+    if not isinstance(cycles, list) or not cycles or not isinstance(cycles[-1], dict):
+        return ""
+    published = cycles[-1]
+    handoff = published.get("handoff")
+    if (published.get("status") != "committed" or published.get("index") != len(cycles)
+            or not isinstance(handoff, dict) or handoff.get("cycle") != len(cycles)
+            or not handoff.get("commit") or not handoff.get("ref")):
+        return ""
+    if any(not isinstance(brief, dict) or brief.get("status") != "needs_input"
+           or brief.get("cycle") != len(cycles) + 1 for brief in (review, reported_review)):
+        return ""
+    reason = reported_review.get("summary")
+    if not isinstance(reason, str) or not reason or report.get("summary") not in (reason, "Next requirement not ready: " + reason):
+        return ""
+    payload = {key: value for key, value in report.items() if key != "follow_up_wait_digest"}
+    encoded = json.dumps([str(run_dir.resolve()), state, payload], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def confirms_follow_up_wait(run_dir: Path, state: dict, report: dict) -> bool:
+    digest = report.get("follow_up_wait_digest")
+    return (isinstance(digest, str) and bool(digest)
+            and not delivery_recovery_warning(run_dir)
+            and digest == follow_up_wait_digest(run_dir, state, report))
 
 
 def _lock_held(path: Path, *, missing=None):
@@ -65,7 +101,7 @@ def read_run_snapshot(run_dir: Path) -> dict:
     elif report is not None or (run_dir / "report.json").exists():
         if not valid_report(report):
             warning = "report_invalid"
-        elif report["status"] != state.get("status"):
+        elif report["status"] != state.get("status") and not confirms_follow_up_wait(run_dir, state, report):
             warning = "report_state_mismatch"
     # A monitor/guardian observed holding its lock at either end is still active.
     after = _lock_held(run_dir / "supervisor.lock")

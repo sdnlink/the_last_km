@@ -3687,7 +3687,7 @@ class Supervisor:
         if status in {"failed", "recovery_failed", "action_required", "budget_exceeded", "stalled"}:
             write_json(self.run_dir / "alert.json", safe({"status": status, "summary": summary,
                        "at": datetime.now(timezone.utc).isoformat(), "run_dir": str(self.run_dir)}), durable=True)
-        write_json(path, safe({**report.to_dict(), "modules": self.modules.export(), "usage": self._usage(),
+        report_payload = safe({**report.to_dict(), "modules": self.modules.export(), "usage": self._usage(),
                                          "quality_policy": self.config.quality_policy, "quality_state": self.quality.state,
                                          "workflow":self.config.workflow,"task_type":self.config.task_type,"requirements_review":self.requirements_review,
                                          "requirement_cycles": self.requirement_cycles,
@@ -3696,7 +3696,18 @@ class Supervisor:
                                          "audit_issues": self.audit.export(),
                                          "delivery_diagnosis": self._delivery_diagnosis,
                                          "function_tasks": self.function_tasks.export(),
-                                         "history": self._history_info()}), durable=True)
+                                         "history": self._history_info()})
+        if status == 'action_required' and self.requirement_cycles and self.requirements_review.get('status') == 'needs_input':
+            from auto_moniter.health import follow_up_wait_digest
+            try:
+                running_state = json.loads((self.run_dir / 'state.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                pass  # Without the prior checkpoint only the normal terminal write can confirm the result.
+            else:
+                digest = follow_up_wait_digest(self.run_dir, running_state, report_payload)
+                if digest:
+                    report_payload['follow_up_wait_digest'] = digest
+        write_json(path, report_payload, durable=True)
         self._write_state(records, status, 0, "", records[-1].tree if records else "", result_summary=report.summary)
         self._beat(f"finished: {status}")
         self.log(f"finished: {status} after {report.rounds} worker rounds")

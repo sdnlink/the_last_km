@@ -1877,8 +1877,11 @@ class Supervisor:
         try:
             if self._stop:
                 return False
-            prompt = requirements_review.prompt(self.config,self.modules.export(),follow_up=follow_up or None,
-                                                continuation=continuation, queued_requirement=self.active_queued_requirement)
+            prompt = requirements_review.prompt(
+                self.config, self.modules.export(), follow_up=follow_up or None,
+                continuation=continuation, queued_requirement=self.active_queued_requirement,
+                state_path=self.run_dir / 'state.json',
+            )
             if self.config.function_dispatch:
                 module_contract = (
                     'This explicitly activated user-queued requirement may append new modules for its new scope. '

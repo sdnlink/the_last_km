@@ -113,7 +113,8 @@ def reassessment_prompt(previous):
             'Previous blocked analysis:\n'+json.dumps(previous,ensure_ascii=False))
 
 
-def prompt(config, modules, *, follow_up=None, continuation=None, queued_requirement=None):
+def prompt(config, modules, *, follow_up=None, continuation=None,
+           queued_requirement=None, state_path=None):
     task_guidance = ''
     if getattr(config, 'task_type', 'code') == 'deployment':
         from auto_moniter.deployment import instructions
@@ -142,28 +143,44 @@ def prompt(config, modules, *, follow_up=None, continuation=None, queued_require
             + autonomy_guidance() +
             'No implementation has been delivered; ready means the requirement is ready for worker execution only.\n\n'
             + task_guidance
-            + _follow_up_block(follow_up, queued_requirement) +
+            + _follow_up_block(follow_up, queued_requirement, state_path=state_path) +
             ('Saved requirement analysis and input changes (context, not approval):\n'
              +json.dumps(continuation,ensure_ascii=False)+'\n\n' if continuation else '') +
             'Original request:\n'+config.requirement+'\n\nHuman acceptance criteria:\n'+config.acceptance+
             '\n\nImmutable modules:\n'+json.dumps(modules,ensure_ascii=False)+'\n\nImmutable commands:\n'+json.dumps(config.checks,ensure_ascii=False))
 
 
-def _follow_up_block(follow_up, queued_requirement=None):
+def _follow_up_block(follow_up, queued_requirement=None, *, state_path=None):
     if not follow_up:
         return ''
+    deliveries = []
+    for handoff in follow_up:
+        delivery = {key: handoff[key] for key in ('cycle', 'round', 'commit', 'ref', 'tree', 'summary')}
+        delivery['module_ids'] = [
+            module['id'] for module in handoff['modules']
+            if isinstance(module, dict) and module.get('status') == 'accepted'
+            and isinstance(module.get('id'), str)
+        ]
+        if handoff.get('checks_digest'):
+            delivery['checks_digest'] = handoff['checks_digest']
+        deliveries.append(delivery)
+    history = (
+        'For full handoffs and acceptance evidence, match each cycle to its entry in '
+        f'`requirement_cycles` in `{state_path or "state.json"}`.\n\n'
+        'Accepted deliveries already committed in this run:\n'
+        + json.dumps(deliveries, ensure_ascii=False) + '\n\n'
+    )
     if queued_requirement:
         return ('The preceding requirement passed joint review and watcher acceptance. '
                 'The person explicitly queued the following next requirement. Refine this request, '
                 'without inventing work for a later queue item or repeating completed work. '
                 'It may extend the original feature scope; preserve accepted behavior, fixed checks and exclusions.\n'
                 + json.dumps(queued_requirement, ensure_ascii=False)
-                + '\n\nAccepted deliveries already committed in this run:\n'
-                + json.dumps(follow_up, ensure_ascii=False) + '\n\n')
+                + '\n\n' + history)
     return ('This is the next requirement elaboration after a locally committed, jointly accepted delivery. '
             'Read the current project and name one concrete unfinished capability inside the original request. '
             'Cite files or symbols, expected behavior, failure or boundary conditions, and how to verify it. '
             'Do not resubmit a defect that already has an open audit issue, and do not treat a repair round as a new requirement. '
             'needs_input is required when no concrete remaining capability can be named from the project. '
             'Preserve the original request, human acceptance criteria, fixed modules, checks, quality limits and accepted work.\n\n'
-            'Accepted deliveries already committed in this run:\n'+json.dumps(follow_up,ensure_ascii=False)+'\n\n')
+            + history)

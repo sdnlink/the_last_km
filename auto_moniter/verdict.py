@@ -361,7 +361,7 @@ def parse_verdict(text: str, *, structured: bool = False, function_gate: bool = 
     )
 
 
-def verdict_instructions() -> str:
+def verdict_instructions(*, reviewer_decides: bool = False) -> str:
     return (
         "When this turn ends, your final message must contain exactly one JSON object "
         "and no prose after it. Use this shape:\n"
@@ -372,7 +372,7 @@ def verdict_instructions() -> str:
         "- In your first turn, declare ALL modules from the original requirement in modules: [{id, title, acceptance: [criterion, ...], depends_on: [module_id, ...]}]. Use depends_on=[] when there are no dependencies. Include integration and failure-path checks. Do not omit unfinished modules.\n"
         "- IDs are stable ASCII identifiers. Definitions and criteria cannot be removed or weakened. Later turns may use modules=[] or append newly discovered missing modules.\n"
         "- Worker module declarations use files=[]. Only reviewers may supply files as conservative relative path/glob impact scopes including implementation, tests, shared callers and dependencies. User-fixed files remain authoritative.\n"
-        "- module_ids names the modules completed and verified in this conclusion. Reviewers list only IDs they independently accept. The monitor requires joint coverage of every pending module before final delivery.\n"
+        "- module_ids names the modules completed and verified in this conclusion. Reviewers list only IDs they independently accept.\n"
         "- summary, and every item in done, gaps, next_actions, evidence, and blockers, is a string.\n"
         "- Use done only when every item within the declared scope is implemented, checked, and has no remaining gap.\n"
         "- done with scope=module submits a completed module for review; it does not end the original requirement. Name the module in summary and done.\n"
@@ -386,13 +386,15 @@ def verdict_instructions() -> str:
         "- Reviewers reporting an existing unresolved issue prefix its gaps entry with the monitor's AUD ID, e.g. AUD-1: assertion still fails. Use plain text for genuinely new findings and never invent AUD IDs.\n"
         "- issue_resolutions is an array of at most 128 objects {id, summary, evidence}; use [] if none. "
         "Each id must match ^AUD-[1-9][0-9]{0,11}$ and be a monitor-assigned open issue. "
-        "summary must be a non-empty string. evidence must be 1 to 4 non-empty strings naming current changed files "
+        "summary must be a non-empty string. evidence must be 1 to 4 non-empty strings describing current evidence "
         "(the monitor rejects 0 or more than 4). Only the independent reviewer may close issues after inspecting the fix "
         "or showing why the finding is invalid. Workers implement fixes and leave issue_resolutions=[]. "
         "Omitted or unresolved issues stay open; never invent issue IDs. "
         "If a prior turn failed validation, the gap text includes the exact reason "
         "(for example 'Issue resolution needs 1-4 evidence strings'); fix that reason rather than repeating oversized lists.\n"
-        "- evidence lists files, commands, or observations that support the summary. Both worker and reviewer done conclusions must cite a workspace file created, changed or removed during this run and present in the current diff. A removed file must have existed in the initial monitor baseline; cite its original path without recreating it.\n"
+        + ("- evidence lists the files, commands, and observations that support the independent delivery decision.\n"
+           if reviewer_decides else
+           "- evidence lists files, commands, or observations that support the summary. Cite a workspace file created, changed or removed during this run and present in the current diff. Cite a removed baseline file by its original path.\n") +
         "- blockers are only external facts a person must resolve, such as a missing credential. Missing ideas are not blockers.\n"
         "- Do not stop early. A conclusion is a checkpoint, not permission to idle."
     )

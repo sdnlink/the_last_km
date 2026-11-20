@@ -9,10 +9,10 @@ Auto Moniter runs coding tasks through a worker, an independent reviewer, and th
 | Role | Responsibility |
 | --- | --- |
 | Worker | Implements the assigned change, runs builds and focused tests, and reports completed work, gaps, and evidence. |
-| Reviewer | Reads the requirements, code, and existing results; identifies gaps and verifies repairs without editing the project. |
-| Watcher / Supervisor | Dispatches work, tracks findings, runs approved acceptance commands, and accepts delivery after the required checks pass. |
+| Reviewer | Assesses the requirements, candidate, and fixed check results. Gives the delivery decision without editing the project. |
+| Watcher / Supervisor | Coordinates dispatch and records progress. Publishes the approved Git candidate locally. |
 
-New tasks with a reviewer use `review-first`: the reviewer clarifies the requirement, then the worker implements it. Review findings go back to the worker until resolved. A `needs_input` requirement stays undispatched until the missing decision or prerequisite is supplied.
+New tasks with a reviewer use `review-first`. The reviewer clarifies the requirement, then the worker implements it. Fixed checks run before delivery review. The reviewer evaluates the candidate and the check results. The watcher commits that candidate after approval. A `needs_input` requirement stays undispatched until the missing decision or prerequisite is supplied.
 
 Completion candidates and reported external blockers trigger review. Unfinished work is reviewed periodically according to `--review-every` and the quality policy. Each task finishes when its original requirement has been accepted; continuing with another requirement must be requested explicitly. Reviewers use fresh sessions by default.
 

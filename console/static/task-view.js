@@ -111,7 +111,7 @@ function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true}
   if (showRoles && $("#role-details")) stableHTML($("#role-details"), roleDetailsHTML(t));
   const phase = t.health.phase;
   const stages = t.workflow==='review-first'
-    ? [["reviewer",i18n("reviewer 完善需求"),"refining_requirements"],["worker",i18n("worker 实现"),"working"],["watcher",i18n("watcher 运行派单检查"),"validating"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 提交已审核代码"),"publishing"],["watcher",i18n("归档交付"),"closing_agents"]]
+    ? [["reviewer",i18n("reviewer 完善需求"),"refining_requirements"],["worker",i18n("worker 实现"),"working"],["checks",i18n("审查前运行固定检查"),"validating"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 提交已审核代码"),"publishing"],["watcher",i18n("归档交付"),"closing_agents"]]
     : [["worker",i18n("worker 实现"),"working"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 验收与本地提交"),"validating"],["watcher",i18n("归档交付"),"closing_agents"]];
   const stageTitles={refining_requirements:i18n('梳理需求'),working:i18n('实现需求'),validating:i18n('运行检查'),reviewing:i18n('独立审查'),publishing:i18n('保存提交'),closing_agents:i18n('整理记录')};
   stableHTML($("#workflow-stages"), stages.map(([role,label,stage],i) => {

@@ -92,24 +92,25 @@ class FunctionReportAcceptanceTests(unittest.TestCase):
         completed = submission(final=True)
         completed['verdict']['issue_resolutions'] = approval(close=True)['verdict']['issue_resolutions']
         worker = FunctionWorker('worker', [completed])
-        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approval(), approval(close=True)])
+        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approval()])
         monitor = self.monitor(worker, reviewer)
         self.seed_report_issue(monitor)
         report = monitor.run()
         self.assertEqual(report.status, 'done', report.summary)
-        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 3))
-        self.assertIn('Accepted function needs explicit reviewer closure for: AUD-1', reviewer.calls[-1]['prompt'])
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        self.assertEqual(monitor.audit.items[0]['status'], 'open')
 
-    def test_missing_audit_closure_is_repaired_only_by_reviewer_without_implementation(self):
+    def test_reviewer_closure_may_cite_an_observation_instead_of_a_changed_file(self):
         worker = FunctionWorker('worker', [submission(final=True)])
-        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approval(), approval(close=True)])
+        approved = approval(close=True)
+        approved['verdict']['issue_resolutions'][0]['evidence'] = ['Fixed behavior check passed in this round.']
+        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approved])
         monitor = self.monitor(worker, reviewer)
         self.seed_report_issue(monitor)
         report = monitor.run()
         self.assertEqual(report.status, 'done', report.summary)
-        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 3))
-        self.assertIn('Accepted function needs explicit reviewer closure for: AUD-1', reviewer.calls[-1]['prompt'])
-        self.assertIn('no worker report or source edit is required', reviewer.calls[-1]['prompt'])
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        self.assertEqual(monitor.audit.items[0]['status'], 'resolved')
 
     def test_legacy_report_downgrade_resumes_review_without_worker_resubmission(self):
         completed = submission(final=True)

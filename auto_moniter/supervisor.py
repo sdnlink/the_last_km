@@ -947,6 +947,9 @@ class Supervisor:
                         last_worker = verdict
                         continue
             screened_review = self._repair_preflight(record, reviewer, last_review)
+            check_failure = (['No current pre-review check result for this candidate']
+                             if self.config.workflow == 'review-first' else [])
+            scope_gaps = []
             if self._uses_candidate_checks(record) and screened_review is None:
                 self._prepare_candidate_checks(record)
                 self._write_state(records, 'running', stall, previous_gap_key, tree)
@@ -958,6 +961,7 @@ class Supervisor:
                     return self._finish('action_required',
                         'Acceptance commands changed workspace source content; submitted candidate is stale. '
                         'Inspect the check logs before resuming.', records, verdict)
+                check_failure, scope_gaps = self._review_check_results(record)
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             self._process_control()
             if self._stop:
@@ -1030,14 +1034,12 @@ class Supervisor:
                 last_review = self._audit_feedback
                 stall, previous_gap_key, previous_tree = 0, '', ''
                 continue
-            if self.git_history and _accepted(review):
+            if self.git_history and self.config.workflow != 'review-first' and _accepted(review):
                 git_problems = self.git_history.review_problems(review.evidence)
                 if git_problems:
                     review.status = 'continue'
                     review.gaps.extend(git_problems)
                     review.next_actions.append('Review the exact worker Git checkpoint and cite its full hash in evidence.')
-                    if self.config.workflow == 'review-first':
-                        review.parse_error = 'invalid review checkpoint evidence'
             if not review_turn.exit_code and not review_turn.timed_out and not review_turn.interruption and not review.parse_error:
                 self._merge_modules(review, reviewer=True)
             review_failure = _failure_reason(review_turn, review)
@@ -1046,7 +1048,7 @@ class Supervisor:
             watcher_result = {'status': 'not_applied', 'closed': [], 'reasons': [],
                               'issues': {item['id']: item['status'] for item in self.audit.items}}
             if (not review_failure and not review.parse_error and not review_turn.interruption
-                    and (_accepted(review) or review.gaps or review.next_actions or review.blockers or review.issue_resolutions)):
+                    and (self._review_approved(review) or review.gaps or review.next_actions or review.blockers or review.issue_resolutions)):
                 # Provider/format failures must not replace the last business audit.
                 try:
                     rejected = getattr(self, '_review_audit_rejection', None)
@@ -1144,33 +1146,6 @@ class Supervisor:
                                     + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
             next_functions = None
             if self.config.function_dispatch:
-                if (verdict.task_status == 'incomplete' and review.task_status == 'accepted'
-                        and self.function_tasks.current
-                        and verdict.task_id == review.task_id == self.function_tasks.current['id']
-                        and not record.failure and not verdict.parse_error
-                        and not (review.gaps or review.blockers or review.next_actions)
-                        and (not self._function_gate or not self._candidate_scope_problems(record))):
-                    self._save_candidate_approval(record,review_record)
-                    report = record.watcher_result.get('worker_report')
-                    if report is None:
-                        record.watcher_result['worker_report'] = {
-                            'status':'pending', 'task':self.function_tasks.current,
-                            'original':verdict.to_dict(), 'review':review.to_dict(),
-                            'errors':['Reviewer independently accepted this SAME candidate. Confirm whether implementation '
-                                      'is complete using the current acceptance catalog; watcher checks are not unfinished coding.']}
-                        # If confirmation is interrupted, reuse only this exact
-                        # approval under the same version, role and instructions.
-                        review_record.watcher_result['check_retry'] = {
-                            'tree':review_tree, 'review':review.to_dict(), 'provider_config':self._provider_config(),
-                            'reviewer_model':self._reviewer_model(), 'task':self.function_tasks.current,
-                            'direction_ids':list(self._direction_ids['reviewer'])}
-                        self._event('worker_completion_confirmation', round=round_index, task_id=verdict.task_id)
-                    correction = self._repair_function_worker_report(record, records)
-                    if correction is None or record.verdict.task_status != 'done':
-                        return self._finish('stopped' if self._stop else 'action_required',
-                            record.failure or 'Worker did not confirm the independently reviewed candidate; '
-                            'implementation preserved without another writable turn.', records, record.verdict)
-                    turn, verdict = correction, record.verdict
                 if (self._verification_only() and review.task_status == 'changes_required'
                         and review.next_task is not None):
                     try:
@@ -1193,8 +1168,15 @@ class Supervisor:
                     last_worker = last_review = None
                     self._write_state(records, 'running', 0, '', review_tree)
                     continue
+                if review.task_status == 'accepted' and scope_gaps:
+                    self._reject_function_candidate(review_record, scope_gaps)
+                elif review.task_status == 'accepted' and check_failure:
+                    self._save_candidate_approval(record, review_record)
+                    review.status = 'continue'
+                    review.gaps.extend(check_failure)
+                    return self._finish_function_acceptance(review_record, records, check_failure)
                 try:
-                    next_functions, scope_gaps = self._review_function(verdict, review, round_index, review_tree)
+                    next_functions = self._review_function(verdict, review, round_index, review_tree)
                 except ValueError as exc:
                     review.status = 'continue'
                     review_record.watcher_result.update(status='rejected', reasons=[str(exc)])
@@ -1204,26 +1186,6 @@ class Supervisor:
                     verdict = record.verdict
                     if self.function_tasks.current['delivery_scope'] == 'function':
                         self._save_candidate_approval(record, review_record)
-                if scope_gaps:
-                    self._reject_function_candidate(review_record, scope_gaps)
-                if next_functions is not None and self._function_gate:
-                    task = self.function_tasks.current
-                    self._passed_function_checks = {}
-                    gaps = []
-                    if task['delivery_scope'] != 'function':
-                        missing = function_gate.coverage(self.function_tasks, self.modules.items, task,
-                            self.requirements_review, self.config.cwd)
-                        if missing:
-                            review_record.watcher_result.update(status='rejected', reasons=['Missing criteria: ' + ', '.join(missing)])
-                            self._invalidate_candidate_approval(record.index, ['Missing criteria: ' + ', '.join(missing)])
-                            return self._finish('action_required',
-                                'Reviewer must dispatch implementation tasks for uncovered criteria before declaring delivery: ' + ', '.join(missing),
-                                records, review)
-                    else:
-                        if not self._candidate_delivery_gate(record, review, final=False):
-                            gaps = review.gaps or ['Function regression checks did not complete']
-                    if gaps:
-                        return self._finish_function_acceptance(review_record, records, gaps)
                 if next_functions is not None and self.function_tasks.current['delivery_scope'] == 'function':
                     self._check_budget()
                     self._write_state(records, 'running', stall, previous_gap_key, tree)
@@ -1248,7 +1210,8 @@ class Supervisor:
                 if blocked:
                     return self._finish('action_required', blocked, records, review)
 
-            if _accepted(review) and not _accepted(verdict):
+            legacy_review = self.config.workflow != 'review-first'
+            if legacy_review and _accepted(review) and not _accepted(verdict):
                 review.status = "continue"
                 review.gaps.append("Worker has not explicitly confirmed completion and readiness for delivery.")
                 review.next_actions.append("Resolve the worker's open questions or gaps, verify the deliverable, and emit a done conclusion with evidence.")
@@ -1258,8 +1221,8 @@ class Supervisor:
                 baseline=self._baseline_files,
                 ignore_dir=self.run_dir,
                 git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
-            ) if _accepted(review) and not self._verification_only() else []
-            if _accepted(review):
+            ) if legacy_review and _accepted(review) else []
+            if legacy_review and _accepted(review):
                 problems.extend(f"Worker completion evidence: {problem}" for problem in ([] if self._verification_only() else acceptance_problems(
                     self.config.cwd, verdict.evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
                     git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '',
@@ -1270,12 +1233,30 @@ class Supervisor:
                 if pending:
                     problems.append("Unresolved audit issues: " + ", ".join(item["id"] for item in pending)
                                     + ". The reviewer must explicitly close each issue with evidence.")
-            if _accepted(review) and not problems:
+            if (not legacy_review and self._review_approved(review) and review.scope == 'module'
+                    and next_functions is None and review.module_ids
+                    and all(self.modules.items.get(key, {}).get('status') == 'accepted'
+                            and self.modules.items[key].get('tree') == review_tree for key in review.module_ids)):
+                # Reaffirming an existing delivery is not a new publication or progress milestone.
+                review.status = 'continue'
+                review.gaps.append('The named modules were already delivered on this candidate.')
+            if self._review_approved(review) and not problems:
                 self._save_candidate_approval(record, review_record)
                 self._write_state(records, 'running', stall, previous_gap_key, tree)
-                review_record.delivery = {'status': 'validating', 'reasons': []}
-                if verdict.scope == "requirement" and review.scope == "requirement":
-                    accepted = self._candidate_delivery_gate(record, review) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree)
+                review_record.delivery = {'status': 'publishing', 'reasons': []}
+                final = review.scope == 'requirement' and (not legacy_review or verdict.scope == 'requirement')
+                joint_ids = set(review.module_ids)
+                if legacy_review:
+                    joint_ids.intersection_update(verdict.module_ids)
+                if check_failure:
+                    review.status = 'continue'
+                    review.gaps.extend(check_failure)
+                    return self._finish_function_acceptance(review_record, records, check_failure)
+                ready = not legacy_review or self._delivery_checks(round_index, review, final=final,
+                    expected_tree=tree, module_ids=joint_ids)
+                accepted_modules = verdict if legacy_review else review
+                if final:
+                    accepted = ready and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree)
                     if accepted:
                         if self.project:
                             changed = self._sync_business_head(records)
@@ -1285,7 +1266,7 @@ class Supervisor:
                                 self._event('project_integration_review', errors=self.project.sync_errors)
                                 continue
                         review_record.delivery = {'status': 'accepted', 'reasons': []}
-                        self.modules.accept(verdict, review, round_index, review_tree)
+                        self.modules.accept(accepted_modules, review, round_index, review_tree)
                         if next_functions is not None:
                             self._advance_function(next_functions, review_record)
                         if self._begin_follow_up(records, review, review_record):
@@ -1301,10 +1282,9 @@ class Supervisor:
                         )
                     review_record.verdict = review
                 else:
-                    joint_ids = set(verdict.module_ids) & set(review.module_ids)
-                    if self._candidate_delivery_gate(record, review, final=False, module_ids=joint_ids) and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
+                    if ready and self._commit_approved(record,review_record,turn.text,review_turn.text,review_tree):
                         review_record.delivery = {'status': 'accepted', 'reasons': []}
-                        accepted_ids = self.modules.accept(verdict, review, round_index, review_tree)
+                        accepted_ids = self.modules.accept(accepted_modules, review, round_index, review_tree)
                         if next_functions is not None:
                             self._advance_function(next_functions, review_record)
                         review.scope = "module"
@@ -1317,7 +1297,7 @@ class Supervisor:
                         continue
                     else:
                         review_record.verdict = review
-                if review_record.delivery['status'] == 'validating':
+                if review_record.delivery['status'] == 'publishing':
                     review_record.delivery = {'status': 'rejected', 'reasons': list(review.gaps)}
                 if (next_functions is not None or self._uses_candidate_checks(record)) and review_record.delivery['status'] == 'rejected':
                     if self.project and (self.project.needs_review or self._project_replan):
@@ -1325,7 +1305,6 @@ class Supervisor:
                         continue
                     return self._finish_function_acceptance(review_record, records, review.gaps)
             if _accepted(review) and problems:
-                self._invalidate_candidate_approval(record.index, problems)
                 review_record.delivery = {'status': 'rejected', 'reasons': problems}
                 review.status = "continue"
                 review.gaps.extend(problems)
@@ -2072,17 +2051,6 @@ class Supervisor:
         entry and again immediately before irreversible ref updates.
         """
         self._process_control(active=True)
-        worker = next((record for record in reversed(self._records)
-                       if record.role=='worker' and record.index==reviewer.index),None)
-        if worker and self._uses_candidate_checks(worker):
-            final = (worker.watcher_result.get('candidate_checks',{}).get('context',{}).get('final',False)
-                     and reviewer.verdict.scope == 'requirement')
-            if not self._candidate_delivery_gate(worker,reviewer.verdict,final=final):
-                return False
-            if not self._candidate_approval(reviewer, worker):
-                reviewer.verdict.status = 'continue'
-                reviewer.verdict.gaps.append('Reviewer approval does not match the current candidate check receipt')
-                return False
         if self.project:
             self.project.observe(force=True)
             if self.project.needs_review:
@@ -2125,13 +2093,17 @@ class Supervisor:
             if self.project:
                 self.project.note_changes(['Workspace changed after review'])
                 self._project_replan = True
-                reviewer.verdict.status='continue'
-                reviewer.verdict.gaps.append('Workspace changed after review; review current inputs before committing')
-                return False
-            raise RuntimeError('Workspace changed after review; refusing local commit')
+            reviewer.verdict.status='continue'
+            reviewer.verdict.gaps.append('Workspace changed after review; review current inputs before committing')
+            return False
         if self._pending_directions():
             reviewer.verdict.status='continue'
             reviewer.verdict.gaps.append('New instructions arrived before commit; implement and review them first.')
+            return False
+        if self._uses_candidate_checks(worker) and not self._verified_candidate_approval(
+                reviewer, worker, self._candidate_check_context(worker)):
+            reviewer.verdict.status = 'continue'
+            reviewer.verdict.gaps.append('Reviewer approval does not match the saved candidate and check receipt. The saved acceptance is stale.')
             return False
         if not self._publication_boundary(reviewer):
             return False
@@ -2323,8 +2295,9 @@ class Supervisor:
         def check_evidence(evidence):
             return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
                                        git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
-        reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules, check_evidence,
-                                            known_modules=self.modules.items)
+        evidence_guard = check_evidence if self.config.workflow != 'review-first' else None
+        reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules,
+                                            evidence_guard, known_modules=self.modules.items)
         if references:
             for reference in references:
                 reference['local_ids'] = [item['id'] for item in self.audit.items if item['summary'] == reference['finding']]
@@ -2593,8 +2566,13 @@ class Supervisor:
 
     def _uses_candidate_checks(self, record):
         return (self.config.workflow == 'review-first' and not self.config.no_review
-                and not record.failure and not record.interruption and not record.verdict.parse_error
-                and (self.config.function_dispatch or _accepted(record.verdict)))
+                and not record.failure and not record.interruption and not record.verdict.parse_error)
+
+    def _review_approved(self, verdict):
+        if self.config.workflow != 'review-first':
+            return _accepted(verdict)
+        return (verdict.status == 'done' and verdict.scope in {'module', 'requirement'}
+                and not (verdict.gaps or verdict.next_actions or verdict.blockers))
 
     def _function_check_blocker(self, worker, reviewer, tree):
         """Bind a jointly reported blocker to the current assignment and actual failed checks."""
@@ -2947,54 +2925,22 @@ class Supervisor:
             self._write_state(self._records, 'running', 0, '', record.tree)
         self._event('candidate_checks_completed', round=record.index, tree=record.tree, passed=passed)
 
-    def _candidate_scope_problems(self, record=None):
-        record = record or next((item for item in reversed(self._records) if item.role=='worker'),None)
-        receipt = record.watcher_result.get('candidate_checks') if record else None
-        if (receipt and 'scope_gaps' in receipt and 'target_hashes' in receipt
-                and candidate_checks.valid(receipt,self.run_dir,self._candidate_check_context(record))
-                and workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir)==record.tree):
-            self._function_target_hashes = dict(receipt['target_hashes'])
-            return list(receipt['scope_gaps'])
-        return self._function_scope_problems()
-
-    def _candidate_delivery_gate(self, record, review, *, final=True, module_ids=None):
-        if not self._uses_candidate_checks(record):
-            return self._delivery_checks(record.index, review, final=final, expected_tree=record.tree, module_ids=module_ids)
+    def _review_check_results(self, record):
+        """Load the check stage's result once, before handing the candidate to the reviewer."""
         receipt = record.watcher_result.get('candidate_checks')
         context = self._candidate_check_context(record)
-        valid = candidate_checks.valid(receipt, self.run_dir, context)
-        if (not valid or not receipt['passed'] or not receipt['complete'] or receipt['source_changed']
-                or self._pending_directions()
-                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree):
-            review.status = 'continue'
-            review.gaps.extend((receipt.get('failures') or ['Pre-review checks did not pass']) if valid else
-                               ['Candidate or check context changed after review; the saved acceptance is stale'])
-            return False
-        if final and self.quality.config.get('requirements'):
-            rows, errors = self.quality.coverage(self.config.cwd, self.modules, record.verdict, review)
-            write_json(self.run_dir/'requirement-coverage.json', {'tree':record.tree, 'requirements':rows,
-                       'errors':errors, 'complete':not errors}, durable=True)
-            if errors:
-                self._invalidate_candidate_approval(record.index, errors)
-                review.status = 'continue'
-                review.gaps.extend(errors)
-                return False
-        self._passed_function_checks = dict(receipt['passed_commands'])
-        self._delivery_tree = record.tree
-        return True
+        if not candidate_checks.valid(receipt, self.run_dir, context):
+            return ['Pre-review check receipt does not match the submitted candidate'], []
+        if not receipt['passed'] or not receipt['complete'] or receipt['source_changed']:
+            return receipt.get('failures') or ['Pre-review checks did not pass'], receipt.get('scope_gaps', [])
+        self._function_target_hashes = dict(receipt.get('target_hashes', {}))
+        return [], []
 
     def _save_candidate_approval(self, worker, reviewer):
         receipt = worker.watcher_result.get('candidate_checks')
         if receipt and self._uses_candidate_checks(worker):
             reviewer.watcher_result['candidate_approval'] = {
                 'checks_digest':receipt['digest'], 'context':receipt['context'], 'review':reviewer.verdict.to_dict()}
-
-    def _invalidate_candidate_approval(self, index, reasons):
-        reviewer = next((record for record in reversed(self._records)
-                         if record.role == 'reviewer' and record.index == index), None)
-        approval = reviewer.watcher_result.get('candidate_approval') if reviewer else None
-        if isinstance(approval, dict):
-            approval['invalidated'] = list(reasons)
 
     def _candidate_approval(self, record, worker):
         approval = self._verified_candidate_approval(record, worker, self._candidate_check_context(worker))
@@ -3011,7 +2957,7 @@ class Supervisor:
                 or approval.get('context') != receipt['context'] or approval.get('checks_digest') != receipt['digest']):
             return None
         value = parse_verdict(json.dumps(approval['review']),function_gate=self._function_gate)
-        return value if (not value.parse_error and (_accepted(value) or value.task_status=='accepted')
+        return value if (not value.parse_error and (self._review_approved(value) or value.task_status=='accepted')
                          and self._cached_function_report_valid(value)) else None
 
     def _cached_function_report_valid(self, review):
@@ -3046,6 +2992,10 @@ class Supervisor:
             verdict.gaps.append('New human instructions arrived after the worker started. Implement and review them before accepting delivery.')
             return False
         before = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        if (pre_review and self.config.task_type == 'documentation'
+                and before == snapshot_fingerprint(self.config.cwd, self._baseline_files)):
+            verdict.gaps.append('No document or report was created or changed for this delivery.')
+            return False
         original_review = verdict.to_dict()
         baseline_errors = self.quality.baseline_errors(self.config.cwd) if self.config.quality_policy else []
         if baseline_errors:
@@ -3620,7 +3570,7 @@ class Supervisor:
         if review.task_status == 'changes_required':
             repair = (task.get('kind') == 'verification' and review.next_task is not None
                       and review.next_task.get('kind') != 'verification')
-            if (_accepted(review) or (review.next_task is not None and not repair)
+            if (self._review_approved(review) or (review.next_task is not None and not repair)
                     or not (review.gaps or review.blockers)):
                 return ['Rejected function requires focused gaps and cannot dispatch another task']
             return []
@@ -3630,8 +3580,8 @@ class Supervisor:
         if review.gaps or review.blockers or review.next_actions:
             errors.append('Accepted function requires gaps=[], blockers=[] and next_actions=[]; '
                           'use changes_required for substantive unfinished work')
-        if ((expected == 'function' and _accepted(review))
-                or expected != 'function' and (not _accepted(review) or review.scope != expected
+        if ((expected == 'function' and self._review_approved(review))
+                or expected != 'function' and (not self._review_approved(review) or review.scope != expected
                     or len(review.module_ids) != len(delivery_modules)
                     or set(review.module_ids) != set(delivery_modules))):
             errors.append('Function approval requires delivery_scope=' + expected
@@ -3646,32 +3596,17 @@ class Supervisor:
         if errors:
             raise ValueError('; '.join(errors))
         if review.task_status == 'changes_required':
-            return None, []
+            return None
         expected = task['delivery_scope']
-        if worker.task_id != task['id'] or worker.task_status != 'done':
-            raise ValueError('Function approval requires matching worker completion and delivery scope')
+        if worker.task_id != task['id']:
+            raise ValueError('Function approval must match the submitted assignment')
         if self._pending_directions():
             review.status = 'continue'
             review.task_status = 'changes_required'
             review.gaps.append('New user instructions require reviewer planning before this function can advance.')
-            return None, []
+            return None
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree:
             raise ValueError('Function review is stale because the workspace changed')
-        if self.git_history:
-            problems = self.git_history.review_problems(review.evidence)
-            if problems:
-                raise ValueError('; '.join(problems))
-        unresolved = [i['id'] for i in self.audit.pending() if i['id'] in self._function_issue_ids]
-        if unresolved:
-            raise ValueError('Dispatched function has unresolved audit issues: ' + ', '.join(unresolved))
-        if self._function_gate:
-            gaps = self._candidate_scope_problems()
-            if gaps:
-                return None, gaps
-        for role, conclusion in [('worker', worker), ('reviewer', review)]:
-            problems = self._function_evidence_problems(conclusion, role)
-            if problems:
-                raise ValueError('; '.join(problems))
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
         staged.accept(worker, review, index, tree)
         if expected == 'requirement' and review.next_task is not None:
@@ -3684,7 +3619,7 @@ class Supervisor:
                     or expected != 'requirement' and planned is None):
                 self._planning_rejection = {'task_id': str((candidate or {}).get('id',''))[:120],
                     'reason':'Reviewer must supply an updated complete function plan before the next dispatch'}
-                return staged, []
+                return staged
             candidate = planned
         if candidate is not None:
             if self._function_gate:
@@ -3704,21 +3639,7 @@ class Supervisor:
                 if isinstance(candidate, dict) and candidate.get('kind') in ('integration','verification'):
                     raise ValueError('Integration and verification assignments require the verified function gate')
                 staged.assign(candidate, self.modules.items)
-        return staged, []
-
-    def _function_evidence_problems(self, conclusion, role):
-        verification = self._verification_only()
-        problems = acceptance_problems(self.config.cwd, conclusion.evidence, baseline=self._baseline_files,
-            ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '') if not verification else []
-        cited = set(evidence_paths(self.config.cwd, conclusion.evidence,
-            baseline=None if verification else self._baseline_files, ignore_dir=self.run_dir))
-        task = self.function_tasks.current
-        missing = [file for file in dict.fromkeys([*(f for f, _ in function_tasks.targets(task)), *task.get('edit_files', [])])
-                   if (self.config.cwd / file).resolve() not in cited]
-        errors = [role + ': ' + problem for problem in problems]
-        if missing:
-            errors.append(role + ' must cite every changed assignment file; missing: ' + ', '.join(missing))
-        return errors
+        return staged
 
     def _advance_function(self, staged, review_record):
         task = self.function_tasks.current
@@ -4535,15 +4456,15 @@ class Supervisor:
                 *([deployment.instructions(
                     'reviewer', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
                 *([documentation_tasks.instructions('reviewer')] if self.config.task_type == 'documentation' else []),
-                *(['Watcher checks executed BEFORE this review for the exact submitted candidate:',
+                *(['Fixed checks executed BEFORE this review for the exact submitted candidate:',
                    json.dumps(safe(receipt),ensure_ascii=False),
                    'Read the saved check logs and assess the requirement, implementation and observed failures in this review. '
                    'Do not request another identical worker submission or another semantic review of unchanged work. '
                    'For a concrete defect within this assignment, return changes_required with the minimal repair boundary. '
                    'For failures outside this assignment, identify their scope explicitly; do not invent permission to edit '
                    'protected tests or other files. Acceptance still requires all mandatory checks to pass. '
-                   'After your acceptance, watcher only verifies the same version/check receipt and publishes; '
-                   'it does not run a second semantic review or repeat successful checks.'] if receipt else []),
+                   'You own the delivery decision. Approve only after the required checks pass. '
+                   'The watcher publishes the approved candidate without repeating the acceptance assessment.'] if receipt else []),
                 *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
                    function_tasks.verdict_contract('reviewer', self.function_tasks.current, module_ids=self.modules.items),
                    "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
@@ -4569,7 +4490,7 @@ class Supervisor:
                 "with current evidence. Distinguish environment-unavailable checks from implementation defects; "
                 "put actual unavailable tools/platforms in blockers, and continue independent work.",
                 "Accept the work only when the requirement is implemented and you cannot name a concrete missing behavior, broken path, or missing check.",
-                "A done conclusion without evidence is rejected. Cite files, commands, and observations in evidence.",
+                "Cite files, commands, and observations that support your conclusion.",
                 "Style nits alone are not gaps. A missing requirement, failing check, or unwired feature is a gap.",
                 "If you find gaps, status must be continue and next_actions must tell the worker exactly what to change.",
                 "For each blocking gap, give its AUD ID (if assigned), requirement/criterion, exact file or symbol, "
@@ -4588,12 +4509,13 @@ class Supervisor:
                 "Reuse unchanged verified findings. Recheck the new delta, affected dependencies, open AUD fixes "
                 "and integration. A wording/log-format preference is not a blocking product defect unless it "
                 "contradicts acceptance or makes evidence materially false. Do not demand both unittest discover "
-                "variants when they collect the same suite. The watcher independently executes fixed checks; "
-                "do not require the worker to copy future watcher results into source documents before they exist.",
+                "variants when they collect the same suite. Use the recorded fixed check results in your decision.",
                 "Use blocked only when an external secret, credential, or unavailable service stops all progress.",
                 "If the worker claims blocked but you can continue without that dependency, status must be continue.",
                 "Monitoring continues through questions and blockers. Do not ask the person for permission to continue.",
-                "Only return done when the worker explicitly reported done and the deliverable passes your independent checks.",
+                ("Use the candidate and the pre-review check results to make the delivery decision."
+                 if self.config.workflow == 'review-first' else
+                 "Only return done when the worker explicitly reported done and the deliverable passes your independent checks."),
                 "A module completion can be accepted with scope=module and status=done. "
                 "The supervisor then continues the original requirement. "
                 "Use scope=requirement only after independently checking ALL original modules, integration, "
@@ -4603,9 +4525,9 @@ class Supervisor:
                 "Do not invent that next requirement, and do not treat a repair of the same defect as a new requirement.",
                 "",
                 f"Review round: {index}",
-                ("Checkpoint: assess only the assigned targets, except for the explicit module/final gate."
+                ("Checkpoint: assess the assigned targets and the declared delivery scope."
                  if self.config.function_dispatch else "Checkpoint: completion candidate" if _accepted(worker)
-                 else "Checkpoint: in-progress audit; steer unfinished work without accepting it as delivered"),
+                 else "Checkpoint: assess the current work and identify any remaining repairs"),
                 f"Workspace fingerprint: {tree}",
                 "",
                 "Requirement:",
@@ -4655,7 +4577,7 @@ class Supervisor:
                 "",
                 f"Worker transcript: {output_path}",
                 "",
-                verdict_instructions(),
+                verdict_instructions(reviewer_decides=self.config.workflow == 'review-first'),
             ]
         )
 
@@ -4821,7 +4743,7 @@ class Supervisor:
         if not isinstance(value, dict):
             return None
         review = parse_verdict(json.dumps(value), function_gate=self._function_gate)
-        if (review.parse_error or not (_accepted(review) or review.task_status == 'accepted')
+        if (review.parse_error or not (self._review_approved(review) or review.task_status == 'accepted')
                 or not self._cached_function_report_valid(review)):
             return None
         return review
@@ -4841,9 +4763,7 @@ class Supervisor:
             return None
         review = parse_verdict(path.read_text(encoding='utf-8'), function_gate=self._function_gate)
         if (review.parse_error or review.task_status != 'accepted' or review.task_id != record.verdict.task_id
-                or review.gaps or review.blockers or review.next_actions
-                or self._function_evidence_problems(review, 'reviewer')
-                or self.git_history and self.git_history.review_problems(review.evidence)):
+                or review.gaps or review.blockers or review.next_actions):
             return None
         if not self._cached_function_report_valid(review):
             return None
@@ -4861,6 +4781,26 @@ class Supervisor:
                 or value.get('business_head') != self.git_history.business_head):
             return None
         return value
+
+    def _previous_handoff_approval(self, reviewer, worker, tree):
+        """Recover a saved approval rejected solely by the former file-citation rule."""
+        result = reviewer.watcher_result
+        receipt = worker.watcher_result.get('candidate_checks')
+        reasons = result.get('reasons', [])
+        if (result.get('status') != 'rejected' or not reasons or any(
+                not reason.startswith('worker must cite every changed assignment file; missing: ')
+                for reason in reasons)
+                or reviewer.failure or reviewer.interruption or reviewer.exit_code or reviewer.timed_out
+                or reviewer.tree != worker.tree or tree != worker.tree or self._pending_directions()
+                or not candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(worker))
+                or not receipt['passed']):
+            return None
+        from dataclasses import replace
+        review = replace(reviewer.verdict, status=reviewer.reported_status or reviewer.verdict.status)
+        if review.task_status == 'accepted' and self._cached_function_report_valid(review):
+            self._direction_ids['reviewer'] = list(receipt['context']['direction_ids'])
+            return review
+        return None
 
     def _invoke_review(self, provider, prompt, session_id, **kwargs):
         """One bounded repair belongs to the reviewer, never to the worker."""
@@ -4884,6 +4824,10 @@ class Supervisor:
             self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
             return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
+        if previous and worker and (review := self._previous_handoff_approval(previous, worker, tree)):
+            self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
+            return _CompletedTurn(json.dumps(review.to_dict()), '', 0, False, 0,
+                                  self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         ready = self._saved_approval(kwargs['index'], tree)
         if behavioral_failure:
             ready = None  # A historical mistaken approval requires actual reassessment.
@@ -4893,7 +4837,7 @@ class Supervisor:
         if (ready and ready.get('provider_config') == self._provider_config()
                 and ready.get('reviewer_model') == self._reviewer_model()):
             conclusion = parse_verdict(json.dumps(ready['review']))
-            if not (_accepted(conclusion) or conclusion.task_status=='accepted'):
+            if not (self._review_approved(conclusion) or conclusion.task_status=='accepted'):
                 raise RecoveryError('Saved approval is invalid')
             if self._cached_function_report_valid(conclusion):
                 self._publication_review_reused = kwargs['index']
@@ -4918,12 +4862,6 @@ class Supervisor:
         for attempt in range(2):
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')
-            if self.git_history and (_accepted(review) or self.config.function_dispatch and review.task_status == 'accepted'):
-                problems = self.git_history.review_problems(review.evidence)
-                if problems:
-                    review.status = 'continue'
-                    review.parse_error = 'invalid review checkpoint evidence'
-                    review.gaps.extend(problems)
             if (behavioral_failure and not review.parse_error
                     and review.task_status == 'accepted'
                     and not (turn.exit_code or turn.timed_out or turn.interruption)
@@ -4957,17 +4895,7 @@ class Supervisor:
             if (not failure and not review.parse_error and not turn.interruption
                     and self.config.workflow == 'review-first'
                     and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
-                # Module definition errors belong to the existing read-only
-                # report-repair loop, before acceptance applies any proposal.
-                staged_modules = self._merge_modules(review, reviewer=True, apply=False)
-                if staged_modules is not None and _accepted(review):
-                    worker = next((r.verdict for r in reversed(self._records) if r.role=='worker'), Verdict('continue'))
-                    dependency_errors = [error for error in staged_modules.coverage(worker, review)
-                                         if 'requires accepted dependencies:' in error]
-                    if dependency_errors:
-                        review.status = 'continue'
-                        review.parse_error = 'invalid module dependency confirmation'
-                        review.gaps.extend(dependency_errors)
+                self._merge_modules(review, reviewer=True, apply=False)
             if (not failure and not review.parse_error and not turn.interruption
                     and self.config.workflow == 'review-first'
                     and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
@@ -4988,12 +4916,9 @@ class Supervisor:
                 findings, _ = staged.local_findings(_audit_findings(review))
                 worker = next((r.verdict for r in reversed(self._records) if r.role=='worker'), Verdict('continue'))
                 modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope=='module' else []
-                def evidence_errors(evidence):
-                    return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files,
-                        ignore_dir=self.run_dir, git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
                 try:
                     staged.update(findings, review.issue_resolutions, kwargs['index'], tree, modules,
-                                  evidence_errors, known_modules=self.modules.items)
+                                  None, known_modules=self.modules.items)
                 except AuditCapacityError:
                     raise
                 except ValueError as exc:
@@ -5010,18 +4935,6 @@ class Supervisor:
                     if attempt:
                         self._review_audit_retry_exhausted = kwargs['index']
                         self._review_audit_rejection = {'round': kwargs['index'], 'reason': str(exc)}
-                if (self.config.function_dispatch and self.function_tasks.current
-                        and review.task_status == 'accepted' and not review.parse_error
-                        and (not self._function_gate or not self._candidate_scope_problems())):
-                    problems = self._function_evidence_problems(review, 'reviewer')
-                    pending = [item['id'] for item in staged.pending() if item['id'] in self._function_issue_ids]
-                    if pending:
-                        problems.append('Accepted function needs explicit reviewer closure for: ' + ', '.join(pending)
-                            + '. Use current file evidence to close invalid findings; no worker report or source edit is required.')
-                    if problems:
-                        review.parse_error = 'invalid function evidence'
-                        review.status = 'continue'
-                        review.gaps.extend(problems)
             invalid = failure or review.parse_error or turn.interruption
             if not invalid or self._stop or self.config.workflow != 'review-first':
                 return turn

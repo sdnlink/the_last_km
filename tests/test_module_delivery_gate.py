@@ -122,7 +122,7 @@ class ModuleDeliveryGateTests(unittest.TestCase):
         self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,1))
         self.assertTrue(all(item['status']=='accepted' for item in monitor.modules.export()))
 
-    def test_final_coverage_citation_failure_can_resume_with_reviewer_only(self):
+    def test_final_approval_does_not_require_joint_citations(self):
         (self.root/'extra.txt').write_text('Requirement evidence\n')
         submitted=outcome(['A','B'],'requirement')
         submitted['evidence'].append('extra.txt')
@@ -134,20 +134,9 @@ class ModuleDeliveryGateTests(unittest.TestCase):
             checks=['git diff --check'],quality_policy={'requirements':[
                 {'id':'R1','text':'A and B work','module_ids':['A','B'],'evidence_paths':['extra.txt']}]}),log=lambda _:None)
         report=monitor.run()
-        self.assertEqual(report.status,'action_required',report.summary)
-        self.assertIn('lacks joint cited evidence',report.summary)
-        self.assertEqual(git(self.root,'rev-parse','HEAD'),self.before)
-        approved=outcome(['A','B'],'requirement')
-        approved['evidence'].append('extra.txt')
-        worker=ScriptedProvider('worker',[])
-        reviewer=Reviewer(self.root,[{'verdict':approved}])
-        monitor=Supervisor(RunConfig('',self.root,worker,reviewer=reviewer,resume=True,
-            workflow='review-first',git_history='required',run_dir=self.run,max_rounds=1,
-            retry_delay_s=0),log=lambda _:None)
-        report=monitor.run()
         self.assertEqual(report.status,'done',report.summary)
-        self.assertFalse(worker.calls)
-        self.assertEqual(len(reviewer.calls),1)
+        self.assertNotEqual(git(self.root,'rev-parse','HEAD'),self.before)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
         events=[json.loads(line) for line in (self.run/'events.jsonl').read_text().splitlines()]
         self.assertEqual(sum(event['event']=='check_finished' for event in events),1)
 

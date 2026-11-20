@@ -104,16 +104,15 @@ class ModuleWorkerReportRepairTests(unittest.TestCase):
             self.assertTrue(record['watcher_result']['candidate_checks']['passed'])
             self.assertEqual(len(list((root/'run').glob('001-worker-report-original-*.log'))), 1)
 
-    def test_dependency_missing_from_reviewer_gets_its_own_read_only_repair(self):
+    def test_only_the_module_explicitly_approved_by_the_reviewer_is_recorded(self):
         missing = {**_verdict('done', scope='module', evidence=['app.py']),
                    'module_ids': ['B'], 'modules': []}
-        valid = {**missing, 'module_ids': ['A', 'B']}
         with tempfile.TemporaryDirectory() as tmp:
-            report, worker, reviewer, monitor = self.exercise(Path(tmp), {}, [missing, valid])
+            report, worker, reviewer, monitor = self.exercise(Path(tmp), {}, [missing])
             self.assertEqual(report.status, 'max_rounds', report.summary)
-            self.assertEqual((len(worker.calls), len(reviewer.calls)), (2, 3))
-            self.assertIn('invalid module dependency confirmation', reviewer.calls[-1]['prompt'])
-            self.assertTrue(all(m['status']=='accepted' for m in monitor.modules.export()))
+            self.assertEqual((len(worker.calls), len(reviewer.calls)), (2, 2))
+            self.assertEqual({m['id']:m['status'] for m in monitor.modules.export()},
+                             {'A':'pending', 'B':'accepted'})
 
     def test_failed_correction_does_not_invent_dependency_acceptance(self):
         invalid = {**_verdict('done', scope='module', evidence=['app.py']),

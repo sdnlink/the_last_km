@@ -187,7 +187,7 @@ class BusinessCommitMessageTests(unittest.TestCase):
         subject, body = follow_up._git(root, 'log', '-1', '--format=%s%n%b').split('\n', 1)
         self.assertEqual(subject, 'Verify the complete delivery')
         self.assertIn('Approved the complete delivery.', body)
-        self.assertEqual(body.split('Watcher checks\n', 1)[1].splitlines(),
+        self.assertEqual(body.split('Pre-review checks\n', 1)[1].splitlines(),
                          ['Reused from round 1.', *[f'- {check} — passed (exit 0)' for check in commands]])
         without_source = {**receipt, 'reused_from': {'checks_digest': receipt['reused_from']['checks_digest']}}
         self.assertEqual(publication._reviewed_checks(without_source, 2)[0],
@@ -241,7 +241,7 @@ class BusinessCommitMessageTests(unittest.TestCase):
 
         with patch.object(Supervisor, '_save_candidate_approval', corrupt_log):
             report = self.run_single_publication('test -f app.py')
-        receipt = self.assert_unpublished(report, 'saved acceptance is stale', valid=False)
+        receipt = self.assert_unpublished(report, 'approval does not match the saved candidate and check receipt', valid=False)
         self.assertTrue(receipt['passed'])
 
     def run_single_publication(self, check):

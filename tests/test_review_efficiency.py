@@ -58,23 +58,16 @@ class ReviewEfficiencyTests(unittest.TestCase):
         self.assertEqual(len(worker.calls), 1)
         self.assertIn('connection reset', reviewer.calls[-1]['prompt'])
 
-    def test_missing_checkpoint_citation_is_reviewer_repair(self):
-        import re
+    def test_publication_binds_the_checkpoint_without_a_reviewer_citation(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         worker = self.worker()
-        class Reviewer(ScriptedProvider):
-            def _command(inner, session, prompt_file, read_only):
-                if len(inner.calls) == 2:
-                    checkpoint = re.search(r'Worker checkpoint: ([0-9a-f]{40,64})', prompt_file.read_text()).group(1)
-                    inner.scripts[0]['verdict']['evidence'].append(checkpoint)
-                return super()._command(session, prompt_file, read_only)
-        reviewer = Reviewer('reviewer', [self.brief(), self.done(), self.done()])
+        reviewer = ScriptedProvider('reviewer', [self.brief(), self.done()])
         report = Supervisor(RunConfig('Implement the original requirement', self.root, worker,
             reviewer=reviewer, workflow='review-first', git_history='required', run_dir=self.run,
             max_rounds=1, retry_delay_s=0), log=lambda _: None).run()
         self.assertEqual(report.status, 'done', report.summary)
-        self.assertEqual(len(worker.calls), 1)
-        self.assertIn('invalid review checkpoint evidence', reviewer.calls[-1]['prompt'])
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        self.assertEqual(subprocess.check_output(['git', 'show', 'HEAD:app.py'], cwd=self.root), b'changed\n')
 
     def stopped_review(self):
         worker = self.worker()

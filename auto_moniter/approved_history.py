@@ -169,7 +169,7 @@ class ApprovedHistory(GitHistory):
              if self.business_commits and self.business_head['commit'] else
              'Unborn business branch: review the complete candidate source before its first code commit.'),
             'Account for the publication diff before approval; reuse already verified unchanged portions. '
-            'Cite the FULL worker checkpoint hash and actual changed-file evidence. '
+            'Describe the changes and evidence supporting your review. '
 
             'No file writes, tests, builds or Git commits are permitted for the reviewer.',
             'Delta stat:\n' + clipped(patch, 12000), 'Delta:\n' + clipped(changes, 24000)])

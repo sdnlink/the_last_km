@@ -180,7 +180,7 @@ class FunctionModuleDeliveryTests(unittest.TestCase):
         self.assertIn('prerequisite module acceptance',monitor._planning_rejection['reason'])
         self.assertFalse((self.root/'next.py').exists())
 
-    def test_old_dispatched_module_dependency_failure_is_not_replayed_until_budget_exhaustion(self):
+    def test_approval_of_old_module_assignment_does_not_trigger_a_second_review(self):
         milestone = copy.deepcopy(self.final)
         milestone['delivery_scope'] = 'module'
         work = conclusion('F2','done',['B'],final=True,file='next.py')
@@ -189,7 +189,7 @@ class FunctionModuleDeliveryTests(unittest.TestCase):
         worker = FunctionWorker('worker',[{**conclusion('F1','done',['A']),'touch':'app.py'},
                                           {**work,'touch':'next.py'}])
         reviewer = ScriptedProvider('reviewer',[self.planning(),
-            conclusion('F1','accepted',[],next_task=milestone),review,copy.deepcopy(review)])
+            conclusion('F1','accepted',[],next_task=milestone),review])
         monitor = self.monitor(worker,reviewer)
         validate = monitor._validate_function_plan
         def old_dispatch(ledger,modules,brief,**kwargs):
@@ -204,15 +204,12 @@ class FunctionModuleDeliveryTests(unittest.TestCase):
             return validate(ledger,modules,brief,**kwargs)
         with patch.object(monitor,'_validate_function_plan',side_effect=old_dispatch):
             report = monitor.run()
-        self.assertEqual(report.status,'action_required',report.summary)
-        self.assertIn('requires accepted dependencies: A',report.summary)
-        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+        self.assertEqual(report.status,'max_rounds',report.summary)
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,3))
         self.assertTrue((self.root/'next.py').exists())
-        self.assertEqual([m['status'] for m in monitor.modules.items.values()],['pending','pending'])
-        events=(self.root/'run/events.jsonl').read_text()
-        self.assertNotIn('acceptance_review_reused',events)
+        self.assertEqual([m['status'] for m in monitor.modules.items.values()],['pending','accepted'])
         last = next(r for r in reversed(report.records) if r.role=='reviewer')
-        self.assertNotIn('candidate_approval',last.watcher_result)
+        self.assertEqual(last.delivery['status'],'accepted')
 
     def test_module_dependency_validation_allows_a_provisionally_accepted_module(self):
         from auto_moniter.function_tasks import FunctionTasks

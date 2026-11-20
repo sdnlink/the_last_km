@@ -200,7 +200,7 @@ class FunctionTasks:
     def accept(self,worker,reviewer,index,tree):
         if not self.current or worker.task_id!=self.current['id'] or reviewer.task_id!=self.current['id']:
             raise ValueError('Function result must match the single dispatched task ID')
-        if worker.task_status!='done' or reviewer.task_status!='accepted':
+        if reviewer.task_status!='accepted':
             return False
         if len(self.accepted)>=200:
             raise ValueError('Function dispatch limit reached; start a linked follow-up')
@@ -272,7 +272,7 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
              else 'the dispatched integration and all of its listed functions' if group else 'the dispatched function')
     manifest = ('The edit_files manifest grants whole-file edits at exactly those paths, including necessary helper '
                 'declarations, resources and registration. Preserve tests that predate the assignment and all other file/function scopes. '
-                'Cite every manifest file in evidence. ' if task.get('edit_files') else '')
+                'Describe the files actually changed in evidence. ' if task.get('edit_files') else '')
     delivery_modules = (list(module_ids) if task['delivery_scope'] == 'requirement' and module_ids is not None
                         else [task['module_id']])
     completion = ('For module or requirement delivery, return status=done with scope matching delivery_scope and '
@@ -301,7 +301,7 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
             'For task_status=incomplete, gaps and next_actions describe only this assignment.')
     return (
         IDENTIFIER_CONTRACT + manifest + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
-        'task_status=accepted or changes_required. Accept after worker task_status=done and current evidence agrees. '
+        'task_status=accepted or changes_required. Base acceptance on the candidate and current evidence. '
         'Independently assess the worker concerns and test evidence. Nonempty worker gaps/next_actions, '
         'or waiting for automatic watcher checks or review, are not by themselves implementation defects. '
         'If the assignment is correct, accept it in this response and give the next_task; do not send the worker '

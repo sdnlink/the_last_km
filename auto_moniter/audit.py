@@ -178,9 +178,10 @@ class AuditLedger:
             item = next((item for item in items if item["id"] == proposal["id"]), None)
             if item is None:
                 raise ValueError(f"Unknown audit issue {proposal['id']}; use the monitor ledger")
-            problems = check_evidence(proposal["evidence"])
-            if problems:
-                raise ValueError(f"Issue {item['id']} closure evidence rejected: " + "; ".join(problems))
+            if check_evidence is not None:
+                problems = check_evidence(proposal["evidence"])
+                if problems:
+                    raise ValueError(f"Issue {item['id']} closure evidence rejected: " + "; ".join(problems))
             item.update(status="resolved", resolved_round=index, tree=tree,
                         resolution={"summary": redact(proposal["summary"]),
                                     "evidence": [redact(text) for text in proposal["evidence"]]})

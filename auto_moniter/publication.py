@@ -316,7 +316,7 @@ def _business_commit_message(index, previous_round, worker, reviewer, changed, p
     if reviewer.get('summary'):
         parts.append(reviewer['summary'])
     parts.extend(f'- {item["id"]} resolved — {item["resolution"]["summary"]}' for item in issues)
-    parts.extend(['', 'Watcher checks', *_reviewed_checks(receipt, index)])
+    parts.extend(['', 'Pre-review checks', *_reviewed_checks(receipt, index)])
     return _portable_commit_text('\n'.join(parts), cwd).replace('\0', '').encode('utf-8', errors='replace') + b'\n'
 
 

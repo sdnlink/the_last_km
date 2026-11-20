@@ -225,7 +225,7 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
         self.assertEqual({row.tree for row in report.records}, {worker1.tree})
         self.assert_review_receipt(report, 1, ('seed',))
         reviews = {row.index: row for row in report.records if row.role == 'reviewer'}
-        self.assertIn('No new module was jointly accepted', reviews[2].verdict.gaps[0])
+        self.assertIn('The named modules were already delivered', reviews[2].verdict.gaps[0])
         self.assertEqual(reviews[3].verdict.gaps, reviews[4].verdict.gaps)
         self.assertTrue(all(row.delivery.get('status') != 'accepted' for i, row in reviews.items() if i > 1))
         self.assertEqual((self.root / 'app.py').read_text(), 'changed\n')

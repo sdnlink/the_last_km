@@ -253,7 +253,14 @@ print('fixture installation completed')
                     self.assertIn('data-needs-setup="false"',body)
                     self.assertIn('id="task-board"',body)
                     self.assertIn('href="/overview" data-nav-key="overview"',body)
-                self.assertIn('id="setup-agents"',request('GET','/setup')[1])
+                setup = request('GET', '/setup')[1]
+                self.assertIn('id="setup-agents"', setup)
+                self.assertIn('id="setup-guide"', setup)
+                with patch('console.agents.shutil.which', side_effect=lambda name: name if name in ('git', 'node') else None):
+                    status, setup_data = request('GET', '/api/agents/setup')
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(setup_data)['prerequisites'],
+                                 {'git': True, 'bwrap': False, 'node': True, 'npm': False})
                 self.assertEqual(request('GET','/pages/setup.js')[0],200)
                 self.assertEqual(request('POST','/api/agents/save',{'agents':[]})[0],403)
                 token=json.loads(request('GET','/api/config')[1])['csrf_token']

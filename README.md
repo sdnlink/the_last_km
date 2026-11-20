@@ -20,10 +20,10 @@ Completion candidates and reported external blockers trigger review. Unfinished 
 
 | Component | When it is needed |
 | --- | --- |
-| Linux and Python 3.11+ | Required to run Auto Moniter. |
+| Linux, Bash, and Python 3.11+ with `venv` | Required for the source installer. It creates a project-local environment and uses pip to install the package. |
 | Git | Required for local code commits and parallel task worktrees. Configure a commit author before starting. |
-| Agent CLIs | Install and authenticate the worker and reviewer you plan to use. Both must be able to run independently. |
-| Node.js 22 | Required for JavaScript and inline HTML function checks. Agent installers may require a different Node.js version. |
+| Agent CLIs | Required when running tasks. Install and authenticate the worker and reviewer you plan to use. Both must be able to run independently. |
+| Node.js and npm | Needed for npm-based Agent installation. JavaScript and inline HTML function checks require Node.js 22. |
 | Bubblewrap (`bwrap`) | Required for `strict` isolation, which the web console enables for reviewers by default. |
 | Project toolchain | Install the target project's build tools, dependencies, and test runners in the task environment. |
 
@@ -34,20 +34,21 @@ The base Python package uses the standard library. The web console needs no fron
 ```sh
 git clone https://github.com/sdnlink/the_last_km.git
 cd the_last_km
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e .
+./install.sh --start
 ```
+
+The installer creates or reuses `.venv` and installs Auto Moniter there. Open `http://127.0.0.1:8765`. The first visit to the homepage opens the setup guide, which checks task prerequisites and walks you through installing, authenticating and enabling the agents you choose. Later, start the console with `./start.sh`.
 
 For function checks in TypeScript/TSX, Go, Rust, Java, C/C++, C#, Kotlin, Swift, Ruby, PHP, Lua, or Bash, install the optional parsers in the same environment:
 
 ```sh
-python3 -m pip install -e '.[languages]'
+./install.sh --languages
 ```
 
-Activate `.venv` again in each new terminal. Check the installation and available CLIs:
+Activate `.venv` to use the installed CLI. Check the installation and available CLIs:
 
 ```sh
+. .venv/bin/activate
 auto-moniter --version
 auto-moniter providers
 auto-moniter doctor --cwd /path/to/project

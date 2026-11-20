@@ -20,10 +20,10 @@ Auto Moniter 通过 Worker 实现、Reviewer 独立审核和已配置的验收�
 
 | 组件 | 使用条件 |
 | --- | --- |
-| Linux、Python 3.11+ | 运行本项目的基础环境。 |
+| Linux、Bash、带 `venv` 的 Python 3.11+ | 源码安装必需。安装脚本会创建项目虚拟环境，并用 pip 安装本项目。 |
 | Git | 本地代码提交和并行任务工作副本需要；启动前配置提交作者。 |
-| Agent CLI | 安装并完成所选执行器和审查器的认证，确保两者均可独立运行。 |
-| Node.js 22 | JavaScript 和 HTML 内联 JavaScript 的函数范围检查需要；Agent 安装器可能有其他版本要求。 |
+| Agent CLI | 启动任务前安装并认证所选执行器和审查器，确保两者均可独立运行。 |
+| Node.js 和 npm | 安装通过 npm 分发的 Agent 时需要。JavaScript 和 HTML 内联 JavaScript 的函数范围检查需要 Node.js 22。 |
 | Bubblewrap（`bwrap`） | `strict` 隔离需要，Web 控制台的审查器默认使用该模式。 |
 | 目标项目工具链 | 在任务环境中准备目标项目的编译器、依赖和测试工具。 |
 
@@ -34,20 +34,21 @@ Auto Moniter 通过 Worker 实现、Reviewer 独立审核和已配置的验收�
 ```sh
 git clone https://github.com/sdnlink/the_last_km.git
 cd the_last_km
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e .
+./install.sh --start
 ```
+
+脚本会创建或复用 `.venv`，并将项目安装到该环境。打开 `http://127.0.0.1:8765`，首次访问首页会自动进入安装指引。页面会检查运行任务所需的工具，并引导你安装、认证和启用所选 Agent。之后可用 `./start.sh` 启动控制台。
 
 需要检查 TypeScript/TSX、Go、Rust、Java、C/C++、C#、Kotlin、Swift、Ruby、PHP、Lua 或 Bash 的函数范围时，在同一 Python 环境安装解析器：
 
 ```sh
-python3 -m pip install -e '.[languages]'
+./install.sh --languages
 ```
 
-新终端中重新激活 `.venv`，然后检查安装和 CLI 可用性：
+使用命令行时先激活 `.venv`，然后检查安装和 CLI 可用性：
 
 ```sh
+. .venv/bin/activate
 auto-moniter --version
 auto-moniter providers
 auto-moniter doctor --cwd /path/to/project

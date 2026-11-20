@@ -68,6 +68,15 @@ function revealJobs(){
 }
 async function load(){
  const data=await api('/api/agents/setup');
+ const guide=$('#setup-guide');
+ guide.hidden=data.initialized;
+ $('#setup-environment').hidden=!data.prerequisites;
+ if(!guide.hidden&&data.prerequisites){
+  const {git,bwrap,node,npm}=data.prerequisites;
+  $('#setup-git').textContent=git?i18n('已检测到'):i18n('启动开发任务前，请安装 Git。');
+  $('#setup-bwrap').textContent=bwrap?i18n('已检测到'):i18n('使用默认的严格审查隔离前，请安装 Bubblewrap。');
+  $('#setup-npm').textContent=node&&npm?i18n('已检测到'):i18n('安装通过 npm 分发的 Agent 前，请准备兼容的 Node.js 和 npm。');
+ }
  for(const agent of data.agents)agentLabels.set(agent.id,agent.label);
  if(!loaded){$('#setup-agents').innerHTML=data.agents.map(cardHTML).join('');loaded=true;$('#setup-title').textContent=data.initialized?i18n('管理你的 Agent'):i18n('初始化：选择你的 Agent');}
  for(const agent of data.agents){const status=$(`[data-agent="${agent.id}"] [data-status]`);status.innerHTML=stateLabel(agent.installed?'complete':'idle',agent.installed?i18n('已检测到 CLI'):i18n('尚未安装'));status.classList.toggle('installed',agent.installed);}
@@ -81,14 +90,16 @@ export function mount(){
  $('#setup-agents').addEventListener('change',e=>{const card=e.target.closest('[data-agent]');if(card)updateSummary(card,true);});
  $('#setup-detect').addEventListener('click',()=>load().catch(e=>toast(e.message,true)));
  $('#setup-install-selected').addEventListener('click',async()=>{
-  if(busy)return;busy=true;$('#setup-error').hidden=true;
+  if(busy)return;
   const selected=$$('[data-agent]').filter(card=>card.querySelector('[name=enabled]').checked);
+  if(!selected.length){toast(i18n('请先启用要安装的 Agent。'),true);return;}
+  busy=true;$('#setup-error').hidden=true;
   for(const button of $$('.setup-actions button'))button.disabled=true;
   try{
    const saved=await save(selected),failed=[];
    for(const card of selected){
     const agent=saved.agents.find(a=>a.id===card.dataset.agent);if(agent.installed)continue;
-    if(agent.install_method==='manual'){toast(i18n`${agent.label}：请打开官方页面安装，再检测 CLI。`,true);continue;}
+    if(agent.install_method==='manual'){failed.push(i18n`${agent.label}：请打开官方页面安装，再检测 CLI。`);continue;}
     const job=await api('/api/agents/install',{id:agent.id});renderJobs([job]);revealJobs();
     while(['queued','running'].includes(jobs.get(job.id)?.status)){
      await new Promise(resolve=>setTimeout(resolve,1500));await load();

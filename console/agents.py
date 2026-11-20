@@ -44,6 +44,7 @@ class AgentManager:
                          'can_review': not spec.get('worker_only', False),
                          'install_method': 'manual' if spec.get('manual') else 'npm' if spec.get('package') else 'official_script'})
         return {'initialized': bool(data.get('initialized')), 'agents': rows,
+                'prerequisites': {name: bool(shutil.which(name)) for name in ('git', 'bwrap', 'node', 'npm')},
                 'jobs': [self._job_view(job) for job in self.jobs.values()]}
 
     def save(self, payload):

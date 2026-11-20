@@ -69,6 +69,29 @@ class ResumeArgumentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '任务类型'):
             resume_arguments({'argv': [*self.argv, '--task-type=code']}, self.root / 'run', state)
 
+    def test_console_resume_accepts_message_rewrite_but_rejects_source_rewrite(self):
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
+
+        author = ('-c', 'user.name=Fixture', '-c', 'user.email=fixture@local')
+        source = self.root / 'app.py'
+        git('init', '-q')
+        source.write_text('original\n')
+        git('add', 'app.py')
+        git(*author, 'commit', '-qm', 'Initial')
+        state = {**self.state, 'git_history': {'approval_only': True, 'business_head': {
+            'ref': git('symbolic-ref', 'HEAD'), 'commit': git('rev-parse', 'HEAD'),
+        }}}
+        git(*author, 'commit', '--amend', '-qm', 'Updated description')
+        arguments = resume_arguments({'argv': self.argv}, self.root / 'run', state)
+        self.assertIn('--resume', arguments)
+        self.assertIn('--max-agent-calls=60', arguments)
+        source.write_text('changed\n')
+        git('add', 'app.py')
+        git(*author, 'commit', '--amend', '-qm', 'Different content')
+        with self.assertRaisesRegex(ValueError, 'Business history was rewritten'):
+            resume_arguments({'argv': self.argv}, self.root / 'run', state)
+
 
 class ImportedTaskControlTests(unittest.TestCase):
     def setUp(self):

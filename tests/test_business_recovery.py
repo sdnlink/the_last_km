@@ -55,6 +55,13 @@ class BusinessRecoveryTests(unittest.TestCase):
         self.git('add', '--', name)
         return self.commit('external input')
 
+    def rewrite(self, commit, *parents, tree=None):
+        argv = ['-c', 'user.name=New Author', '-c', 'user.email=new@local', 'commit-tree',
+                tree or self.git('show', '-s', '--format=%T', commit)]
+        for parent in parents:
+            argv.extend(('-p', parent))
+        return self.git(*argv, '-m', 'Rewritten metadata')
+
     def monitor(self, worker, reviewer, **options):
         return Supervisor(RunConfig('Original requirement', self.project, worker, reviewer=reviewer,
             workflow='review-first', git_history='required', run_dir=self.run, retry_delay_s=0,
@@ -90,6 +97,39 @@ class BusinessRecoveryTests(unittest.TestCase):
         self.assertEqual(state['git_history']['business_updates'][0]['after']['commit'], new_head)
         self.assertEqual(self.git('rev-parse', 'HEAD^'), new_head)
         self.assertTrue(json.loads((self.run/'acceptance-results.json').read_text())['checks'])
+
+    def test_resume_on_rewritten_metadata_with_new_commit_requires_fresh_acceptance(self):
+        old_head = self.external()
+        saved = self.pause_before_work()
+        new_root = self.rewrite(self.original)
+        rewritten = self.rewrite(old_head, new_root)
+        self.git('update-ref', 'HEAD', rewritten, old_head)
+        new_head = self.external('additional.py', 'new input\n')
+        (self.run/'approval-ready.json').write_text('{}')
+        (self.run/'acceptance-results.json').write_text(json.dumps({'checks':[], 'complete':True}))
+        monitor, worker, reviewer = self.delivery(resume=True)
+        invoke = monitor._invoke
+
+        def check_revalidation(*args, **kwargs):
+            self.assertFalse((self.run/'approval-ready.json').exists())
+            if kwargs['role'] == 'worker':
+                acceptance = json.loads((self.run/'acceptance-results.json').read_text())
+                self.assertTrue(acceptance['invalidated'])
+                self.assertFalse(acceptance['complete'])
+            return invoke(*args, **kwargs)
+
+        with patch.object(monitor, '_invoke', side_effect=check_revalidation):
+            result = monitor.run()
+        self.assertEqual(result.status, 'done', result.summary)
+        self.assertIn(new_head, worker.calls[0]['prompt'])
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        state = json.loads((self.run/'state.json').read_text())
+        updates = state['git_history']['business_updates']
+        self.assertEqual(updates[0]['before']['commit'], old_head)
+        self.assertEqual(updates[0]['after']['commit'], new_head)
+        self.assertEqual(state['usage']['agent_calls'], saved['usage']['agent_calls'] + 3)
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), new_head)
+        self.assertTrue(json.loads((self.run/'acceptance-results.json').read_text())['complete'])
 
     def test_commit_during_worker_restarts_from_current_source_without_old_review(self):
         monitor, worker, reviewer = self.delivery()
@@ -185,10 +225,24 @@ class BusinessRecoveryTests(unittest.TestCase):
             history.reconcile_business_head()
         self.assertEqual((self.run/'git-history.json').read_bytes(), before)
         self.git('checkout', '-q', history.business_head['ref'].removeprefix('refs/heads/'))
+        (self.project/'app.py').write_text('different source\n')
+        self.git('add', 'app.py')
         self.git('-c', 'user.name=Fixture', '-c', 'user.email=f@local', 'commit', '--amend', '-qm', 'rewrite')
         with self.assertRaisesRegex(GitHistoryError, 'history was rewritten'):
             history.reconcile_business_head()
         self.assertEqual((self.run/'git-history.json').read_bytes(), before)
+
+    def test_same_tip_tree_does_not_allow_different_parent_content(self):
+        old_head = self.external()
+        history = ApprovedHistory(self.project, self.run)
+        saved = history.state_path.read_bytes()
+        # Preserve the old tip's code but substitute a different root tree.
+        different_root = self.rewrite(self.original, tree=self.git('show', '-s', '--format=%T', old_head))
+        unrelated = self.rewrite(old_head, different_root)
+        self.git('update-ref', 'HEAD', unrelated, old_head)
+        with self.assertRaisesRegex(GitHistoryError, 'history was rewritten'):
+            history.reconcile_business_head()
+        self.assertEqual(history.state_path.read_bytes(), saved)
 
     def test_task_ref_tampering_remains_an_error(self):
         history = ApprovedHistory(self.project, self.run)

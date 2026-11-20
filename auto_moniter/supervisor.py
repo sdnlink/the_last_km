@@ -1412,7 +1412,7 @@ class Supervisor:
         self._recovery_count += 1
         self._no_progress = 0
         self._recovery_note = (
-            'Business HEAD advanced from ' + (before.get('commit') or '(unborn)') + ' to '
+            'Business HEAD changed from ' + (before.get('commit') or '(unborn)') + ' to '
             + history.business_head['commit'] + '. Continue the original requirement on the current source. '
             'Preserve existing work and open AUD IDs. Prior completion, review and check results need revalidation. '
             'Inspect the external commit delta, complete remaining modules, rerun checks and obtain a fresh read-only review. '
@@ -1425,7 +1425,7 @@ class Supervisor:
                 value.update(invalidated=True, invalidated_reason='Business HEAD changed; revalidation required', complete=False)
                 write_json(path, value, durable=True)
         self._event('business_head_adopted', **self._business_input, modules=invalidated, reopened_issues=reopened)
-        self.log('Business HEAD advanced; automatically continuing on ' + history.business_head['commit'][:12]
+        self.log('Business HEAD changed; automatically continuing on ' + history.business_head['commit'][:12]
                  + ' with fresh implementation, review and acceptance checks')
         self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, current))
         return True

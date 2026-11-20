@@ -71,11 +71,12 @@ class ApprovedHistory(GitHistory):
             from auto_moniter.work_checkpoint import persist
             persist(self, '')
 
-    def verify(self, *, allow_business_change=False):
-        if self._business_identity()!=self.business_head:
+    def verify(self, *, allow_business_change=False, actual_business=None):
+        actual = self._business_identity() if actual_business is None else actual_business
+        if actual!=self.business_head:
             if not allow_business_change:
                 raise BusinessHeadChanged('Business HEAD changed outside watcher approval; current input must be revalidated')
-            validate_change(self.git, self.business_head, self._business_identity())
+            validate_change(self.git, self.business_head, actual)
         if self.work_ref and self.git('rev-parse','--verify',self.work_ref,check=False).decode().strip()!=self.work_head:
             raise GitHistoryError('Task work ref changed outside watcher')
         if getattr(self, '_defer_refs', False):
@@ -100,9 +101,11 @@ class ApprovedHistory(GitHistory):
             return False
         if not self.business_commits:
             self.verify()
-        self.verify(allow_business_change=True)
+        self.verify(allow_business_change=True, actual_business=actual)
         if any((self.run_dir/name).exists() for name in ('publication.json','work-checkpoint.json')):
             raise GitHistoryError('Pending Git transaction must recover before adopting business HEAD')
+        if self._business_identity()!=actual:
+            raise BusinessHeadChanged('Business HEAD changed during reconciliation; retry from the saved checkpoint')
         from datetime import datetime,timezone
         change={'before':dict(self.business_head),'after':actual,
                 'at':datetime.now(timezone.utc).isoformat()}

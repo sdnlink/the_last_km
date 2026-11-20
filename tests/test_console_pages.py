@@ -2,8 +2,10 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from html.parser import HTMLParser
 from http.client import HTTPConnection
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -109,6 +111,23 @@ class ConsolePageTests(unittest.TestCase):
                         self.assertNotIn('activity', task)
                         self.assertNotIn('work', task)
                         self.assertNotIn('directions', task)
+
+    def test_watch_console_snapshot_reports_health_without_loading_task_details(self):
+        from auto_moniter.cli import main
+
+        (self.run / 'supervisor.lock').touch()
+        output = StringIO()
+        with redirect_stdout(output), patch.object(self.store.activity, 'snapshot',
+                                                  side_effect=AssertionError('Unexpected transcript read')):
+            self.assertEqual(main(['watch', '--console-port', str(self.server.server_port)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(len(result['tasks']), 1)
+        task = result['tasks'][0]
+        self.assertEqual((task['id'], task['status'], task['phase'], task['rounds']),
+                         (self.task['id'], 'stopped', 'finished', 1))
+        self.assertIn('agent_calls', task['usage'])
+        self.assertNotIn('PRIVATE_REQUIREMENT_CONTENT', output.getvalue())
+        self.assertNotIn('PRIVATE_RAW_LOG_CONTENT', output.getvalue())
 
     def test_detail_menus_have_direct_routes_and_only_render_selected_content(self):
         markers = {'queue':'detail-queue', 'conclusions': 'detail-conclusions', 'git': 'detail-git',

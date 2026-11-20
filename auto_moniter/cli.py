@@ -126,8 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--extra-arg", action="append", default=[], help="Extra argument passed to the worker CLI")
     run.add_argument("--reviewer-extra-arg", action="append", default=[], help="Extra argument passed to the reviewer CLI")
 
-    watch = sub.add_parser("watch", help="Follow run state until it finishes")
-    watch.add_argument("run_dir", type=Path)
+    watch = sub.add_parser("watch", help="Follow a run or inspect the local console task list")
+    watch.add_argument("run_dir", type=Path, nargs="?")
+    watch.add_argument("--console-port", type=_positive_int, help="Take a read-only snapshot of tasks on this local console port")
     watch.add_argument("--interval", default="2s", help="Poll interval")
     watch.add_argument("--once", action="store_true", help="Print the current state and exit")
     status = sub.add_parser("status", help="Diagnose run health, pending modules, and resource usage")
@@ -281,6 +282,14 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(run_health(args.run_dir.expanduser().resolve(), threshold), ensure_ascii=False, indent=2))
             return 0
         if args.command == "watch":
+            if args.console_port is not None:
+                if args.run_dir is not None:
+                    raise ValueError("--console-port cannot be combined with a run directory")
+                from auto_moniter.console_watch import snapshot
+                print(json.dumps(safe(snapshot(args.console_port)), ensure_ascii=False, indent=2))
+                return 0
+            if args.run_dir is None:
+                raise ValueError("watch requires a run directory or --console-port")
             return _watch(args)
         if args.command == "run":
             return _run(args)

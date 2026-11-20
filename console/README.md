@@ -32,6 +32,16 @@
 
 ## 使用
 
+### Paseo 定时监督
+
+在 Paseo 中为 Auto Moniter 工作区创建心跳，让当前会话定时检查控制台的真实运行状态。已有监督心跳可沿用，指向同一份项目技能。
+
+```bash
+paseo heartbeat create --cron "*/15 * * * *" "读取并执行 skills/paseo-watch/SKILL.md，检查本机 Auto Moniter 控制台。"
+```
+
+也可以直接运行 `auto-moniter watch --console-port 8000`，取一次任务阶段、轮次、进度和预算快照。改用其他端口时传入实际端口。检查细节和交付证据按 [Paseo 巡检技能](../skills/paseo-watch/SKILL.md) 核对。
+
 未完成初始化时，打开首页 `/` 会进入初始化页面 `/setup`；左侧“工作概览”始终打开 `/overview`。初始化页面可选择安装 Codex、Grok、Claude Code、Antigravity CLI、Gemini CLI、Copilot CLI、Hermes、Kimi、CodeBuddy，以及通过 Claude Code 接入的 GLM、DeepSeek。已安装的 CLI 可直接复用；之后通过左侧“Agent 管理”调整模型、服务地址、认证和可执行文件位置。具体安装方式与角色支持见 [Agent 安装与配置](AGENT_SETUP.md)。
 
 任务列表、运行任务概况、跟进任务选择、工作流、交互结论、Git 记录、验收与审计列表及补充要求历史默认根据浏览器可用高度、条目高度和列数自动调整每页数量，无需选择“自动适应”；也可手动指定 10、20、50 条。分页提供上一页、下一页、首末页和跳转页码，定时同步保留当前页，搜索或筛选后回到第一页。交互结论按轮次计数。

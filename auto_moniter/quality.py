@@ -186,8 +186,9 @@ class Quality:
                          'evidence': sorted(set(evidence))[:60], 'covered': len(errors) == start_errors})
         return rows, errors
 
-    def review_blockers(self, blockers):
-        key = json.dumps(sorted(set(blockers)), ensure_ascii=False) if blockers else ''
-        self.state['blocker_count'] = self.state['blocker_count'] + 1 if key and key == self.state['blocker_key'] else int(bool(key))
+    def review_blockers(self, blockers, *, key='', consecutive=True):
+        key = key or (json.dumps(sorted(set(blockers)), ensure_ascii=False) if blockers else '')
+        self.state['blocker_count'] = (self.state['blocker_count'] + 1
+                                       if key and consecutive and key == self.state['blocker_key'] else int(bool(key)))
         self.state['blocker_key'] = key
         return bool(self.config.get('blocked_review_limit') and self.state['blocker_count'] >= self.config['blocked_review_limit'])

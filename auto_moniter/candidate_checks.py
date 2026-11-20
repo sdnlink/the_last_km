@@ -14,20 +14,39 @@ def digest(value):
 
 def observed_assertion_failure(receipt, run):
     """Use actual failed-test output, never infer a product bug from exit 1 alone."""
+    return any(output for _, output in _failed_assertion_outputs(receipt, run))
+
+
+def failed_assertion_locations(receipt, run, root, paths):
+    """Find corroborating test locations in every failed check's saved output."""
+    locations = []
+    for command, output in _failed_assertion_outputs(receipt, run):
+        found = []
+        for path in paths:
+            names = '|'.join(re.escape(str(name)) for name in (root / path, path))
+            for match in re.finditer(r'(?<![\w./-])(?:' + names + r')(?::|", line )(\d{1,9})\b', output):
+                found.append((path, int(match[1])))
+        if not found:
+            return []
+        locations.append((command, sorted(set(found))))
+    return locations
+
+
+def _failed_assertion_outputs(receipt, run):
     for item in receipt.get('checks', []):
         if item.get('status') != 'check_failed':
             continue
         path = Path(run)/item['log']
+        output = ''
         try:
             # Callers validate receipt/log hashes first. Skip command text:
             # mentioning an assertion in the requested command is not evidence.
             output = '\n'.join(path.read_text(errors='replace').splitlines()[2:])
         except OSError:
-            continue
-        if re.search(r'AssertionError|AssertionError\s*\[|FAILED \((?:failures|errors)=|'
-                     r'(?m:^not ok [0-9]+)|test result: FAILED|panicked at|XCTAssert.*failed', output):
-            return True
-    return False
+            pass
+        asserted = re.search(r'AssertionError|FAILED \((?:failures|errors)=|'
+                             r'(?m:^not ok [0-9]+)|test result: FAILED|panicked at|XCTAssert.*failed', output)
+        yield item['command'], output if asserted else ''
 
 
 def log_hashes(run, results):

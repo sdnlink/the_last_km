@@ -64,7 +64,7 @@ from auto_moniter.publication import StagedChangesConflict, check_unborn_staging
 from auto_moniter.business_recovery import BusinessHeadChanged, validate_change
 from auto_moniter.project_workspace import ProjectInputsChanged
 from auto_moniter.locking import workspace_lease
-from auto_moniter.quality import Quality
+from auto_moniter.quality import Quality, test_asset
 from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
@@ -1243,11 +1243,10 @@ class Supervisor:
                 write_json(self.run_dir / 'environment-blocks.json', safe({
                     'blockers': review.blockers, 'round': round_index, 'tree': review_tree,
                     'action': 'Do runnable independent work. Retry these validations only when the named environment changes; do not recode correct behavior to bypass them.'}), durable=True)
-            if self.config.quality_policy and self.quality.review_blockers(review.blockers):
-                write_json(self.run_dir / 'dependency-block.json', {'blockers': review.blockers,
-                           'review_count': self.quality.state['blocker_count'], 'round': round_index,
-                           'action': 'Resolve the named external dependency, then resume; no automatic model retries.'}, durable=True)
-                return self._finish('action_required', 'Repeated independently confirmed external dependency; work saved for dependency resolution.', records, review)
+            if self.config.quality_policy:
+                blocked = self._check_review_blockers(record, review_record, review_tree)
+                if blocked:
+                    return self._finish('action_required', blocked, records, review)
 
             if _accepted(review) and not _accepted(verdict):
                 review.status = "continue"
@@ -2597,6 +2596,95 @@ class Supervisor:
                 and not record.failure and not record.interruption and not record.verdict.parse_error
                 and (self.config.function_dispatch or _accepted(record.verdict)))
 
+    def _function_check_blocker(self, worker, reviewer, tree):
+        """Bind a jointly reported blocker to the current assignment and actual failed checks."""
+        task = self.function_tasks.current
+        review = reviewer.verdict
+        if (not self._function_gate or not task or self.config.task_type != 'code'
+                or not self._uses_candidate_checks(worker) or not worker.verdict.blockers
+                or worker.verdict.task_id != task['id'] or review.task_status != 'changes_required'
+                or worker.tree != tree or self._pending_directions()
+                or reviewer.watcher_result.get('status') != 'applied'):
+            return None
+        # A regular repair finding is insufficient. Both roles must identify
+        # the same existing issue, and it must be the only review finding.
+        findings = _audit_findings(review)
+        ids = set(reviewer.watcher_result.get('reported', []))
+        if len(ids) != 1 or not findings or not review.next_actions:
+            return None
+        issue = next(iter(ids))
+        marker = re.escape(issue) + r'(?=$|[:：\s])'
+        if (not all(re.match(marker, finding) for finding in findings)
+                or not any(re.search(r'(?<![\w-])' + marker, blocker) for blocker in worker.verdict.blockers)):
+            return None
+        receipt = worker.watcher_result.get('candidate_checks')
+        if not receipt:
+            return None
+        context = self._candidate_check_context(worker)
+        if (not candidate_checks.valid(receipt, self.run_dir, context) or receipt['passed']
+                or not receipt['complete'] or receipt['source_changed'] or receipt.get('scope_gaps')
+                or len(receipt['checks']) != len(context['commands'])
+                or [item['command'] for item in receipt['checks']] != context['commands']
+                or any(item['status'] not in {'passed', 'check_failed'} for item in receipt['checks'])):
+            return None
+        root = self.config.cwd
+        protected = self.quality.protected(root)
+        # A traceback cites tests for product bugs too. Require the reviewer
+        # to identify the test itself as the primary repair location.
+        cited = set(evidence_paths(root, findings, ignore_dir=self.run_dir))
+        repair = set(evidence_paths(root, review.next_actions[:1], ignore_dir=self.run_dir))
+        if not repair or not repair <= cited:
+            return None
+        paths = {str(path.relative_to(root)) for path in repair
+                 if test_asset(str(path.relative_to(root))) or str(path) in protected}
+        if len(paths) != len(repair):
+            return None
+        failures = candidate_checks.failed_assertion_locations(receipt, self.run_dir, root, paths)
+        if not failures:
+            return None
+        paths = sorted({path for _, locations in failures for path, _ in locations})
+        writable = self._writable_function_tests(task)
+        scopes = {path in writable for path in paths}
+        if len(scopes) != 1:
+            return None
+        basis = {'context': {k: v for k, v in context.items() if k != 'round'},
+                 'issue': issue, 'failures': failures, 'writable': True in scopes}
+        return {'key': candidate_checks.digest(basis), 'task_id': task['id'], 'tree': tree,
+                'issue': issue, 'paths': paths, 'writable': basis['writable'],
+                'logs': [item['log'] for item in receipt['checks'] if item['status'] == 'check_failed']}
+
+    def _check_review_blockers(self, worker, reviewer, tree):
+        review = reviewer.verdict
+        evidence = self._function_check_blocker(worker, reviewer, tree)
+        blockers = review.blockers
+        key = ''
+        consecutive = True
+        if evidence:
+            key = 'assignment-check:' + evidence['key']
+            previous = next((item for item in reversed(self._records)
+                             if item.role == 'reviewer' and item.index < reviewer.index), None)
+            consecutive = bool(previous and previous.index == reviewer.index - 1
+                               and previous.watcher_result.get('check_blocker', {}).get('key') == evidence['key'])
+            reviewer.watcher_result['check_blocker'] = evidence
+            blockers = _audit_findings(review)
+        if not self.quality.review_blockers(blockers, key=key, consecutive=consecutive):
+            return ''
+        action = 'Resolve the named external dependency, then resume; no automatic model retries.'
+        summary = 'Repeated independently confirmed external dependency; work saved for dependency resolution.'
+        if evidence:
+            label = f"{evidence['task_id']} / {evidence['issue']}: " + ', '.join(evidence['paths'])
+            if evidence['writable']:
+                action = 'Repair the focused test within this assignment, preserving its behavior assertions, then resume.'
+                summary = 'Repeated failure in an editable assignment test; repair remains outstanding. ' + label
+            else:
+                action = 'Review the proposed fixture repair with the check owner, then resume with the fixed checks.'
+                summary = 'Repeated independently confirmed check failure outside the assignment; candidate preserved. ' + label
+            self._event('assignment_check_blocked', round=reviewer.index, **evidence)
+        write_json(self.run_dir / 'dependency-block.json', safe({'blockers': blockers,
+                   'review_count': self.quality.state['blocker_count'], 'round': reviewer.index,
+                   'action': action, **(evidence or {})}), durable=True)
+        return summary
+
     def _assignment_whitespace_preflight(self):
         """Identify a fixed Git check the current assignment cannot repair."""
         task = self.function_tasks.current
@@ -3164,6 +3252,21 @@ class Supervisor:
         return function_gate.catalog(self.config.checks, self.modules.items, task['module_id'],
                                      root=self.config.cwd, task=task, regressions=self._local_test_paths)
 
+    def _writable_function_tests(self, task):
+        protected = self.quality.protected(self.config.cwd)
+        return [name for name in task.get('test_files', []) if str(self.config.cwd / name) not in protected]
+
+    def _function_test_scope(self, task):
+        return ('Watcher scope for this assignment. Editable focused tests: '
+                + json.dumps(self._writable_function_tests(task), ensure_ascii=False)
+                + '. Focused tests introduced by this assignment remain editable until acceptance, '
+                  'including on retry or resume. Fix their fixture or harness defects within this assignment '
+                  'and preserve the behavior assertions. Use this scope to resolve conflicting descriptions '
+                  'in earlier reviews. All other test files are outside its edit scope. '
+                  'For a failure that requires changes outside this scope, use blockers and cite its exact '
+                  'test path and existing AUD ID when available. For a test fixture defect, cite the fixture '
+                  'file in the finding and name it as the first repair action.')
+
     def _record_assignment(self, task):
         fields = ({'task_kind': 'integration', 'targets': task['targets'], 'integration_scope': task['integration_scope']}
                   if task.get('kind') == 'integration' else {'file': task['file'], 'symbol': task['symbol']})
@@ -3195,7 +3298,7 @@ class Supervisor:
                 f'and applicable requirement criteria (req:{cycle}:<one-based acceptance_criteria index>). '
                 'Use the same indices for new module definitions or a new brief returned in this response. Select check_ids from the '
                 'approved catalog; never write an executable command in a task. Include test_files=[] or exact paths '
-                'for new focused test files. Preserve existing tests and all code outside the assigned targets. '
+                'for new focused test files. Preserve tests that predate the assignment and code outside the assigned targets. '
                 'For one atomic increment that also needs imports, helper declarations, model properties, resource files, '
                 'project registration or docs, list every necessary exact path in edit_files. A listed source path allows '
                 'whole-file edits; keep the named function as the primary implementation and verify the complete change. '
@@ -4270,6 +4373,7 @@ class Supervisor:
                 else 'Implement one reviewer-owned assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
                 function_tasks.verdict_contract('worker', task, module_ids=self.modules.items),
+                *([self._function_test_scope(task)] if self._function_gate else []),
                 'Watcher acceptance catalog currently in effect (context, not additional implementation work):',
                 json.dumps(safe(self._function_check_catalog(task)), ensure_ascii=False) if self._function_gate else '(legacy checks)',
                 'Watcher executes these checks on your submitted candidate before independent review. Do not repeat an old configuration blocker if its '
@@ -4279,7 +4383,7 @@ class Supervisor:
                 'Latest review of this assignment:',
                 json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
                            ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',
-                'Preserve earlier accepted functions and existing test assertions. Do not execute prose as watcher checks.',
+                'Preserve earlier accepted functions and test assertions. Do not execute prose as watcher checks.',
             ])
         snapshot = workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir)
         if (index == 1 or self.requirement_cycles) and last_worker is None and last_review is None:
@@ -4445,6 +4549,8 @@ class Supervisor:
                    "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
                   if self.config.function_dispatch else []),
                 *([self._function_planning_contract()] if self._function_gate else []),
+                *([self._function_test_scope(self.function_tasks.current)]
+                  if self._function_gate and self.function_tasks.current else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",
                 ("This is verification-only work: neither model may edit files. Return a bounded implementation assignment for concrete defects. "

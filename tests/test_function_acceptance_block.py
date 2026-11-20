@@ -244,3 +244,96 @@ class FunctionAcceptanceBlockTests(unittest.TestCase):
         monitor.config.reviewer_model=''
         monitor.directions.append('New requirement to independently review')
         self.assertIsNone(monitor._check_retry_review(review))
+
+    def run_repeated_fixture_failure(self, *, editable=False, changed=False, worker_blocked=True,
+                                     unrelated_finding=False, source_repair=False, repair=False):
+        name = 'tests/test_drag.py'
+        fixture = (
+            'import unittest\n'
+            'class DragTest(unittest.TestCase):\n'
+            '    def test_cancel(self):\n'
+            '        fixture = {}\n'
+            '        self.assertIsNone(fixture.get("captured", "missing"))\n'
+        )
+        (self.root / 'tests').mkdir()
+        if not editable:
+            (self.root / name).write_text(fixture)
+        assignment = task('F1', 'app.py')
+        if editable:
+            assignment['test_files'] = [name]
+        first = {
+            **result('F1', 'incomplete'),
+            'writes': {'app.py': 'def parse_input(): return 42\n', **({name: fixture} if editable else {})},
+        }
+
+        def retry(number):
+            attempt = result('F1', 'incomplete')
+            if worker_blocked:
+                attempt['verdict']['blockers'] = [f'AUD-1: fixture requires correction (attempt {number})']
+            return attempt
+
+        scripts = [first, retry(2), retry(3)]
+        if changed:
+            scripts[-1]['source'] = 'def parse_input(): return 43\n'
+        first_review = result('F1', 'changes_required', gaps=[f'main/{name}:5 fixture fails the cancellation assertion'])
+        later = [
+            result('F1', 'changes_required', gaps=[f'AUD-1: cancellation fails in {name}:5; attempt {number}'])
+            for number in (2, 3)
+        ]
+        for finding in later:
+            finding['verdict']['next_actions'] = [
+                'Correct cancellation in app.py' if source_repair else f'Repair fixture initialization in {name}:5']
+        if unrelated_finding:
+            later[-1]['verdict']['gaps'].append('main/Another implementation defect in app.py')
+        if repair:
+            scripts[-1] = {**result('F1', 'done'), 'writes': {name: fixture.replace('{}', '{"captured": None}')}}
+            later[-1] = result('F1', 'accepted', next_task=task('F2', 'next.py', depends=['F1']))
+            later[-1]['verdict']['issue_resolutions'] = [
+                {'id':'AUD-1', 'summary':'Initialized the fixture without changing its assertions', 'evidence':[name]}]
+        worker = FunctionWorker('worker', scripts)
+        reviewer = ScriptedProvider('reviewer', [plan(assignment), first_review, *later])
+        self.check = 'python3 -m unittest discover -s tests -p test_drag.py'
+        monitor = self.monitor(worker, reviewer, quality_policy={'blocked_review_limit': 2})
+        monitor.config.max_rounds = 3
+        monitor.config.review_every = 1
+        report = monitor.run()
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (3, 4), report.summary)
+        return worker, reviewer, report
+
+    def test_rephrased_audit_gaps_stop_repeated_out_of_scope_failure(self):
+        _, _, report = self.run_repeated_fixture_failure()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertIn('outside the assignment', report.summary)
+        self.assertIn('F1 / AUD-1', report.summary)
+        evidence = json.loads((self.root / 'run/dependency-block.json').read_text())
+        self.assertEqual(evidence['review_count'], 2)
+        self.assertEqual(evidence['paths'], ['tests/test_drag.py'])
+        self.assertEqual(evidence['logs'], ['003-check-01.log'])
+        self.assertEqual(self.state()['audit_issues']['items'][0]['status'], 'open')
+        self.assertEqual(self.state()['function_tasks']['accepted'], [])
+
+    def test_assignment_test_is_editable_until_accepted(self):
+        worker, reviewer, report = self.run_repeated_fixture_failure(editable=True, repair=True)
+        for prompt in (worker.calls[-1]['prompt'], reviewer.calls[-1]['prompt']):
+            self.assertIn('Editable focused tests: ["tests/test_drag.py"]', prompt)
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(self.state()['function_tasks']['accepted'][0]['task']['id'], 'F1')
+        self.assertEqual(self.state()['audit_issues']['items'][0]['status'], 'resolved')
+        self.assertFalse((self.root / 'run/dependency-block.json').exists())
+
+    def test_repeated_editable_test_failure_reports_pending_repair(self):
+        _, _, report = self.run_repeated_fixture_failure(editable=True)
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertIn('editable assignment test', report.summary)
+        evidence = json.loads((self.root / 'run/dependency-block.json').read_text())
+        self.assertTrue(evidence['writable'])
+        self.assertEqual(self.state()['function_tasks']['accepted'], [])
+
+    def test_code_changes_or_unconfirmed_blockers_do_not_interrupt_repair(self):
+        for case in ({'changed': True}, {'worker_blocked': False}, {'unrelated_finding': True},
+                     {'source_repair': True}):
+            with self.subTest(**case):
+                self._reset_project()
+                _, _, report = self.run_repeated_fixture_failure(**case)
+                self.assertEqual(report.status, 'max_rounds', report.summary)
+                self.assertFalse((self.root / 'run/dependency-block.json').exists())

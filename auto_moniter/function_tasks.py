@@ -271,7 +271,7 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
     scope = ('the dispatched atomic change, its named primary function and exact edit_files' if task.get('edit_files')
              else 'the dispatched integration and all of its listed functions' if group else 'the dispatched function')
     manifest = ('The edit_files manifest grants whole-file edits at exactly those paths, including necessary helper '
-                'declarations, resources and registration. Preserve existing tests and all other file/function scopes. '
+                'declarations, resources and registration. Preserve tests that predate the assignment and all other file/function scopes. '
                 'Cite every manifest file in evidence. ' if task.get('edit_files') else '')
     delivery_modules = (list(module_ids) if task['delivery_scope'] == 'requirement' and module_ids is not None
                         else [task['module_id']])

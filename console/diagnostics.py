@@ -71,6 +71,14 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         code='supervisor_exception';title='监督器程序异常';role='watcher';phase='监督器执行'
         reason=raw
         actions=['先修复原始程序异常，再恢复原任务；增加运行时间或调用额度不能修复程序错误。']
+    elif text.startswith('fixed git check blocked outside assignment '):
+        code='assignment_preflight_blocked';title='派工前发现范围外检查阻塞';role='watcher';phase='派单验收预检'
+        reason='固定 Git 检查在当前派单允许修改的文件之外发现问题，候选和检查点已保留。'
+        actions=['查看日志 assignment-preflight.log，修正对应文件或授权单独的修复范围，再恢复原任务。']
+    elif 'verified progress limit reached' in text:
+        code='verified_progress_limit';title='达到无可验证进展上限';role='watcher';phase='进展检查'
+        reason='连续多轮未取得新的验收进展，监督器已保存检查点并停止继续派工。'
+        actions=['先解决重复失败的固定检查或审核问题，再使用原检查点恢复。']
     elif text.startswith(('function acceptance blocked for ', 'candidate acceptance blocked for ')):
         code='function_acceptance_blocked';title='派单验收受阻';role='watcher';phase='派单验收'
         reason='独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。'
@@ -81,6 +89,10 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='当前候选已保留，但任务完成状态、交付范围或模块确认没有满足监督器协议，未推进交付。'
         actions=['核对 worker 与 reviewer 的任务 ID、完成状态、交付范围和模块清单；需求级最终报告须确认完整模块账本。',
                  '若是报告协议问题，修复后对同一候选进行只读报告补正；条款覆盖、固定检查及独立审核仍须通过。']
+    elif text.startswith('reviewer audit update rejected') and 'closure evidence rejected' in text:
+        code='review_audit_rejected';title='审计关闭证据未通过校验';role='reviewer';phase='审核证据校验'
+        reason='监督器已保留候选和未关闭的审计问题。'
+        actions=['查看原始原因中的 AUD 编号，按当前候选和业务版本补充可核验的证据，再恢复原任务。']
     elif 'protected acceptance baseline changed' in text:
         code='protected_baseline_changed';title='受保护的验收资产发生变化';role='watcher';phase='验收基线保护检查'
         reason='Watcher 检测到测试、验收入口或忽略规则与任务启动时不一致，已停止验收；这不代表 Worker 进程异常退出。'

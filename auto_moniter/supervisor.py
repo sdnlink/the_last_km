@@ -608,6 +608,13 @@ class Supervisor:
                     if self._stop:
                         break
                 self._check_budget(new_call=True)
+                outside_check = self._assignment_whitespace_preflight()
+                self._process_control()
+                if self._stop:
+                    break
+                self._check_budget(new_call=True)
+                if outside_check:
+                    return self._finish('action_required', outside_check, records, last_worker)
                 self._beat(f"round {round_index}: starting worker")
                 first_follow_up = (self.config.workflow == 'review-first' and not self.config.function_dispatch
                                    and not self.project and self.requirement_cycles
@@ -2589,6 +2596,42 @@ class Supervisor:
         return (self.config.workflow == 'review-first' and not self.config.no_review
                 and not record.failure and not record.interruption and not record.verdict.parse_error
                 and (self.config.function_dispatch or _accepted(record.verdict)))
+
+    def _assignment_whitespace_preflight(self):
+        """Identify a fixed Git check the current assignment cannot repair."""
+        task = self.function_tasks.current
+        git_check = 'git diff --check'
+        if (not self._function_gate or not task or self.config.task_type != 'code'
+                or git_check not in self.config.checks or not isinstance(self.git_history, ApprovedHistory)
+                or self.git_history.root != self.config.cwd):
+            return ''
+        if task['delivery_scope'] == 'function':
+            catalog = self._function_check_catalog(task)
+            if not any(catalog.get(key) == git_check for key in task['check_ids']):
+                return ''
+        excluded = [':(exclude,literal)' + name for name in function_tasks.writable_files(task)]
+        command = ['git', '-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--check', '--', '.', *excluded]
+        self._beat('checking fixed Git acceptance outside the assignment')
+        completed = False
+        try:
+            result = run_command(PreparedCommand(command), self.config.cwd,
+                                 timeout_s=min(10, self.config.check_timeout_s),
+                                 should_stop=self._should_stop, detect_input_requests=False,
+                                 on_child=self._remember_child, max_output_bytes=self.config.max_output_bytes)
+            completed = True
+        finally:
+            self._forget_child(completed=completed)
+        if result.exit_code != 2 or result.timed_out or result.interruption or not result.stdout.strip():
+            return ''
+        log = self.run_dir / 'assignment-preflight.log'
+        log.write_text('Out-of-assignment Git whitespace diagnostic\n' + clipped(redact(result.stdout)),
+                       encoding='utf-8')
+        reason = ('Fixed Git check blocked outside assignment ' + task['id']
+                  + '. Correct the reported paths or approve a repair assignment before resuming. '
+                  + 'See ' + log.name + '.')
+        self._event('assignment_preflight_blocked', task_id=task['id'], command=git_check,
+                    log=log.name, reason=reason)
+        return reason
 
     def _candidate_check_context(self, record):
         task = self.function_tasks.current if self.config.function_dispatch else None

@@ -1,6 +1,7 @@
 """Watcher check failures preserve a candidate without automatic implementation retries."""
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_dispatch import FunctionWorker, plan, result, task, verification_task
+from tests.test_requirement_follow_up import CitingReviewer
 from tests.test_supervisor import ScriptedProvider
 
 
@@ -29,6 +31,66 @@ class FunctionAcceptanceBlockTests(unittest.TestCase):
 
     def state(self):
         return json.loads((self.root/'run/state.json').read_text())
+
+    def test_outside_whitespace_blocks_before_worker_and_recovers_with_original_checks(self):
+        app = self.root / 'app.py'
+        legacy = self.root / 'legacy notes.md'
+        app.write_text('def parse_input():\n    return 1\n')
+        legacy.write_bytes(b'Existing notes\n')
+
+        def git(*args):
+            return subprocess.check_output(['git', *args], cwd=self.root, text=True)
+
+        git('init', '-q')
+        git('add', 'app.py', legacy.name)
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@local', 'commit', '-qm', 'Initial')
+        head = git('rev-parse', 'HEAD')
+        legacy.write_bytes(b'Existing notes\r\n')
+        dirty_app = 'def parse_input():\n    # Fixture note  \n    return 1\n'
+        app.write_text(dirty_app)
+        assignment = task('F1', 'app.py', scope='requirement')
+        assignment.update(criterion_ids=['main:1','req:1:1','req:1:2'], check_ids=['check:2'])
+        checks = ['git diff --check', "python3 -c 'from app import parse_input; assert parse_input() == 42'"]
+        run = self.root / 'run'
+
+        def monitor(worker, reviewer, *, resume=False):
+            return Supervisor(RunConfig('Implement the original requirement', self.root, worker,
+                reviewer=reviewer, workflow='review-first', function_dispatch=not resume,
+                resume=resume, git_history='required', run_dir=run, retry_delay_s=0,
+                checks=[] if resume else checks), log=lambda _:None)
+
+        worker = FunctionWorker('worker', [])
+        reviewer = ScriptedProvider('reviewer', [plan(assignment)])
+        report = monitor(worker, reviewer).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertIn('Fixed Git check blocked outside assignment F1', report.summary)
+        self.assertFalse(worker.calls)
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertEqual(self.state()['function_tasks']['current'], assignment)
+        self.assertEqual(git('rev-parse', 'HEAD'), head)
+        self.assertEqual(app.read_text(), dirty_app)
+        self.assertEqual(legacy.read_bytes(), b'Existing notes\r\n')
+        diagnostic = (run/'assignment-preflight.log').read_text()
+        self.assertIn(legacy.name, diagnostic)
+        self.assertNotIn('app.py', diagnostic)
+
+        worker = FunctionWorker('worker', [])
+        reviewer = ScriptedProvider('reviewer', [])
+        report = monitor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertFalse(worker.calls or reviewer.calls)
+
+        legacy.write_bytes(b'Existing notes\n')
+        worker = FunctionWorker('worker', [
+            {**result('F1', 'done', status='done'), 'touch':'app.py'}])
+        reviewer = CitingReviewer([{**result('F1', 'accepted', status='done'), 'cite':True}], self.root)
+        report = monitor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 1))
+        self.assertNotEqual(git('rev-parse', 'HEAD'), head)
+        acceptance = json.loads((run/'acceptance-results.json').read_text())
+        self.assertEqual([item['command'] for item in acceptance['checks']], checks)
+        self.assertTrue(acceptance['complete'])
 
     def start(self, *, scope='function', verification=False):
         if verification:

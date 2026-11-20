@@ -92,6 +92,27 @@ class FailureDiagnosticTests(unittest.TestCase):
         for status in ('running','starting','paused','queued','done'):
             self.assertIsNone(self.diagnostic(status,'old authentication failure'))
 
+    def test_preflight_and_progress_guard_report_the_watcher_as_stop_source(self):
+        for summary, code in [
+            ('Fixed Git check blocked outside assignment F1. See assignment-preflight.log.',
+             'assignment_preflight_blocked'),
+            ('Stopped: Verified progress limit reached; source edits alone do not establish progress.',
+             'verified_progress_limit'),
+        ]:
+            with self.subTest(code=code):
+                diagnosis = self.diagnostic('action_required', summary,
+                                            records=[{'role': 'worker', 'index': 15}])
+                self.assertEqual(diagnosis['code'], code)
+                self.assertEqual(diagnosis['role'], 'watcher')
+                self.assertTrue(diagnosis['actions'])
+
+    def test_repeated_audit_evidence_rejection_is_an_actionable_review_result(self):
+        reason = 'Reviewer audit update rejected after reviewer-only retry; worker candidate saved. Issue AUD-1 closure evidence rejected.'
+        diagnosis = self.diagnostic('action_required', reason)
+        self.assertEqual(diagnosis['code'], 'review_audit_rejected')
+        self.assertEqual(diagnosis['role'], 'reviewer')
+        self.assertIn('AUD-1', diagnosis['raw_summary'])
+
     def test_staging_conflicts_identify_watcher_publication_including_old_reports(self):
         cases = [
             ('action_required', 'StagedChangesConflict: Business branch has no initial commit and 62 staged source paths overlap the publication baseline',

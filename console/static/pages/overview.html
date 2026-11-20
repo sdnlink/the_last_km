@@ -1,12 +1,12 @@
         <section class="stats-grid" id="stats" aria-label="任务统计">
-          <article class="stat-card">
+          <a class="stat-card" href="/tasks">
             <div class="stat-title">
               全部任务<svg><use href="#i-task" /></svg>
             </div>
             <div class="stat-value" id="stat-total">—</div>
             <div class="stat-note">所有项目的开发任务</div>
-          </article>
-          <article class="stat-card running-stat">
+          </a>
+          <a class="stat-card running-stat" href="/tasks?status=active">
             <div class="stat-title">正在执行<span class="live-dot"></span></div>
             <div class="stat-value" id="stat-running">
               —<span class="stat-unit">个任务</span>
@@ -15,23 +15,23 @@
               <span class="accent" id="running-note">等待任务状态</span
               ><span>· 自动监督与审查</span>
             </div>
-          </article>
-          <article class="stat-card">
+          </a>
+          <a class="stat-card" href="/tasks?status=done">
             <div class="stat-title">
               已完成交付<svg><use href="#i-check" /></svg>
             </div>
             <div class="stat-value" id="stat-done">—</div>
             <div class="stat-note">已通过独立审查与验收</div>
-          </article>
-          <article class="stat-card">
+          </a>
+          <a class="stat-card" href="/tasks?status=waiting">
             <div class="stat-title">
               等待处理<svg><use href="#i-clock" /></svg>
             </div>
             <div class="stat-value" id="stat-waiting">—</div>
-            <div class="stat-note" id="waiting-note">
+            <div class="stat-note">
               待启动、暂停或需要关注
             </div>
-          </article>
+          </a>
         </section>
         <section
           class="resource-strip"

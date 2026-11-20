@@ -16,7 +16,6 @@ export function mount(){
  watch(async()=>{
   const d=await api('/api/overview');tasks=d.tasks;
   for(const [key,value]of Object.entries(d.counts)){const el=$(`#stat-${key}`);if(el)el.textContent=value;}
-  $('#stat-waiting').textContent=d.counts.paused;$('#waiting-note').textContent=i18n('暂停任务，可从任务列表恢复');
   $('#board-count').textContent=tasks.length;renderTasks();
   $('#stats').dataset.running=String(d.counts.running>0);
   $('#running-note').textContent=d.counts.running?i18n('正在执行，状态随任务更新'):i18n('当前没有任务在执行');

@@ -440,7 +440,9 @@ class TaskStore:
             tasks = data['tasks']
             counts = {'total': len(tasks), 'running': sum(t['status'] in {'running', 'starting'} for t in tasks),
                       'paused': sum(t['status'] == 'paused' for t in tasks),
-                      'done': sum(t['status'] == 'done' for t in tasks)}
+                      'done': sum(t['status'] == 'done' for t in tasks),
+                      'waiting': sum(t['status'] not in {'running', 'starting', 'done', 'cancelled', 'stopped'}
+                                     for t in tasks)}
             sample = self.metrics.sample()
             return {**data, 'tasks': [t for t in tasks if t['status'] in {'running', 'starting', 'paused'}],
                     'counts': counts, 'resources': {k: v for k, v in sample.items() if k != 'processes'}}

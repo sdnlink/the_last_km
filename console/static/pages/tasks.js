@@ -3,13 +3,15 @@ import {$,$$,escape,icon,duration,percent,bytes,badge,taskButtons,taskNarrative,
 import {api,watch,refresh,selectNavigation} from '/core.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const params=new URLSearchParams(location.search);
-const state={tasks:[],search:params.get('q')||'',filter:params.get('status')||'all',sort:params.get('sort')||'priority'};
+const defaultSort='newest';
+const state={tasks:[],search:params.get('q')||'',filter:params.get('status')||'all',sort:params.get('sort')||defaultSort};
 const needsAttention=t=>!['queued','running','starting','paused','done','cancelled','stopped'].includes(t.status);
+const waiting=t=>t.status==='queued'||t.status==='paused'||needsAttention(t);
 const running=t=>['running','starting'].includes(t.status);
-const labels=()=>({all:i18n('全部任务'),queued:i18n('待启动'),active:i18n('运行中'),paused:i18n('已暂停'),stopped:i18n('已停止'),done:i18n('已验收'),attention:i18n('需要处理')});
+const labels=()=>({all:i18n('全部任务'),queued:i18n('待启动'),active:i18n('运行中'),paused:i18n('已暂停'),stopped:i18n('已停止'),done:i18n('已验收'),attention:i18n('需要处理'),waiting:i18n('等待处理')});
 function syncTaskLocation(){
  const url=new URL(location.href);
- for(const [key,value,fallback] of [['status',state.filter,'all'],['q',state.search,''],['sort',state.sort,'priority']]){
+ for(const [key,value,fallback] of [['status',state.filter,'all'],['q',state.search,''],['sort',state.sort,defaultSort]]){
   if(value===fallback)url.searchParams.delete(key);else url.searchParams.set(key,value);
  }
  history.replaceState(null,'',url);selectNavigation('tasks');
@@ -22,7 +24,7 @@ function filterTasks(){
  const query=state.search.trim().toLowerCase();
  const priority=t=>needsAttention(t)?0:running(t)?1:t.status==='paused'?2:t.status==='queued'?3:t.status==='stopped'?4:t.status==='done'?5:6;
  const created=t=>Date.parse(t.created_at)||0;
- return state.tasks.filter(t=>({all:true,active:running(t),attention:needsAttention(t),paused:t.status==='paused',queued:t.status==='queued',done:t.status==='done',stopped:t.status==='stopped'})[state.filter])
+ return state.tasks.filter(t=>({all:true,active:running(t),attention:needsAttention(t),waiting:waiting(t),paused:t.status==='paused',queued:t.status==='queued',done:t.status==='done',stopped:t.status==='stopped'})[state.filter])
   .filter(t=>`${t.title} ${t.project_cwd||''} ${t.cwd} ${t.provider} ${t.reviewer}`.toLowerCase().includes(query))
   .slice().sort((a,b)=>(state.sort==='priority'?priority(a)-priority(b):0)||(state.sort==='oldest'?created(a)-created(b):created(b)-created(a))||String(a.id).localeCompare(String(b.id)));
 }
@@ -54,7 +56,7 @@ function renderTasks(){
 function selectFilter(filter){if(!Object.hasOwn(labels(),filter))return;state.filter=filter;resetPage('tasks');syncTaskLocation();renderTasks();}
 export function mount(){
  if(!Object.hasOwn(labels(),state.filter))state.filter='all';
- if(!['priority','newest','oldest'].includes(state.sort))state.sort='priority';
+ if(!['priority','newest','oldest'].includes(state.sort))state.sort=defaultSort;
  $('#search').value=state.search;$('#task-sort').value=state.sort;syncTaskLocation();
  onPaginationChange(key=>{if(key==='tasks')renderTasks();});$('#refresh').addEventListener('click',refresh);
  $('#search').addEventListener('input',e=>{state.search=e.target.value;resetPage('tasks');syncTaskLocation();renderTasks();});

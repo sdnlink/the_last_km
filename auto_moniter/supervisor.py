@@ -2143,10 +2143,15 @@ class Supervisor:
                 if record.role == 'reviewer':
                     data['audit_issues'] = self.audit.export()
                 return data
+            problem = ((self.active_queued_requirement or {}).get('text')
+                       or self.requirements_review.get('refined_requirement') or self.config.requirement)
+            receipt = worker.watcher_result.get('candidate_checks') if self._uses_candidate_checks(worker) else None
+            previous_requirement_round = self.requirement_cycles[-1]['handoff']['round'] if self.requirement_cycles else 0
             try:
                 worker.git_checkpoint, reviewer.git_checkpoint = publish(
                     self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text,
-                    boundary=lambda: self._publication_boundary(reviewer))
+                    boundary=lambda: self._publication_boundary(reviewer), problem=problem, receipt=receipt,
+                    previous_requirement_round=previous_requirement_round)
             except PublicationRefused:
                 return False
             except BusinessHeadChanged:
@@ -4985,6 +4990,10 @@ class Supervisor:
                           else 'Continue independent implementation and focused runnable checks; ') +
                        'if only external validation '
                        'remains, return blocked with the exact dependency and evidence.\n')
+            if not read_only and getattr(self.git_history, 'business_commits', False):
+                prompt += ('For a completed change, write a concise summary naming the concrete behavior change. '
+                           'Use done to describe what changed in this candidate. '
+                           'Watcher records independent review and its check results at publication.\n')
         if role != 'worker' or not self.config.function_dispatch:
             prompt += queued_requirement_prompt(self.active_queued_requirement)
         if (role == 'reviewer' and self.config.full_function_plan and self.function_tasks.current

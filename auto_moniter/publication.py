@@ -229,8 +229,44 @@ def _reviewed_checks(receipt, index):
     return results
 
 
+def _portable_commit_text(text, cwd=None):
+    """Normalize local paths for Git display only; never change executable evidence."""
+    # Match URLs first so their paths, including query values, remain intact.
+    tokens = re.compile(
+        r'(?P<url>[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"\x27]+)|'
+        r'(?P<quoted>[\"\x27](?:/|[A-Za-z]:[\\/])[^\n\r]*?[\"\x27])|'
+        r'(?<![A-Za-z0-9_./\\])(?P<path>(?:/|[A-Za-z]:[\\/])'
+        r'[^\s<>\"\x27`,;:)\]}\u3000-\u303f\u3400-\u9fff\uff00-\uffef]+)')
+
+    def display(match):
+        if match.group('url'):
+            # file URLs name local files rather than portable remote resources.
+            return '<local-path>' if match.group().lower().startswith('file://') else match.group()
+        value = match.group()
+        quote = value[0] if match.group('quoted') else ''
+        path = value[1:-1] if quote else value
+        suffix = ''
+        while path.endswith('.'):
+            suffix = '.' + suffix
+            path = path[:-1]
+        # Tool names are stable even when Python/Node live in a user installation.
+        name = path.replace('\\', '/').rsplit('/', 1)[-1]
+        if re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', name):
+            shown = 'python'
+        elif name == 'node':
+            shown = 'node'
+        elif cwd and path.startswith(str(cwd).rstrip('/') + '/'):
+            relative = path[len(str(cwd).rstrip('/')) + 1:]
+            shown = relative if '..' not in relative.split('/') else '<local-path>'
+        else:
+            shown = '<local-path>'
+        return quote + shown + suffix + quote
+
+    return tokens.sub(display, redact(text))
+
+
 def _business_commit_message(index, previous_round, worker, reviewer, changed, problem, receipt,
-                             *, previous_requirement_round=0):
+                             *, previous_requirement_round=0, cwd=None):
     task = (receipt or {}).get('context', {}).get('task') or {}
     if reviewer.get('task_status') == 'accepted' and task.get('delivery_scope') == 'function':
         scope = 'function'
@@ -247,7 +283,7 @@ def _business_commit_message(index, previous_round, worker, reviewer, changed, p
     changes = worker.get('done', [])
     subject = ''
     for text in [worker.get('summary', ''), *changes]:
-        text = redact(text).strip()
+        text = _portable_commit_text(text, cwd).strip()
         if not text:
             continue
         line = ' '.join(text.splitlines()[0].split())
@@ -281,7 +317,7 @@ def _business_commit_message(index, previous_round, worker, reviewer, changed, p
         parts.append(reviewer['summary'])
     parts.extend(f'- {item["id"]} resolved — {item["resolution"]["summary"]}' for item in issues)
     parts.extend(['', 'Watcher checks', *_reviewed_checks(receipt, index)])
-    return redact('\n'.join(parts)).replace('\0', '').encode('utf-8', errors='replace') + b'\n'
+    return _portable_commit_text('\n'.join(parts), cwd).replace('\0', '').encode('utf-8', errors='replace') + b'\n'
 
 
 def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text, boundary=None, *,
@@ -344,7 +380,7 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
             if code_tree != parent_tree:
                 message = _business_commit_message(
                     index, previous.get('round', 0), worker_data, reviewer_data, changed, problem, receipt,
-                    previous_requirement_round=previous_requirement_round)
+                    previous_requirement_round=previous_requirement_round, cwd=history.cwd)
                 commit = history.git('commit-tree', code_tree, *(['-p', parent] if parent else []),
                                      data=message).decode().strip()
             business = {'ref': before_business['ref'], 'commit': commit, 'parent': parent,

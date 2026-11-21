@@ -2041,7 +2041,15 @@ class Supervisor:
             self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
 
     def _commit_approved(self,worker,reviewer,worker_text,review_text,tree):
-        if self.config.workflow!='review-first' or not self.git_history:return True
+        if self.config.workflow != 'review-first':
+            return True
+        if not self.git_history:
+            if self.config.task_type == 'deployment' and not self._verified_candidate_approval(
+                    reviewer, worker, self._candidate_check_context(worker)):
+                reviewer.verdict.status = 'continue'
+                reviewer.verdict.gaps.append('Deployment evidence or its check receipt is stale. Review the current evidence.')
+                return False
+            return True
         with self.directions.lock():
             return self._commit_approved_locked(worker,reviewer,worker_text,review_text,tree)
 

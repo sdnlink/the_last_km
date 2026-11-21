@@ -213,12 +213,15 @@ class DeploymentTaskTests(unittest.TestCase):
     def test_changed_git_ignored_deployment_log_invalidates_candidate_approval(self):
         subprocess.run(['git', 'init', '-q', str(self.project)], check=True)
         (self.project / '.gitignore').write_text('*.log\n')
-        result, _, _ = self.run_deployment(tamper_log=True)
+        logs = deployment.evidence_path(self.project, self.run).parent
+        # Keep the logs out of the workspace fingerprint on all Git versions.
+        with patch('auto_moniter.workspace._git_ignored_paths',
+                   return_value={logs / (stage + '.log') for stage in deployment.STAGES}):
+            result, _, _ = self.run_deployment(tamper_log=True)
         self.assertNotEqual(result.status, 'done')
         state = json.loads((self.run / 'state.json').read_text())
         gaps = [gap for row in state['rounds'] for gap in row.get('gaps', [])]
-        self.assertTrue('Workspace changed during read-only review' in result.summary
-                        or any('stale' in gap for gap in gaps), (result.summary, gaps))
+        self.assertTrue(any('stale' in gap for gap in gaps), (result.summary, gaps))
 
     def test_resume_inherits_deployment_category_and_rejects_changing_it(self):
         supervisor = Supervisor(RunConfig(

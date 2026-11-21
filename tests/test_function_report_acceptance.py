@@ -100,17 +100,32 @@ class FunctionReportAcceptanceTests(unittest.TestCase):
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
         self.assertEqual(monitor.audit.items[0]['status'], 'open')
 
-    def test_reviewer_closure_may_cite_an_observation_instead_of_a_changed_file(self):
+    def test_reviewer_corrects_missing_evidence_with_a_current_check_without_redispatch(self):
         worker = FunctionWorker('worker', [submission(final=True)])
+        rejected = approval(close=True)
+        rejected['verdict']['issue_resolutions'][0]['evidence'] = ['not-present.py']
         approved = approval(close=True)
-        approved['verdict']['issue_resolutions'][0]['evidence'] = ['Fixed behavior check passed in this round.']
-        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approved])
+        approved['verdict']['issue_resolutions'][0]['evidence'] = ['check:001-check-01.log']
+        reviewer = ScriptedProvider('reviewer', [plan(final_task()), rejected, approved])
         monitor = self.monitor(worker, reviewer)
         self.seed_report_issue(monitor)
         report = monitor.run()
         self.assertEqual(report.status, 'done', report.summary)
-        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
+        self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 3))
+        self.assertIn('Cite an existing project file', reviewer.calls[-1]['prompt'])
         self.assertEqual(monitor.audit.items[0]['status'], 'resolved')
+
+    def test_reviewer_cannot_close_an_issue_using_an_unrecorded_check(self):
+        worker = FunctionWorker('worker', [submission(final=True)])
+        approved = approval(close=True)
+        approved['verdict']['issue_resolutions'][0]['evidence'] = ['check:999-check-01.log']
+        reviewer = ScriptedProvider('reviewer', [plan(final_task()), approved, approved])
+        monitor = self.monitor(worker, reviewer)
+        self.seed_report_issue(monitor)
+        report = monitor.run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual(monitor.audit.items[0]['status'], 'open')
 
     def test_legacy_report_downgrade_resumes_review_without_worker_resubmission(self):
         completed = submission(final=True)

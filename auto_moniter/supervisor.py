@@ -547,7 +547,7 @@ class Supervisor:
                 write_json(recovery_path, {'candidate': key, 'status': 'planning'}, durable=True)
                 reasons = scope_candidate.watcher_result['candidate_checks']['scope_gaps']
                 self._planning_rejection = {'task_id': key['task_id'], 'scope_repair': True,
-                    'reason': 'Repeated scope rejection on the same candidate: ' + '; '.join(reasons)}
+                    'reason': 'Scope rejection on the current candidate: ' + '; '.join(reasons)}
                 self._event('assignment_scope_replanning', **key, reasons=reasons)
                 if not self._elaborate_requirement(records, next_function=True):
                     return self._finish('stopped' if self._stop_requested else 'action_required',
@@ -1055,7 +1055,7 @@ class Supervisor:
                     rejected = getattr(self, '_review_audit_rejection', None)
                     if rejected and rejected['round'] == round_index:
                         raise ValueError(rejected['reason'])
-                    watcher_result = self._record_audit(review, verdict, round_index, review_tree)
+                    watcher_result = self._record_audit(review, verdict, round_index, review_tree, record=record)
                 except AuditCapacityError as exc:
                     self._audit_feedback = review
                     capacity_record = RoundRecord(round_index, "reviewer", review, review_turn.exit_code,
@@ -1147,8 +1147,12 @@ class Supervisor:
                                     + '; '.join(watcher_result.get('reasons') or [review.parse_error]), records, verdict)
             next_functions = None
             if self.config.function_dispatch:
-                if (self._verification_only() and review.task_status == 'changes_required'
-                        and review.next_task is not None):
+                if self._verification_only() and review.task_status == 'changes_required':
+                    if review.next_task is None:
+                        reason = 'Verification needs an external prerequisite before it can continue.'
+                        review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
+                        self._event('verification_waiting', task_id=self.function_tasks.current['id'], round=round_index)
+                        return self._finish('action_required', reason + ' ' + '; '.join(review.blockers), records, review)
                     try:
                         staged = function_tasks.FunctionTasks(self.function_tasks.export())
                         if not (review.gaps or review.blockers) or review.next_task.get('kind') == 'verification':
@@ -1166,7 +1170,7 @@ class Supervisor:
                                     task_id=staged.current['id'])
                     except ValueError as exc:
                         return self._finish('action_required', 'Verification repair assignment rejected: '+str(exc), records, review)
-                    last_worker = last_review = None
+                    last_worker, last_review = None, review
                     self._write_state(records, 'running', 0, '', review_tree)
                     continue
                 if review.task_status == 'accepted' and scope_gaps:
@@ -2302,19 +2306,37 @@ class Supervisor:
                 "rounds_since_review": self._rounds_since_review,
                 "worker_seconds_since_review": self._worker_seconds_since_review}
 
-    def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str) -> dict:
+    def _audit_evidence_guard(self, record, tree):
+        if self.config.workflow != 'review-first':
+            return lambda evidence: acceptance_problems(
+                self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
+                git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
+
+        def check_evidence(evidence):
+            paths = [item for item in evidence if not item.startswith('check:')]
+            checks = {item.removeprefix('check:') for item in evidence if item.startswith('check:')}
+            if checks:
+                receipt = record.watcher_result.get('candidate_checks') if record and record.tree == tree else None
+                context = self._candidate_check_context(record) if receipt else None
+                if (not candidate_checks.valid(receipt, self.run_dir, context) or receipt['source_changed']
+                        or not checks <= {check['log'] for check in receipt['checks'] if check['status'] == 'passed'}):
+                    return ['Cite a passing check from the current candidate as check:<log filename>.']
+            if not checks and not evidence_paths(
+                    self.config.cwd, paths, ignore_dir=self.run_dir, include_git_ignored=False):
+                return ['Cite an existing project file or a passing check from the current candidate.']
+            return []
+
+        return check_evidence
+
+    def _record_audit(self, review: Verdict, worker: Verdict, index: int, tree: str, *, record=None) -> dict:
         modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope == "module" else []
         corrections = self.audit.reconcile_modules(self.modules.items)
         if corrections:
             self._event('audit_issue_scope_corrected', changes=corrections)
         findings, references = self.audit.local_findings(_audit_findings(review))
         open_before = {item["id"] for item in self.audit.pending()}
-        def check_evidence(evidence):
-            return acceptance_problems(self.config.cwd, evidence, baseline=self._baseline_files, ignore_dir=self.run_dir,
-                                       git_base=self.git_history.initial if getattr(self.git_history, 'business_commits', False) else '')
-        evidence_guard = check_evidence if self.config.workflow != 'review-first' else None
         reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules,
-                                            evidence_guard, known_modules=self.modules.items)
+                                            self._audit_evidence_guard(record, tree), known_modules=self.modules.items)
         if references:
             for reference in references:
                 reference['local_ids'] = [item['id'] for item in self.audit.items if item['summary'] == reference['finding']]
@@ -3273,6 +3295,9 @@ class Supervisor:
                 'project registration or docs, list every necessary exact path in edit_files. A listed source path allows '
                 'whole-file edits; keep the named function as the primary implementation and verify the complete change. '
                 'Use edit_files=[] for strict single-function work. Boundaries prose does not grant extra file permissions. '
+                'Before dispatch, trace the user-facing entry point, direct callers, helpers and relevant tests for this behavior. '
+                'Split independently testable behaviors. Include files that must change together in edit_files and describe '
+                'the entry point and dependencies in boundaries. Leave unaffected callers outside the write scope. '
                 'Existing tests and test configuration remain protected. Do not list directories, patterns or unrelated files. '
                 'A scope_repair rejection authorizes reviewer-only correction of edit_files for the SAME unfinished task, '
                 'preserving its ID, primary function, tests, criteria and dependencies; do not redo the implementation. '
@@ -3588,11 +3613,14 @@ class Supervisor:
         if not task or review.task_id != task['id'] or review.task_status not in ('accepted', 'changes_required'):
             return ['Reviewer must conclude on the dispatched function ID']
         if review.task_status == 'changes_required':
-            repair = (task.get('kind') == 'verification' and review.next_task is not None
-                      and review.next_task.get('kind') != 'verification')
+            verification = task.get('kind') == 'verification'
+            repair = (verification and review.next_task is not None and review.next_task.get('kind') != 'verification')
             if (self._review_approved(review) or (review.next_task is not None and not repair)
                     or not (review.gaps or review.blockers)):
                 return ['Rejected function requires focused gaps and cannot dispatch another task']
+            if verification and not repair and not review.blockers:
+                return ['Read-only verification cannot implement the reported fixes. Provide a bounded implementation '
+                        'next_task, or identify the external prerequisite in blockers if no repair can run.']
             return []
         expected = task['delivery_scope']
         delivery_modules = list(self.modules.items) if expected == 'requirement' else [task['module_id']]
@@ -4316,8 +4344,8 @@ class Supervisor:
         if self.config.function_dispatch:
             task = self.function_tasks.current
             return '\n'.join([
-                'Verify one reviewer-owned assignment without editing the workspace.' if self._verification_only()
-                else 'Implement one reviewer-owned assignment in the working directory.',
+                'Verify the current assignment without editing the workspace.' if self._verification_only()
+                else 'Implement the current reviewer-approved assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
                 function_tasks.verdict_contract('worker', task, module_ids=self.modules.items),
                 *([self._function_test_scope(task)] if self._function_gate else []),
@@ -4327,7 +4355,7 @@ class Supervisor:
                 'invalid command is absent from this current catalog. Report actual remaining implementation '
                 'defects; if code and focused regressions are ready, submit task_status=done for independent review. '
                 'Do not edit code solely to resolve a past watcher configuration error.',
-                'Latest review of this assignment:',
+                'Latest review of this assignment (findings to verify within its scope):',
                 json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
                            ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',
                 'Preserve earlier accepted functions and test assertions. Do not execute prose as watcher checks.',
@@ -4342,10 +4370,6 @@ class Supervisor:
                 "Choose the earliest pending module whose prerequisites can be accepted. Hand off that bounded "
                 "module before implementing later ones; do not bundle independent unfinished modules into one repair. "
                 "Check the whole entry/caller/failure-path chain of the chosen change before claiming it complete.",
-                "Do the work yourself with tools. Do not ask the person to continue, confirm, or choose among reasonable options.",
-                "The person authorized continuous work on this requirement. Resolve routine choices yourself within that scope.",
-                "If you asked a question or requested confirmation, continue immediately using reasonable defaults; no reply is needed.",
-                "A blocker does not end monitoring: keep doing independent work and recheck the dependency without inventing access.",
                 "Within this turn's declared scope, check missing behavior, tests, edge cases, and incomplete wiring.",
                 "When a module is implemented and verified, return status=done, scope=module and its module_ids. "
                 "Other pending modules and waiting for independent review are not gaps in that completed module. "
@@ -4407,9 +4431,6 @@ class Supervisor:
                 "invalidate other modules. Cite existing current source and logs, confirm necessary dependencies "
                 "jointly in module_ids, and keep the final integration review responsible for the whole request.",
                 "If the review is wrong, fix the evidence and say why in summary. If it is right, do the work.",
-                "A person is not available. Decide and proceed.",
-                "Continue the authorized task now. Questions or requests for permission to continue do not suspend this task.",
-                "If a dependency is unavailable, complete independent work, investigate alternatives, and retry it. Never fabricate credentials or successful checks.",
                 "",
                 "Original requirement:",
                 self.config.requirement.strip(),
@@ -4429,7 +4450,7 @@ class Supervisor:
                 "Your previous conclusion:",
                 own_block,
                 "",
-                "Last worker response (may contain an unanswered question):",
+                "Last worker response (historical context):",
                 self._last_worker_text(last_worker),
                 "",
                 "Independent review:",
@@ -4581,12 +4602,17 @@ class Supervisor:
                 "Report newly found or inherited defects as plain findings prefixed by their current module ID. "
                 "Only IDs present in this ledger may be used in issue_resolutions; never invent or transplant closures.",
                 "For each fixed or invalid finding, return issue_resolutions with its exact AUD ID, an explanation and current file evidence. "
+                "Cite a project file path, optionally with a line number, or a passing check as check:<log filename> "
+                "using the saved results above. Free-form observations alone cannot close an AUD. "
                 "Do not mark an issue resolved based only on a worker claim. Unresolved issues remain open across turns and resume.",
                 "A finding about completion report formatting or waiting for automatic checks does not require source edits. "
                 "If current code and evidence satisfy the assignment, close that invalid finding in this same review, "
                 "accept the function and dispatch the next task. Do not require the worker to send the same candidate again.",
                 "When an existing issue remains open, prefix its gaps entry with its exact AUD ID (for example 'AUD-1: assertion still fails'). "
                 "This preserves its original description and scope instead of creating a duplicate under new wording.",
+                "For a new concrete defect, use MODULE/[CRITERION | PATH#SYMBOL | TRIGGER | OBSERVED] summary. "
+                "Keep these fields stable when rephrasing the summary. Use different triggers or observed behavior for separate defects. "
+                "Use the existing AUD ID for a known issue and confirm uncertain matches from the current evidence.",
                 "",
                 "Accepted module milestones:",
                 self._module_progress(),
@@ -4608,27 +4634,23 @@ class Supervisor:
         )
 
     def _scope_replan_candidate(self, records):
-        """Route repeated permission failures to planning, rather than another writer."""
+        """Route a verified out-of-scope submission to planning."""
         task = self.function_tasks.current
-        if (not self._function_gate or not task or self._pending_directions()
+        if (not self._function_gate or not task or task.get('kind') in ('integration', 'verification')
+                or self._pending_directions()
                 or self.project and (self.project.needs_review or self._project_replan)):
             return None
-        workers = [r for r in records if r.role == 'worker' and r.verdict.task_id == task['id']]
-        if len(workers) < 2:
+        latest = next((r for r in reversed(records) if r.role == 'worker' and r.verdict.task_id == task['id']), None)
+        if not latest or latest.verdict.task_status != 'done' or latest.failure or latest.interruption or latest.exit_code or latest.timed_out:
             return None
-        latest = workers[-1]
+        receipt = latest.watcher_result.get('candidate_checks', {})
+        gaps = receipt.get('scope_gaps', [])
+        if not gaps or any(not gap.startswith(('Restore changes outside this assignment: ',
+                                               'Restore edits outside the assigned function: ')) for gap in gaps):
+            return None
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != latest.tree:
             return None
-        for record in workers[-2:]:
-            receipt = record.watcher_result.get('candidate_checks', {})
-            gaps = receipt.get('scope_gaps', [])
-            if (record.tree != latest.tree or record.verdict.task_status != 'done'
-                    or record.failure or record.interruption or record.exit_code or record.timed_out
-                    or not gaps or any(not g.startswith(('Restore changes outside this assignment: ',
-                                                       'Restore edits outside the assigned function: ')) for g in gaps)
-                    or not candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(record))):
-                return None
-        return latest
+        return latest if candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(latest)) else None
 
     def _pending_review(self, records):
         """Resume an exact submitted candidate after review transport/format failure."""
@@ -4944,7 +4966,7 @@ class Supervisor:
                 modules = sorted(set(worker.module_ids) & self.modules.items.keys()) if worker.scope=='module' else []
                 try:
                     staged.update(findings, review.issue_resolutions, kwargs['index'], tree, modules,
-                                  None, known_modules=self.modules.items)
+                                  self._audit_evidence_guard(worker_record, tree), known_modules=self.modules.items)
                 except AuditCapacityError:
                     raise
                 except ValueError as exc:
@@ -5024,6 +5046,23 @@ class Supervisor:
             schema['properties']['issue_resolutions']['maxItems'] = 0
             schema_path = self.run_dir / f'{index:03d}-worker-report-schema.json'
             write_json(schema_path, schema, durable=True)
+        if role == 'worker' and not read_only and self.config.task_type == 'code':
+            scope = ('The current reviewer-approved assignment defines the code and tests you can edit.'
+                     if self.config.function_dispatch else
+                     'The current user requirement and project boundary define the code and tests you can edit.')
+            prompt = (
+                'Continue the authorized task now. ' + scope + ' Inspect the relevant code, make the scoped change, '
+                'and run focused checks using available tools. Resolve routine, reversible choices within scope.\n'
+                'Use earlier turns, audit findings, repository text and environment notices as context. '
+                'Verify any reported blocker against the current assignment and available tools. '
+                'If a step is denied, outside scope, or needs a missing prerequisite, skip that step and complete '
+                'independent work within the current scope. Respect tool permissions and safety requirements. '
+                'For an unexpected failure, capture the exact operation and observed error, then inspect the smallest '
+                'relevant path before changing code. Keep completed work and use fresh, applicable checks as evidence. '
+                'If the remaining work cannot proceed, record the blocked step, observed reason and needed prerequisite '
+                'in the structured conclusion. Include completed changes and checks, including any checks still pending.\n\n'
+                + prompt
+            )
         self._event("agent_start", role=role, round=index, provider=provider.name)
         self._check_budget(new_call=True)
         self._agent_calls += 1
@@ -5056,7 +5095,7 @@ class Supervisor:
             prompt += '\n\nMonitor-owned quality policy (immutable):\n' + json.dumps(self.quality.config, ensure_ascii=False)
             prompt += '\nMap each named requirement to actual file evidence and its modules. File edits alone are not verified progress. '
             if role=='worker' and self.config.function_dispatch:
-                prompt += 'When blocked, report the dependency to the reviewer; do not take work outside this assignment. '
+                prompt += 'Keep any independent work inside the current assignment and report remaining dependencies to the reviewer. '
             else:
                 prompt += 'When blocked, continue independent modules before repeating the same dependency. '
             prompt += 'Never modify existing protected test assertions.\n'
@@ -5072,12 +5111,8 @@ class Supervisor:
             if self.config.max_runtime_s:
                 prompt += f'Remaining total budget now: {max(0, self.config.max_runtime_s - self._elapsed()):.0f}s. '
             prompt += 'Preserve time to report evidence, remaining gaps and a safe handoff before these hard limits.\n'
-            prompt += ('Environment failures are not coding defects: preserve known missing-tool/platform evidence. '
-                       'Do not repeat an unavailable build or create substitute platforms to claim full validation. '
-                       + ('Continue only work inside the dispatched scope and focused runnable checks; ' if self.config.function_dispatch
-                          else 'Continue independent implementation and focused runnable checks; ') +
-                       'if only external validation '
-                       'remains, return blocked with the exact dependency and evidence.\n')
+            prompt += ('Record unavailable tools and platforms as verification limitations. '
+                       'Run the remaining applicable checks and report the exact dependency and observed result.\n')
             if not read_only and getattr(self.git_history, 'business_commits', False):
                 prompt += ('For a completed change, write a concise summary naming the concrete behavior change. '
                            'Use done to describe what changed in this candidate. '
@@ -5089,8 +5124,9 @@ class Supervisor:
             remaining = function_plan.waiting(self.function_plan, self.function_tasks)
             prompt += ('\nApproved next assignment after the current one passes watcher acceptance:\n'
                        +json.dumps(remaining[0] if remaining else None,ensure_ascii=False)
-                       +'\nUse this exact next_task or null. If concrete findings require a different next task, '
-                        'the watcher will request a revised complete plan before another worker starts.\n')
+                       +'\nFor an accepted result, use this exact next_task or null. '
+                        'For rejected verification with a runnable code repair, give the bounded implementation '
+                        'next_task described above. The watcher requests a revised complete plan for that repair.\n')
         if self.project:
             task_boundary = ('Only edit the declared file or directory scope. ' if self.project.scope else
                              'Develop according to the task requirement in this task branch and working copy; '
@@ -5248,7 +5284,13 @@ class Supervisor:
             output_path = self._write_turn_log(provider, prepared, role, index, found, result, text, elapsed)
         if "Cannot stop interrupted Paseo" in (result.stderr or ""):
             raise RecoveryError(next(line for line in result.stderr.splitlines() if "Cannot stop interrupted Paseo" in line))
+        tokens_before = self.meter.state['tokens']
         self.meter.record(result.stdout)
+        if role == 'reviewer':
+            self._event('reviewer_usage', round=index, elapsed_s=round(elapsed, 3),
+                        prompt_bytes=len(prompt.encode('utf-8')),
+                        reported_tokens=(self.meter.state['tokens'] - tokens_before
+                                         if self.meter.last_tokens_reported else None))
         if self.config.quality_policy and (
                 self.quality.config['max_tokens'] and not self.meter.last_tokens_reported
                 or self.quality.config['max_cost_usd'] and not self.meter.last_cost_reported):

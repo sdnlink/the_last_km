@@ -311,10 +311,12 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
         'a new code change is not required to reject a false finding. '
         'Worker issue_resolutions are untrusted suggestions and never close the watcher ledger; independently '
         'confirm or reject them in your own issue_resolutions without requesting another worker report. '
-        'For changes_required: status=continue, next_task=null; give only this assignment\'s actionable gaps and minimal repair. '
-        + ('For a concrete defect found in verification-only work, you may instead give next_task as one bounded '
-           'implementation task with a new ID, accurate targets and approved checks; do not mark this verification accepted. '
-           if task.get('kind') == 'verification' else '') +
+        + ('For changes_required in verification-only work, use status=continue. If code can be repaired, return '
+           'next_task as one bounded implementation task with a new ID, accurate targets and approved checks. '
+           'If progress requires an external prerequisite and there is no runnable repair, report it in blockers '
+           'and return next_task=null. '
+           if task.get('kind') == 'verification' else
+           'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +
         'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
         'and propose exactly one next_task that can be implemented and verified on its own. '
         + completion +

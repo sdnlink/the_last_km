@@ -107,8 +107,10 @@ def evidence_paths(
     created_since: float = 0,
     baseline: dict[str, str] | None = None,
     ignore_dir: Path | None = None,
+    include_git_ignored: bool = True,
 ) -> list[Path]:
     cwd = cwd.resolve()
+    git_ignored = set() if include_git_ignored else _git_ignored_paths(cwd)
     found: list[Path] = []
     for item in evidence:
         candidates = [item, *item.replace(",", " ").replace("`", " ").split()]
@@ -137,6 +139,8 @@ def evidence_paths(
             try:
                 path = path.resolve()
                 if not _under(path, cwd) or _ignored(path, ignore_dir, cwd=cwd):
+                    continue
+                if git_ignored and (path in git_ignored or any(parent in git_ignored for parent in path.parents)):
                     continue
                 if not path.is_file():
                     # A removed baseline file is evidence of a deletion task.

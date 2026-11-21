@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from auto_moniter.git_history import GitHistory, GitHistoryError
+from auto_moniter.review_impact import python_impact
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.workspace import evidence_paths, file_snapshot
 from console.git_records import GitRecordError, read_git_record
@@ -35,6 +36,21 @@ class GitProjectFixture(unittest.TestCase):
 
 
 class GitHistoryTests(GitProjectFixture):
+    def test_python_impact_reads_changed_symbols_and_calls_from_candidate(self):
+        (self.project / 'app.py').write_text('def render():\n    return False\n')
+        (self.project / 'test_app.py').write_text('from app import render\ndef test_render():\n    assert not render()\n')
+        git(self.project, 'add', '.')
+        base = git(self.project, 'write-tree').decode().strip()
+        (self.project / 'app.py').write_text('def render():\n    return True\n')
+        git(self.project, 'add', 'app.py')
+        head = git(self.project, 'write-tree').decode().strip()
+        (self.project / 'test_app.py').unlink()
+
+        history = GitHistory.open(self.project, self.run)
+        impact = python_impact(history.git, base, head)
+        self.assertIn('app.py:1 render', impact)
+        self.assertIn('test_app.py:3 test_render calls render', impact)
+
     def test_console_reads_immutable_git_object_and_preserves_worktree_and_index(self):
         history = GitHistory.open(self.project, self.run)
         (self.project / 'app.py').write_text('staged input\n')

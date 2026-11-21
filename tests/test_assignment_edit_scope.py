@@ -61,35 +61,35 @@ class AssignmentEditScopeTests(unittest.TestCase):
                 value=function_tasks.validate(value,modules)
                 function_gate.validate_task(value,self.root,modules,[CHECK],BRIEF)
 
-    def test_repeated_unchanged_scope_failure_replans_once_and_reuses_candidate(self):
+    def test_scope_failure_replans_once_and_reuses_candidate(self):
         legacy=final_task()
         fixed={**legacy,'edit_files':EDITS}
         replanned=plan(fixed);value=json.loads(replanned['text']);value['modules']=[];replanned['text']=json.dumps(value)
         accepted=self.response('accepted')
         accepted['verdict']['issue_resolutions']=[{'id':'AUD-1','summary':'Approved manifest matches the atomic route change',
                                                    'evidence':EDITS}]
-        worker=FunctionWorker('worker',[{**self.response('done'),'writes':WRITES},self.response('done')])
+        worker=FunctionWorker('worker',[{**self.response('done'),'writes':WRITES}])
         reviewer=ScriptedProvider('reviewer',[plan(legacy),self.response('changes_required',gaps=['Scope manifest needs route files']),
-            self.response('changes_required',gaps=['Scope manifest needs route files']),replanned,accepted])
+            replanned,accepted])
         report=self.monitor(worker,reviewer).run()
         self.assertEqual(report.status,'done',report.summary)
-        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,5))
-        self.assertTrue(reviewer.calls[3]['read_only'])
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,4))
+        self.assertTrue(reviewer.calls[2]['read_only'])
         events=(self.root/'run/events.jsonl').read_text()
         self.assertIn('assignment_scope_replanning',events)
         self.assertIn('worker_candidate_reused',events)
         self.assertEqual((self.root/'app.py').read_text(),SOURCE)
 
-    def test_unsolved_scope_replan_stops_without_a_third_unchanged_worker(self):
+    def test_unsolved_scope_replan_stops_without_redispatch(self):
         legacy=final_task();replanned=plan(legacy)
         value=json.loads(replanned['text']);value['modules']=[];replanned['text']=json.dumps(value)
-        worker=FunctionWorker('worker',[{**self.response('done'),'writes':WRITES},self.response('done')])
+        worker=FunctionWorker('worker',[{**self.response('done'),'writes':WRITES}])
         reviewer=ScriptedProvider('reviewer',[plan(legacy),self.response('changes_required',gaps=['Scope manifest needs route files']),
-            self.response('changes_required',gaps=['Scope manifest needs route files']),replanned])
+            replanned])
         report=self.monitor(worker,reviewer).run()
         self.assertEqual(report.status,'action_required',report.summary)
         self.assertIn('scope repair still rejects',report.summary)
-        self.assertEqual((len(worker.calls),len(reviewer.calls)),(2,4))
+        self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,3))
         self.assertEqual((self.root/'app.py').read_text(),SOURCE)
 
     def test_verification_or_integration_cannot_expand_scope_through_edit_files(self):

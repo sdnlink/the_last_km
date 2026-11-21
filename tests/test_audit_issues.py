@@ -27,6 +27,22 @@ def reviewed(status="done", gaps=None, ids=()):
 
 
 class AuditLedgerTests(unittest.TestCase):
+    def test_structured_identity_survives_rewording_and_distinguishes_defects(self):
+        ledger = AuditLedger()
+        prefix = 'main/[main:1 | app.py#render | empty result | missing message]'
+        self.assertEqual(ledger.record([prefix + ' Show the empty state'], 1, known_modules={'main'}), ['AUD-1'])
+        saved = AuditLedger.restore(ledger.export())
+        self.assertEqual(saved.record([prefix + ' No feedback for empty results'], 2, known_modules={'main'}), ['AUD-1'])
+        self.assertEqual(saved.record([prefix.replace('missing message', 'spinner remains')], 3,
+                                      known_modules={'main'}), ['AUD-2'])
+
+    def test_check_evidence_requires_revalidation_after_candidate_changes(self):
+        ledger = AuditLedger()
+        ledger.record(['Missing empty state'], 1, ['main'])
+        ledger.resolve([resolution(evidence=['check:001-check-01.log'])], 2, TREE, lambda evidence: [])
+        self.assertEqual(ledger.invalidate('b' * 64, {'other'}, ['other.py']), ['AUD-1'])
+        self.assertEqual(ledger.pending()[0]['status'], 'needs_review')
+
     def test_omission_and_dedup_preserve_stable_issue_ids(self):
         ledger = AuditLedger()
         self.assertEqual(ledger.record(["Missing test", "Missing route"], 1), ["AUD-1", "AUD-2"])

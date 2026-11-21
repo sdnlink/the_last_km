@@ -12,6 +12,15 @@ from auto_moniter.redaction import redact
 MAX_OPEN = 128
 KEEP_CLOSED = 20
 MAX_BYTES = 512 * 1024
+FINDING_KEY = re.compile(r'^([\w.-]+)\s*[/／:]\s*\[([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)\]')
+
+
+def finding_key(text):
+    match = FINDING_KEY.match(text)
+    if match:
+        fields = tuple(' '.join(field.split()) for field in match.groups())
+        if all(fields) and fields[1] != '-':
+            return (*fields[:3], fields[3].casefold(), fields[4].casefold())
 
 
 def finding_modules(text: str, known_modules, default) -> list[str]:
@@ -129,8 +138,10 @@ class AuditLedger:
                 raise ValueError(f"Unknown audit issue {reference[1]}; use the monitor ledger")
             return text, old
         key = " ".join(text.split()).casefold()
-        return text, next((item for item in items if " ".join(item["summary"].split()).casefold() == key
-                           and item["module_ids"] == modules), None)
+        identity = finding_key(text)
+        return text, next((item for item in items if item["module_ids"] == modules and (
+            " ".join(item["summary"].split()).casefold() == key
+            or identity and finding_key(item["summary"]) == identity)), None)
 
     def update(self, findings: list[str], proposals: object, index: int, tree: str,
                module_ids: list[str], check_evidence, *, known_modules=()) -> tuple[list[str], list[str]]:
@@ -196,7 +207,8 @@ class AuditLedger:
                 from auto_moniter.quality import cited
                 evidence_changed = changed_files is not None and any(
                     cited([name], item['resolution']['evidence']) for name in changed_files)
-                if (affected_modules is not None and item['module_ids']
+                check_evidence = any(entry.startswith('check:') for entry in item['resolution']['evidence'])
+                if (not check_evidence and affected_modules is not None and item['module_ids']
                         and not affected_modules.intersection(item['module_ids']) and not evidence_changed):
                     item['tree'] = tree
                     continue

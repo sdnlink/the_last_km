@@ -153,6 +153,8 @@ class ApprovedHistory(GitHistory):
         changes = self.git('diff', '--no-ext-diff', '--no-textconv', base, head,
                            '--', '.', ':(exclude).auto-moniter').decode(errors='replace')
         from auto_moniter.runlog import clipped
+        from auto_moniter.review_impact import python_impact
+        impact = python_impact(self.git, base, head)
         return '\n'.join([
             'Pending immutable Git TREE snapshot, not an approved commit.',
             f'Worker checkpoint: {head}', f'Worker conclusion: {candidate["record"]}',
@@ -172,7 +174,10 @@ class ApprovedHistory(GitHistory):
             'Describe the changes and evidence supporting your review. '
 
             'No file writes, tests, builds or Git commits are permitted for the reviewer.',
-            'Delta stat:\n' + clipped(patch, 12000), 'Delta:\n' + clipped(changes, 24000)])
+            *([clipped(impact, 8000)] if impact else []),
+            'Delta stat:\n' + clipped(patch, 12000),
+            'Use the Git command above if the delta excerpt is truncated.\nDelta:\n'
+            + clipped(changes, 12000 if impact else 24000)])
 
     def remember_review(self, index):
         if self.candidate.get('round') == index:

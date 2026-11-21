@@ -91,22 +91,29 @@ class InlineScripts(HTMLParser):
             self.start = None
 
 
-def _python_spans(source, symbol):
-    offsets = [0, *(m.end() for m in re.finditer('\n', source)), len(source)]
-    spans = []
+def python_functions(tree):
     def visit(node, prefix=''):
         named = isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
         name = prefix + node.name if named else ''
-        if name == symbol and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            first = min([node.lineno, *(item.lineno for item in node.decorator_list)])
-            last = offsets[node.end_lineno - 1]
-            # AST columns are UTF-8 byte offsets. Preserve any suffix outside
-            # the statement on its final line.
-            end = last + len(source[last:].encode()[:node.end_col_offset].decode())
-            spans.append((offsets[first - 1], end))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield name, node
         for child in ast.iter_child_nodes(node):
-            visit(child, name + '.' if named else prefix)
-    visit(ast.parse(source))
+            yield from visit(child, name + '.' if named else prefix)
+    yield from visit(tree)
+
+
+def _python_spans(source, symbol):
+    offsets = [0, *(m.end() for m in re.finditer('\n', source)), len(source)]
+    spans = []
+    for name, node in python_functions(ast.parse(source)):
+        if name != symbol:
+            continue
+        first = min([node.lineno, *(item.lineno for item in node.decorator_list)])
+        last = offsets[node.end_lineno - 1]
+        # AST columns are UTF-8 byte offsets. Preserve any suffix outside
+        # the statement on its final line.
+        end = last + len(source[last:].encode()[:node.end_col_offset].decode())
+        spans.append((offsets[first - 1], end))
     return spans
 
 

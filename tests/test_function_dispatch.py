@@ -398,15 +398,54 @@ class DispatchTests(unittest.TestCase):
             implementation['criterion_ids']=['main:1','req:1:1','req:1:2']
             worker=FunctionWorker('worker',[result('VERIFY','incomplete',gaps=['Return value is incorrect']),
                 {**result('REPAIR','done',status='done'),'touch':'app.py'}])
+            missing_assignment=result('VERIFY','changes_required',gaps=['main/Return value must be 42'])
             rejected=result('VERIFY','changes_required',gaps=['main/Return value must be 42'],next_task=implementation)
             accepted=result('REPAIR','accepted',status='done')
             accepted['verdict']['issue_resolutions']=[{'id':'AUD-1','summary':'Verified return value is 42','evidence':['app.py']}]
-            reviewer=ScriptedProvider('reviewer',[plan(verification_task()),rejected,accepted])
-            report=self.run_monitor(root,worker,reviewer,max_rounds=2,review_every=1)
+            def complete_plan(assignment):
+                response = json.loads(plan(assignment)['text'])
+                response['function_plan'] = [assignment]
+                return {'verdict': {}, 'text': json.dumps(response)}
+            reviewer=ScriptedProvider('reviewer',[complete_plan(verification_task()), missing_assignment,
+                rejected, complete_plan(implementation), accepted])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=2,review_every=1,full_function_plan=True)
             self.assertEqual(report.status,'done',report.summary)
             self.assertEqual([call['read_only'] for call in worker.calls],[True,False])
+            self.assertNotIn('Continue the authorized task now', worker.calls[0]['prompt'])
+            self.assertTrue(worker.calls[1]['prompt'].startswith('Continue the authorized task now'))
+            self.assertIn('complete independent work within the current scope', worker.calls[1]['prompt'])
+            self.assertIn('Respect tool permissions and safety requirements', worker.calls[1]['prompt'])
+            self.assertEqual(len(reviewer.calls),5)
+            self.assertIn('For an accepted result, use this exact next_task or null',reviewer.calls[1]['prompt'])
+            self.assertIn('Provide a bounded implementation next_task',reviewer.calls[2]['prompt'])
             ledger=json.loads((root/'run/state.json').read_text())['function_tasks']
             self.assertEqual([item['task']['id'] for item in ledger['accepted']],['REPAIR'])
+
+    def test_verification_waits_for_an_external_prerequisite_without_redispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            worker=FunctionWorker('worker',[result('VERIFY','incomplete',gaps=['Browser unavailable'])])
+            blocked=result('VERIFY','changes_required')
+            blocked['verdict']['blockers']=['The required browser environment is unavailable.']
+            reviewer=ScriptedProvider('reviewer',[plan(verification_task()),blocked])
+            report=self.run_monitor(root,worker,reviewer,max_rounds=3,review_every=1)
+            self.assertEqual(report.status,'action_required',report.summary)
+            self.assertIn('browser environment is unavailable',report.summary)
+            self.assertEqual((len(worker.calls),len(reviewer.calls)),(1,2))
+            state=json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['current']['id'],'VERIFY')
+            self.assertEqual(state['function_tasks']['accepted'],[])
+
+            worker = FunctionWorker('worker', [])
+            reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted', status='done')])
+            report = Supervisor(RunConfig('', root, worker, reviewer=reviewer, workflow='review-first',
+                resume=True, git_history='off', run_dir=root/'run', retry_delay_s=0), log=lambda _: None).run()
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertFalse(worker.calls)
+            self.assertEqual(len(reviewer.calls), 1)
+            resumed = json.loads((root/'run/state.json').read_text())
+            self.assertEqual([item['task']['id'] for item in resumed['function_tasks']['accepted']], ['VERIFY'])
 
     def test_final_verification_environment_retry_only_reviews_completed_checks(self):
         with tempfile.TemporaryDirectory() as directory:

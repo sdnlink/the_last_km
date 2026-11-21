@@ -1,0 +1,20 @@
+<section class="panel supervision-panel" aria-labelledby="supervision-title">
+  <div class="supervision-header">
+    <div><h2 id="supervision-title">Paseo 持续监督</h2><p>按日程启动 Paseo Agent，只读巡检本控制台的任务和交付。</p></div>
+    <span id="supervision-status" role="status">正在读取监督日程…</span>
+  </div>
+  <form id="supervision-form">
+    <fieldset id="supervision-fields" class="supervision-fields" disabled>
+      <label>监督频率（Cron）<input name="cron" value="*/15 * * * *" required maxlength="120" spellcheck="false" /></label>
+      <label>时区<input name="timezone" value="Asia/Shanghai" required maxlength="80" spellcheck="false" /></label>
+      <label>执行器 / 模型<input name="provider" value="codex" placeholder="codex 或 codex/模型" required maxlength="160" spellcheck="false" /></label>
+    </fieldset>
+    <div class="supervision-actions">
+      <button type="submit" class="button primary" id="supervision-save" disabled>启用监督</button>
+      <button type="button" class="button secondary" id="supervision-toggle" hidden></button>
+      <button type="button" class="button secondary" id="supervision-refresh">刷新状态</button>
+      <span id="supervision-next" hidden><span>下次巡检</span> <time></time></span>
+    </div>
+  </form>
+  <p id="supervision-error" class="connection-error" role="alert" hidden></p>
+</section>

@@ -21,6 +21,7 @@ from auto_moniter.storage import write_json
 from console.tasks import TaskError, TaskStore
 from console.pages import page_route, render_page, asset
 from console.localization import select_language, translate_html, localize_response
+from console.supervision import SupervisionSchedule
 
 
 STATIC = Path(__file__).with_name('static')
@@ -33,6 +34,7 @@ class ConsoleServer(ThreadingHTTPServer):
         self.store = store
         self.csrf = secrets.token_urlsafe(32)
         super().__init__(address, Handler)
+        self.supervision = SupervisionSchedule(store, self.server_address[1])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -84,6 +86,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({**self.server.store.config(), 'csrf_token': self.server.csrf})
             elif url.path == '/api/agents/setup':
                 self._json(self.server.store.agents.snapshot())
+            elif url.path == '/api/supervision':
+                self._json(self.server.supervision.get())
             elif url.path == '/api/overview':
                 self._json(self.server.store.dashboard())
             elif url.path == '/api/tasks':
@@ -108,6 +112,10 @@ class Handler(BaseHTTPRequestHandler):
                     query = parse_qs(url.query)
                     self._json(self.server.store.dispatch_plan(parts[2], int(query.get('page', ['1'])[0]),
                         int(query.get('page_size', ['10'])[0]), query.get('status', ['all'])[0]))
+                elif len(parts) == 4 and parts[3] == 'supervision':
+                    self._json(self.server.supervision.get(self.server.store.supervision_target(parts[2])))
+                elif len(parts) == 4 and parts[3] == 'snapshot':
+                    self._json(self.server.store.task_snapshot(parts[2]))
                 elif len(parts) == 5 and parts[3] == 'git':
                     self._json(self.server.store.git_record(parts[2], parts[4]))
                 elif len(parts) == 3:
@@ -140,9 +148,20 @@ class Handler(BaseHTTPRequestHandler):
                 raise TaskError('请求必须是 JSON 对象')
             path = urlsplit(self.path).path
             if path == '/api/tasks':
-                self._json(self.server.store.create(data), 201)
+                if 'supervision' not in data:
+                    self._json(self.server.store.create(data), 201)
+                else:
+                    preferences = self.server.supervision.preferences(data['supervision'])
+                    task = self.server.store.create(data, supervision_preferences=preferences)
+                    try:
+                        task['supervision'] = self.server.supervision.change({'action': 'save', **preferences}, task)
+                    except TaskError as exc:
+                        task['supervision_error'] = str(exc)
+                    self._json(task, 201)
             elif path == '/api/agents/refresh':
                 self._json(self.server.store.refresh_agents())
+            elif path == '/api/supervision':
+                self._json(self.server.supervision.change(data))
             elif path in ('/api/agents/save','/api/agents/install','/api/agents/probe'):
                 self._json(self.server.store.agent_settings(path.rsplit('/',1)[1],data),202 if path.endswith('/install') else 200)
             elif path in ('/api/acceptance/scan', '/api/acceptance/preflight'):
@@ -155,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.server.store.add_direction(parts[2], data), 201)
                 elif parts[3] == 'requirement-queue':
                     self._json(self.server.store.queued_requirements(parts[2], data), 201)
+                elif parts[3] == 'supervision':
+                    self._json(self.server.supervision.change(data, self.server.store.supervision_target(parts[2])))
                 else:
                     self._json(self.server.store.action(parts[2], parts[3], data))
         except (BrokenPipeError, ConnectionResetError):

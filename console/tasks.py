@@ -409,6 +409,7 @@ class TaskStore:
                      'directions': directions, 'can_direct': can_direct,
                      'can_queue_requirements': can_queue_requirements,
                      'direction_delivery': delivery, 'direction_error': direction_error,
+                     'supervision_preferences': meta.get('supervision_preferences'),
                      'actions': actions, 'checks': meta.get('checks', state.get('checks', []))})
 
     @staticmethod
@@ -433,6 +434,16 @@ class TaskStore:
                      for meta in self._catalog().values()]
             tasks.sort(key=lambda item: item.get('created_at') or '', reverse=True)
             return {'tasks': tasks, 'at': timestamp(), 'discovery': {'warnings': self._scan_warnings}}
+
+    def task_snapshot(self, ident: str) -> dict:
+        with self._lock:
+            task = self.summary(self._view(self._get(ident), {}, include_details=False))
+            return {'tasks': [task], 'at': timestamp()}
+
+    def supervision_target(self, ident: str) -> dict:
+        with self._lock:
+            task = self._view(self._get(ident), {}, include_details=False)
+            return {key: task.get(key) for key in ('id', 'cwd', 'project_cwd', 'supervision_preferences')}
 
     def dashboard(self) -> dict:
         with self._lock:
@@ -589,7 +600,7 @@ class TaskStore:
         except (ValueError,OSError) as exc:
             raise TaskError(str(exc)) from exc
 
-    def create(self, data: dict) -> dict:
+    def create(self, data: dict, *, supervision_preferences=None) -> dict:
         def text(key, default='', maximum=32000):
             value = data.get(key, default)
             if not isinstance(value, str) or '\x00' in value or len(value) > maximum:
@@ -747,6 +758,8 @@ class TaskStore:
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
+            if supervision_preferences is not None:
+                meta['supervision_preferences'] = supervision_preferences
             if parallel:
                 if verification_mode == 'planning':
                     raise TaskError('并行开发请使用实现与验收模式；只制定验收方案不创建并行工作副本')

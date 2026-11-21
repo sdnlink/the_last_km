@@ -1801,3 +1801,17 @@ body[data-sync="offline"] [data-motion="running"] { filter:saturate(.25); }
   .navigation-toggle { display:inline-flex; position:absolute; top:13px; right:18px; }
   .primary-navigation[data-expanded="false"] { display:none; }
 }
+
+.supervision-panel { margin-top:16px; padding:20px 24px; }
+.supervision-header { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px 20px; }
+.supervision-header h2 { margin:0 0 6px; font-size:16px; }
+.supervision-header p, #supervision-next { color:var(--muted); font-size:12px; margin:0; }
+#supervision-status { color:var(--accent); font-size:12px; }
+.supervision-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr)); gap:12px; padding:0; border:0; margin:16px 0 12px; }
+.supervision-fields label { display:grid; gap:6px; font-size:12px; }
+.supervision-fields input { min-width:0; padding:8px 10px; border:1px solid var(--control-line); border-radius:5px; background:var(--surface); color:var(--text); }
+.supervision-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+#supervision-error { margin:12px 0 0; }
+.supervision-fields[hidden] { display:none; }
+.task-supervision > summary { cursor:pointer; padding:16px 24px; }
+.task-supervision .supervision-panel { margin:0; border:0; box-shadow:none; }

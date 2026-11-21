@@ -180,6 +180,8 @@
 .acceptance-option pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; }
 .acceptance-guide details { min-width:0; }
 .acceptance-guide summary { cursor:pointer; font-size:12px; }
+.create-supervision { padding:12px 15px; border:1px solid var(--line); border-radius:8px; }
+.create-supervision .supervision-fields { margin-bottom:0; }
 .direction-dialog .requirement-queue-list { max-height:260px; overflow:auto; }
 .requirement-queue-list article { padding:12px 0; border-top:1px solid var(--line); }
 .requirement-queue-list article > div { display:flex; justify-content:space-between; align-items:center; gap:12px; }

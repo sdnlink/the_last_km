@@ -62,6 +62,71 @@ class ConsolePageTests(unittest.TestCase):
         connection.close()
         return result
 
+    def post(self, path, payload):
+        connection = HTTPConnection('127.0.0.1', self.server.server_address[1], timeout=5)
+        try:
+            connection.request('POST', path, json.dumps(payload), {
+                'Content-Type': 'application/json', 'X-Console-Token': self.server.csrf,
+            })
+            response = connection.getresponse()
+            return response.status, json.load(response)
+        finally:
+            connection.close()
+
+    def test_creating_task_configures_scoped_supervision_and_can_pause_it(self):
+        schedule = {}
+        preferences = {'cron': '*/30 * * * *', 'timezone': 'Asia/Shanghai', 'provider': 'codex'}
+
+        def paseo(action, *args):
+            if action == 'ls':
+                return [dict(schedule)] if schedule else []
+            if action == 'create':
+                name = args[args.index('--name') + 1]
+                self.assertIn('--task-id ' + name.rsplit(' ', 1)[-1], args[-1])
+                self.assertIn('--console-port ' + str(self.server.server_port), args[-1])
+                self.assertNotIn('Requirement for supervision test', args[-1])
+                schedule.update(id='one-schedule', name=name, cadence='cron:*/30 * * * * (Asia/Shanghai)',
+                                target='new-agent:codex', status='active', nextRunAt='2026-11-20T00:30:00Z')
+            elif action == 'pause':
+                self.assertEqual(args, ('one-schedule',))
+                schedule.update(status='paused', nextRunAt=None)
+            elif action == 'resume':
+                self.assertEqual(args, ('one-schedule',))
+                schedule.update(status='active', nextRunAt='2026-11-20T00:30:00Z')
+            else:
+                self.fail(f'Unexpected schedule action {action!r}')
+            return dict(schedule)
+
+        payload = {'title': 'Supervised', 'cwd': str(self.project), 'requirement': 'Requirement for supervision test',
+                   'auto_start': False, 'supervision': preferences}
+        with patch.object(self.server.supervision, '_call', side_effect=paseo):
+            status, task = self.post('/api/tasks', payload)
+            self.assertEqual(status, 201)
+            self.assertEqual(task['status'], 'queued')
+            self.assertEqual(task['supervision_preferences'], preferences)
+            self.assertEqual(task['supervision']['status'], 'active')
+            path = f"/api/tasks/{task['id']}/supervision"
+            status, paused = self.post(path, {'action': 'pause'})
+            self.assertEqual((status, paused['status'], paused['next_run_at']), (200, 'paused', None))
+            self.assertEqual(self.post(path, {'action': 'resume'})[1]['status'], 'active')
+            self.assertEqual(json.loads(self.get('/api/supervision')[1])['status'], 'unconfigured')
+            _, snapshot = self.get(f"/api/tasks/{task['id']}/snapshot")
+            self.assertEqual([row['id'] for row in json.loads(snapshot)['tasks']], [task['id']])
+            self.assertNotIn(payload['requirement'], snapshot)
+
+    def test_schedule_failure_does_not_undo_task_creation(self):
+        from console.tasks import TaskError
+        preferences = {'cron': '*/30 * * * *', 'timezone': 'UTC', 'provider': 'codex'}
+        payload = {'title': 'Saved task', 'cwd': str(self.project), 'requirement': 'Task requirement',
+                   'supervision': preferences}
+        with patch.object(self.server.supervision, '_call', side_effect=TaskError('Paseo unavailable', 503)):
+            status, task = self.post('/api/tasks', payload)
+            self.assertEqual(status, 201)
+            self.assertEqual(task['supervision_error'], 'Paseo unavailable')
+        with patch.object(self.server.supervision, '_call', return_value=[]):
+            _, body = self.get(f"/api/tasks/{task['id']}/supervision")
+            self.assertEqual(json.loads(body), {'status': 'unconfigured', 'next_run_at': None, **preferences})
+
     def test_each_document_contains_only_requested_page_and_no_operation_forms(self):
         expected = {'/overview': 'stats', '/tasks': 'task-rows', '/resources': 'cpu-chart',
                     '/progress': 'progress-context', '/tasks/' + self.task['id']: 'role-details'}

@@ -64,6 +64,8 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
                 ('logs', '/logs', '原始日志')]) + '</nav>'
         content = (content.replace('<!-- DETAIL_BACK -->', '<a class="detail-back" href="/tasks">← 返回开发任务</a>')
                    .replace('<!-- DETAIL_TABS -->', tabs).replace('<!-- DETAIL_CONTENT -->', section_content))
+    if '<!-- SUPERVISION_FORM -->' in content:
+        content = content.replace('<!-- SUPERVISION_FORM -->', (STATIC / 'fragments/supervision.html').read_text())
     styles = [page]
     if page in {'detail', 'progress'}:
         styles.insert(0, 'work')
@@ -81,7 +83,7 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
 
 
 def asset(path: str) -> tuple[Path, str] | None:
-    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'requirement-queue.js', 'dispatch-plan.js', 'i18n.js', 'translations.js', 'style.css', 'dialogs.css', 'favicon.svg'}
+    common = {'app.js', 'core.js', 'ui.js', 'task-view.js', 'pagination.js', 'dialogs.js', 'requirement-queue.js', 'dispatch-plan.js', 'i18n.js', 'translations.js', 'style.css', 'dialogs.css', 'favicon.svg', 'supervision.js'}
     name = path.removeprefix('/')
     allowed = name in common
     if name.startswith('pages/'):

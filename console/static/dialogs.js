@@ -160,7 +160,7 @@ export function applyVerificationModeToCreatePayload(data){
  if(modeOmitsExecution(mode)&&moduleExecutionCommands(data.modules).length){
   throw new Error(i18n('仅语义审核或制定方案不能附带 modules[].checks 执行命令；请清除模块检查或改用执行验收模式'));
  }
- if(mode==='executable'&&!deployment&&!documentation&&!(data.acceptance_plan?.selected_ids||[]).length&&!(data.checks||[]).length){
+ if(mode==='executable'&&!deployment&&!documentation&&!data.function_dispatch&&!moduleExecutionCommands(data.modules).length&&!(data.acceptance_plan?.selected_ids||[]).length&&!(data.checks||[]).length){
   throw new Error(i18n('请选择至少一个检查项；没有入口时可以先制定验收方案'));
  }
  return data;
@@ -170,7 +170,7 @@ function acceptancePlan(){
  if(!acceptanceScan||JSON.stringify(acceptanceScan.context)!==JSON.stringify(acceptanceContext()))throw new Error(i18n('请先扫描当前项目并确认检查项'));
  const checked=[...$('#acceptance-options').querySelectorAll('[data-check-id]:checked')].map(c=>c.dataset.checkId);
  return {task_type:f.elements.task_type.value,python:acceptanceScan.python,signature:acceptanceScan.signature,
-  criteria:f.elements.acceptance_criteria.value.trim(),selected_ids:selectedIdsForMode(f.elements.verification_mode.value,checked)};
+  criteria:f.elements.acceptance_criteria.value.trim()||[...f.elements.requirement.value.trim()].slice(0,8000).join(''),selected_ids:selectedIdsForMode(f.elements.verification_mode.value,checked)};
 }
 /** Test hook: seed acceptance scan state as if scanAcceptance just succeeded. */
 export function setAcceptanceScanForTest(scan){acceptanceScan=scan;acceptanceSequence+=1;}
@@ -240,7 +240,12 @@ function configureForm() {
     state.config.cwd.split("/").filter(Boolean).at(-1) || "/";
   updateProviderHint();
   updateTaskType($('#create-form'));
+  updateCreateSupervision($('#create-form'));
   acceptanceChanged();
+}
+function updateCreateSupervision(form){
+ const fields=$('#create-supervision-fields');
+ if(fields)fields.hidden=fields.disabled=!form.elements.enable_supervision?.checked;
 }
 function updateProviderHint() {
   if (!state.config) return;
@@ -396,6 +401,7 @@ function bind(name){
    for(const id of ['refresh-agents','create-submit','scan-acceptance','preflight-acceptance'])$('#'+id).disabled=false;
   });
   for(const key of ['cwd','task_type','acceptance_python'])$('#create-form').elements[key].addEventListener('input',()=>{updateTaskType($('#create-form'));acceptanceChanged();});
+  $('#create-form').elements.enable_supervision?.addEventListener('change',()=>updateCreateSupervision($('#create-form')));
   $('#scan-acceptance').addEventListener('click',scanAcceptance);
   $('#preflight-acceptance').addEventListener('click',async()=>{
    const sequence=acceptanceSequence,windowSequence=createSequence,request=++preflightRequest;
@@ -430,6 +436,9 @@ function bind(name){
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
    const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
+   data.title=data.title.trim()||[...data.requirement.trim().split(/\r?\n/,1)[0]].slice(0,160).join('');
+   if(form.elements.enable_supervision?.checked)data.supervision={cron:data.supervision_cron.trim(),timezone:data.supervision_timezone.trim(),provider:data.supervision_provider.trim()};
+   for(const key of ['enable_supervision','supervision_cron','supervision_timezone','supervision_provider'])delete data[key];
    data.task_type=form.elements.task_type.value;data.verification_mode=form.elements.verification_mode.value;
    if(form.elements.function_dispatch)data.function_dispatch=data.verification_mode==='executable'&&form.elements.function_dispatch.checked;
    if(form.elements.parallel_project){data.parallel_project=data.task_type!=='deployment'&&form.elements.parallel_project.checked;data.task_dependencies=String(data.task_dependencies||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);}
@@ -441,14 +450,14 @@ function bind(name){
    createPending.add(sequence);$('#create-submit').disabled=true;$('#form-error').hidden=true;
    let submitted=false;
    try{
-    if(!acceptanceScan&&(data.verification_mode!=='executable'||['deployment','documentation'].includes(data.task_type)))await scanAcceptance();
+    if(!acceptanceScan)await scanAcceptance();
     if(!currentCreate(sequence))return;
     data.acceptance_plan=acceptancePlan();
     applyVerificationModeToCreatePayload(data);
     submitted=true;const t=await api('/api/tasks',data);
-    if(currentCreate(sequence))location.assign(`/tasks/${t.id}`);
+    if(currentCreate(sequence))location.assign(`/tasks/${t.id}${t.supervision_error?'?supervision=setup-failed':''}`);
     else toast(i18n`任务“${data.title}”已创建（${t.id}），可在任务列表查看`);
-   }catch(error){if(currentCreate(sequence)){$('#form-error').hidden=false;$('#form-error').textContent=error.message;}else if(submitted)toast(i18n`任务“${data.title}”创建失败：${error.message}`,true);}
+   }catch(error){if(currentCreate(sequence)){$('#form-error').hidden=false;$('#form-error').textContent=error.message;const acceptance=$('#create-acceptance');if(acceptance&&!submitted)acceptance.open=true;}else if(submitted)toast(i18n`任务“${data.title}”创建失败：${error.message}`,true);}
    finally{createPending.delete(sequence);if(currentCreate(sequence))$('#create-submit').disabled=false;}
   });return;
  }

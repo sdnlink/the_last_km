@@ -4,6 +4,7 @@ import {api,watch,toast} from '/core.js';
 import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
 import {dispatchPlanHTML} from '/dispatch-plan.js';
+import {mountSupervision} from '/supervision.js';
 const id=document.body.dataset.taskId;
 const section=$('#detail-page').dataset.section;
 let task,role='all',log='',logSequence=0,logTotal=0;
@@ -104,6 +105,18 @@ async function loadLogs(){
  }catch(error){if(error.status===404&&log){log='';return loadLogs();}throw error;}
 }
 export function mount(){
+ const supervision=$('#task-supervision');
+ if(supervision){
+  const setupFailed=new URLSearchParams(location.search).get('supervision')==='setup-failed';
+  let mounted=false;
+  const open=()=>{
+   if(!supervision.open||mounted)return;
+   mounted=true;
+   mountSupervision(`/api/tasks/${id}/supervision`,{setupFailed});
+  };
+  supervision.addEventListener('toggle',open);
+  if(setupFailed){supervision.open=true;open();}
+ }
  onPaginationChange((key,reason)=>{if(key==='dispatch-plan'){void loadDispatch();}else if(key==='logs'){if(reason==='page')$('#log-follow').checked=false;loadLogs().catch(e=>toast(e.message,true));}else if(task)render(task);});
  $('#dispatch-filters')?.addEventListener('click',event=>{const button=event.target.closest('[data-dispatch-filter]');if(!button)return;dispatchFilter=button.dataset.dispatchFilter;resetPage('dispatch-plan');dispatchData=null;void loadDispatch();});
  document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;resetPage('workflow');if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});

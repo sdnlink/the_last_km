@@ -2,9 +2,7 @@
       <form id="create-form">
         <div class="dialog-heading">
           <div>
-            <span class="eyebrow">创建开发任务</span>
             <h2>新建开发任务</h2>
-            <p>先由 reviewer 完善需求，watcher 交给 worker 实现；审核与检查通过后提交到当前业务分支，审计结论独立保存。</p>
           </div>
           <button
             type="button"
@@ -17,20 +15,12 @@
         </div>
         <div class="form-body">
           <label
-            >任务名称 <span class="required">*</span
-            ><input
-              name="title"
-              required
-              maxlength="160"
-              placeholder="例如：为 API 增加健康检查接口"
-              autofocus
-          /></label>
-          <label
             >开发需求 <span class="required">*</span
             ><textarea
               name="requirement"
               rows="5"
               required
+              autofocus
               maxlength="32000"
               placeholder="描述你想实现的功能、约束和完成标准…"
             ></textarea>
@@ -41,8 +31,20 @@
               name="cwd"
               required
               placeholder="/path/to/your/project"
-            /><small>填写可写的 Git 项目完整路径；通过审核和验收的代码提交到启动时的业务分支；结论保存在独立审计引用。</small></label
+            /></label
           >
+          <div class="create-supervision">
+            <label class="checkbox-label"><input type="checkbox" name="enable_supervision"><span>Paseo 持续监督<small>定时调用所选模型，巡检此任务的进度、交付和阻塞。</small></span></label>
+            <fieldset class="supervision-fields" id="create-supervision-fields" hidden disabled>
+              <label>监督频率（Cron）<input name="supervision_cron" value="*/15 * * * *" required maxlength="120" spellcheck="false" /></label>
+              <label>时区<input name="supervision_timezone" value="Asia/Shanghai" required maxlength="80" spellcheck="false" /></label>
+              <label>执行器 / 模型<input name="supervision_provider" value="codex" placeholder="codex 或 codex/模型" required maxlength="160" spellcheck="false" /></label>
+            </fieldset>
+          </div>
+          <details class="advanced">
+            <summary>任务名称和执行角色<span>默认自动选择</span></summary>
+            <div class="advanced-body">
+          <label>任务名称<input name="title" maxlength="160" placeholder="留空时取需求首行"/></label>
           <div class="form-grid">
             <label
               >执行器<select
@@ -54,13 +56,6 @@
             ></label>
           </div>
           <div id="provider-hint" class="form-hint"></div>
-          <details class="advanced">
-            <summary>同工程并行开发<span>自动创建开发分支</span></summary>
-            <div class="advanced-body">
-              <label class="checkbox-label"><input type="checkbox" name="parallel_project"><span>为该任务自动新建开发分支和独立工作副本<small>从已提交代码创建，可与同工程其他任务并行运行。按任务需求开发，无需填写负责的文件或目录。</small></span></label>
-              <label>前置任务 ID（可选，每行一项）<textarea name="task_dependencies" rows="2" placeholder="填写本工程已有并行任务的完整 ID"></textarea><small>Watcher 等待依赖通过验收后合入其分支；检测到共享输入变化时先重新审查，再更新 Worker 任务。</small></label>
-            </div>
-          </details>
           <div class="form-grid">
             <div class="agent-role-fields">
             <label id="paseo-field" hidden>Worker Paseo 后端<select name="paseo_backend"></select></label>
@@ -73,15 +68,18 @@
           </div>
           <button type="button" id="refresh-agents" class="button secondary">重新枚举执行器与模型</button>
           <p id="agent-catalog-status" role="status"></p>
-          <section class="acceptance-guide" aria-label="验收方案">
-            <h3>完成标准与检查方案</h3>
+            </div>
+          </details>
+          <details class="advanced" id="create-acceptance">
+            <summary>验收方式和检查<span>自动扫描推荐检查</span></summary>
+            <div class="advanced-body acceptance-guide">
             <label>任务类型<select name="task_type"><option value="code">代码功能</option><option value="documentation">文档完善</option><option value="service">接口服务</option><option value="deployment">部署</option><option value="other">其他</option></select></label>
-            <label>怎样算完成？<textarea name="acceptance_criteria" rows="3" maxlength="8000" required placeholder="例如：文档链接有效，需求与接口说明一致，未实现能力不写成已完成。"></textarea></label>
+            <label>怎样算完成？<textarea name="acceptance_criteria" rows="3" maxlength="8000" placeholder="可选：留空时根据开发需求制定完成标准。"></textarea></label>
             <label>验收方式<select name="verification_mode"><option value="executable">选择项目检查，并由独立 reviewer 审核</option><option value="review_only">仅独立语义审核（不证明功能测试通过）</option><option value="planning">先制定验收方案（单独任务，不实施原目标）</option></select></label>
             <p id="deployment-hint" hidden>按远程预检、构建、打包、部署和运行验证推进。请在需求中填写服务器、构建目录、部署目标和认证方式；本地检查可选，完成后由独立 reviewer 核验实际部署证据。</p>
             <p id="documentation-hint" hidden>文档任务按分析报告或文档改动交付，不要求源码函数。本地检查可选；仅分析时保留原文，另存报告，由独立 reviewer 核对引用、结论和覆盖范围。</p>
             <div class="acceptance-actions"><button type="button" id="scan-acceptance" class="button secondary">扫描项目已有检查</button><button type="button" id="preflight-acceptance" class="button secondary">检查运行前提</button></div>
-            <p id="acceptance-notice" role="status">扫描只读项目配置，不执行测试、不安装依赖。选择检查后，watcher 会在验收时实际执行。</p>
+            <p id="acceptance-notice" role="status">创建时自动扫描并选用推荐检查，也可以提前查看和调整。</p>
             <div id="acceptance-options"></div>
             <p>独立语义审核始终保留。未选择的功能、数据库、HTTP、端到端和性能检查不能推定通过。</p>
             <details><summary>高级：解释器与自定义命令</summary>
@@ -89,10 +87,13 @@
               <label>额外验收命令<textarea name="checks" rows="3" placeholder="可选：已有检查命令，每行一条"></textarea><small>逐函数模式可留空：Reviewer 设计验收并声明测试路径，Worker 补齐测试，Watcher 自动运行支持的 Python unittest、Node 和 Rust Cargo 测试。部署、真实设备和其他环境检查仍需明确配置。仅 git diff --check 不能证明功能可用。</small></label>
               <small>自定义命令会在项目目录执行，其依赖和副作用无法由入口扫描完整确认。</small>
             </details>
-          </section>
+            </div>
+          </details>
           <details class="advanced">
-            <summary>高级执行配置<span>可选</span></summary>
+            <summary>运行预算和高级配置<span>并行、隔离、质量策略</span></summary>
             <div class="advanced-body">
+              <label class="checkbox-label"><input type="checkbox" name="parallel_project"><span>为该任务自动新建开发分支和独立工作副本<small>从已提交代码创建，可与同工程其他任务并行运行。按任务需求开发，无需填写负责的文件或目录。</small></span></label>
+              <label>前置任务 ID（可选，每行一项）<textarea name="task_dependencies" rows="2" placeholder="填写本工程已有并行任务的完整 ID"></textarea></label>
                 <label>质量策略（JSON）<textarea name="quality_policy" rows="5">{"protect_tests":true,"verified_progress":true,"no_progress_limit":12,"review_interval_s":600,"review_changed_files":20,"blocked_review_limit":3,"requirements":[],"validation_paths":[],"review_tools":"provider","max_tokens":0,"max_cost_usd":0}</textarea><small>跨文件联动须通过 integration_scopes 预先批准目标函数和回归检查。需求条目：id、text、module_ids、evidence_paths。已存在的测试/验收配置自动保护；新测试可新增。没有验证进展会停止；files_only 审核工具仅支持原生 Claude。调用轮次不等于模型请求数，token/费用预算仅依据后端实际报告。</small></label>
               <div class="form-grid thirds">
                 <label

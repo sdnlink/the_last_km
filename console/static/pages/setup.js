@@ -1,3 +1,4 @@
+import {mountSupervision} from '/supervision.js';
 import {i18n,i18nHTML} from '../i18n.js';
 import {$,$$,escape,stableHTML,dateTimeLabel,stateLabel,motionState} from '/ui.js';
 import {api,config,watch,toast} from '/core.js';
@@ -84,6 +85,7 @@ async function load(){
  renderJobs(data.jobs,true);
 }
 export function mount(){
+ mountSupervision('/api/supervision');
  onPaginationChange(key=>{if(key==='setup-jobs')renderJobs([]);});
  $('#agent-setup-form').addEventListener('submit',e=>e.preventDefault());
  $('#setup-agents').addEventListener('input',e=>{const card=e.target.closest('[data-agent]');if(!card)return;if(e.target.name==='api_key')delete card.dataset.clearKey;updateSummary(card,true);});

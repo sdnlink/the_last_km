@@ -231,6 +231,26 @@ test('create: duplicate submit is ignored and a closed validation cannot create 
   assert.deepEqual(h.navigations, []);
 });
 
+test('create: derives defaults and includes optional task supervision in the same request', async () => {
+  const h = await harness();
+  const fields = h.nodes['create-form'].elements;
+  Object.assign(fields, {
+    enable_supervision: element('on'), supervision_cron: element('*/30 * * * *'),
+    supervision_timezone: element('UTC'), supervision_provider: element('codex'),
+  });
+  fields.enable_supervision.checked = true;
+  await h.dialogs.openCreate();
+  fields.title.value = '';
+  fields.requirement.value = 'Add health check\nKeep the existing route';
+  fields.acceptance_criteria.value = '';
+  h.seedScan();
+  await h.nodes['create-form'].emit('submit');
+  const body = JSON.parse(h.requests.find(row => row.url === '/api/tasks' && row.options.method === 'POST').options.body);
+  assert.equal(body.title, 'Add health check');
+  assert.equal(body.acceptance_plan.criteria, fields.requirement.value);
+  assert.deepEqual(body.supervision, {cron: '*/30 * * * *', timezone: 'UTC', provider: 'codex'});
+});
+
 test('create: failed POST retains its draft and allows retry', async () => {
   const h = await harness(); await h.dialogs.openCreate(); h.seedScan();
   h.nodes['create-form'].elements.requirement.value = 'retained draft';

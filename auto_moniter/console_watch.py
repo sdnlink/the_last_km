@@ -1,20 +1,24 @@
 """Read-only task inventory for scheduled supervision."""
 
 import json
+import re
 from http.client import HTTPConnection, HTTPException
 
 
-def snapshot(port: int) -> dict:
+def snapshot(port: int, *, task_id: str | None = None) -> dict:
     if not 1 <= port <= 65535:
         raise ValueError("Console port must be between 1 and 65535")
+    if task_id is not None and not re.fullmatch(r'(?:[0-9a-f]{32}|ext-[0-9a-f]{20})', task_id):
+        raise ValueError("Invalid console task ID")
 
     # Contact the loopback console directly. Never follow redirects or use proxy settings.
     connection = HTTPConnection("127.0.0.1", port, timeout=8)
     try:
-        connection.request("GET", "/api/tasks")
+        path = f"/api/tasks/{task_id}/snapshot" if task_id else "/api/tasks"
+        connection.request("GET", path)
         response = connection.getresponse()
         if response.status != 200:
-            raise ValueError(f"Console task list returned HTTP {response.status}")
+            raise ValueError(f"Console task snapshot returned HTTP {response.status}")
         data = json.load(response)
     except (OSError, HTTPException) as exc:
         raise ValueError(f"Cannot read the local console task list: {exc}") from exc

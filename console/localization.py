@@ -87,7 +87,7 @@ def translate_html(source,language='zh-CN'):
 def localize_response(value,language,path):
     if language!='en' or not isinstance(value,dict):return value
     result=dict(value)
-    for key in ('error','control_message','resume_unavailable','direction_error','launch_error','acceptance_warning','coverage_warning'):
+    for key in ('error','control_message','resume_unavailable','direction_error','launch_error','acceptance_warning','coverage_warning','supervision_error'):
         if isinstance(result.get(key),str):result[key]=translate(result[key],language)
     if isinstance(result.get('direction_submission'),dict):
         result['direction_submission']={key:translate(item,language) if key in {'message','error'} else item

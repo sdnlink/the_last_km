@@ -3338,11 +3338,17 @@ class Supervisor:
             return self._function_baseline
         if snapshot is None:
             snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-        # Requirement reviews carry the pending task ID too. Only worker calls
-        # (including interrupted calls without a result) prohibit a new baseline.
+        # Read-only verification can be reassigned under the same ID after a
+        # repair is accepted. Its earlier attempts used the pre-repair baseline.
+        after_round = 0
+        if self._verification_only():
+            after_round = max((item['round'] for item in self.function_tasks.accepted), default=0)
+        # A worker call after this boundary can have started without a result.
         started = any(call.get('role') == 'worker' and call.get('task_id') == task['id']
+                      and call['round'] > after_round
                       for call in (self._last_worker_invocation, self._last_invocation))
         started |= any(record.role == 'worker' and record.verdict.task_id == task['id']
+                       and record.index > after_round
                        for record in self._records)
         self._function_baseline = function_gate.baseline(
             self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,

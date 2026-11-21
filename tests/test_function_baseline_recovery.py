@@ -7,7 +7,7 @@ from pathlib import Path
 
 from auto_moniter.directions import Directions
 from auto_moniter.supervisor import RunConfig, Supervisor
-from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task
+from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
 from tests.test_supervisor import ScriptedProvider
 
 
@@ -36,6 +36,56 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
     def resume(self, root, worker, reviewer):
         return Supervisor(RunConfig('', root, worker, reviewer=reviewer, workflow='review-first',
             resume=True, git_history='off', run_dir=root/'run', retry_delay_s=0), log=lambda _: None)
+
+    def test_verification_can_run_again_after_an_accepted_repair(self):
+        for mode in ('continuous', 'resume', 'interrupted'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root/'app.py').write_text('def parse_input(): return 0\n')
+                verification = verification_task()
+                repair = task('REPAIR', 'app.py')
+                rejected = result('VERIFY', 'changes_required', gaps=['main/Incorrect return value'], next_task=repair)
+                approval = result('REPAIR', 'accepted', next_task=verification)
+                approval['verdict']['issue_resolutions'] = [{
+                    'id': 'AUD-1', 'summary': 'Verified the return value', 'evidence': ['app.py']}]
+                verify = result('VERIFY', 'done', status='done')
+                deliver = result('VERIFY', 'accepted', status='done')
+                worker = FunctionWorker('worker', [
+                    result('VERIFY', 'incomplete', gaps=['Incorrect return value']),
+                    {**result('REPAIR', 'done'), 'touch': 'app.py'}, verify])
+                reviewer = ScriptedProvider('reviewer', [plan(verification), rejected, approval, deliver])
+                monitor = Supervisor(RunConfig('Verify the return value', root, worker, reviewer=reviewer,
+                    workflow='review-first', function_dispatch=True, git_history='off', run_dir=root/'run',
+                    checks=[CHECK], review_every=1, retry_delay_s=0), log=lambda _: None)
+                if mode != 'continuous':
+                    on_event = monitor._event
+
+                    def stop_at_handoff(kind, **data):
+                        on_event(kind, **data)
+                        if kind == 'function_assigned' and data['task_id'] == 'VERIFY' and monitor.function_tasks.accepted:
+                            monitor.request_stop()
+
+                    monitor._event = stop_at_handoff
+                    report = monitor.run()
+                    self.assertEqual(report.status, 'stopped', report.summary)
+                    with gzip.open(root/'run/function-baseline.json.gz', 'rt') as handle:
+                        self.assertEqual(json.load(handle)['id'], 'REPAIR')
+                    if mode == 'interrupted':
+                        path = root/'run/state.json'
+                        state = json.loads(path.read_text())
+                        state['last_worker_invocation'] = {'role': 'worker', 'round': 3, 'call': 6, 'task_id': 'VERIFY'}
+                        path.write_text(json.dumps(state))
+                    monitor = self.resume(root, worker, reviewer)
+
+                report = monitor.run()
+                if mode == 'interrupted':
+                    self.assertEqual(report.status, 'action_required', report.summary)
+                    self.assertIn('baseline is missing', report.summary)
+                    self.assertEqual(len(worker.calls), 2)
+                    continue
+                self.assertEqual(report.status, 'done', report.summary)
+                self.assertEqual([c['read_only'] for c in worker.calls], [True, False, True])
+                self.assertEqual([item['task']['id'] for item in monitor.function_tasks.accepted], ['REPAIR', 'VERIFY'])
 
     def test_amended_next_assignment_starts_worker_with_a_fresh_baseline(self):
         for legacy in (False, True):

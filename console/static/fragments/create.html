@@ -37,7 +37,7 @@
             <label class="checkbox-label"><input type="checkbox" name="enable_supervision"><span>Paseo 持续监督<small>定时调用所选模型，巡检此任务的进度、交付和阻塞。</small></span></label>
             <fieldset class="supervision-fields" id="create-supervision-fields" hidden disabled>
               <label>监督频率（Cron）<input name="supervision_cron" value="*/15 * * * *" required maxlength="120" spellcheck="false" /></label>
-              <label>时区<input name="supervision_timezone" value="Asia/Shanghai" required maxlength="80" spellcheck="false" /></label>
+              <label>时区<input name="supervision_timezone" required maxlength="80" spellcheck="false" /></label>
               <label>执行器 / 模型<input name="supervision_provider" value="codex" placeholder="codex 或 codex/模型" required maxlength="160" spellcheck="false" /></label>
             </fieldset>
           </div>

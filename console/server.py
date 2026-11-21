@@ -39,7 +39,7 @@ class ConsoleServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: ConsoleServer
-    server_version = 'AutoMoniterConsole/1.0'
+    server_version = 'AutoMonitorConsole/1.0'
 
     def _send(self, status: int, body: bytes, content_type='application/json; charset=utf-8'):
         self.send_response(status)

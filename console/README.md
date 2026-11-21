@@ -36,12 +36,14 @@
 
 在「新建开发任务」勾选「Paseo 持续监督」，设置 Cron、时区和执行器或模型。保存任务时创建对应的 Paseo 日程，在任务详情的「Paseo 持续监督」中查看状态、调整频率、暂停或恢复。日程创建失败时，开发任务及监督配置仍会保存，可从详情重试。
 
+新日程默认采用浏览器时区，可填写其他 IANA 时区，例如 `Europe/London`。下次巡检时间按日程时区显示。
+
 「Agent 管理」还提供整台控制台的监督日程。两种日程都需要本机 Paseo CLI 和守护进程，只有显式启用才会创建。Paseo 定时启动巡检 Agent，检查状态、交付和阻塞。它使用所选模型，可能产生模型用量。开发任务的 Worker、Reviewer 和 Watcher 继续处理实现、审查和提交。
 
 已有会话心跳可以在 Paseo 单独管理，并继续使用同一份项目技能。
 
 ```bash
-paseo heartbeat create --cron "*/15 * * * *" "读取并执行 skills/paseo-watch/SKILL.md，检查本机 Auto Moniter 控制台。"
+paseo heartbeat create --cron "*/15 * * * *" "读取并执行 skills/paseo-watch/SKILL.md，检查本机 Auto Monitor 控制台。"
 ```
 
 也可以直接运行 `auto-moniter watch --console-port 8000`，取一次任务阶段、轮次、进度和预算快照。改用其他端口时传入实际端口。检查细节和交付证据按 [Paseo 巡检技能](../skills/paseo-watch/SKILL.md) 核对。

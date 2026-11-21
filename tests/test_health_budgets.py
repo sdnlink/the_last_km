@@ -26,14 +26,21 @@ class BudgetTests(unittest.TestCase):
             result = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=run, max_agent_calls=1), log=lambda _: None).run()
             self.assertEqual(result.status, "budget_exceeded")
             self.assertEqual(reviewer.calls, [])
-            self.assertEqual(json.loads((run / "state.json").read_text())["usage"]["agent_calls"], 1)
+            usage = json.loads((run / "state.json").read_text())["usage"]
+            self.assertEqual(usage["agent_calls"], 1)
+            self.assertGreater(usage["stage_elapsed_s"]["worker"], 0)
             result = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=run, resume=True), log=lambda _: None).run()
             self.assertEqual(result.status, "budget_exceeded")
             self.assertEqual(len(worker.calls), 1)
+            self.assertEqual(json.loads((run / "state.json").read_text())["usage"]["stage_elapsed_s"],
+                             usage["stage_elapsed_s"])
             worker = ScriptedProvider("worker", [{"verdict": _verdict("done", evidence=["app.py"])}])
             result = Supervisor(RunConfig("task", root, worker, reviewer=reviewer, run_dir=run, resume=True, max_agent_calls=3), log=lambda _: None).run()
             self.assertEqual(result.status, "done")
-            self.assertEqual(json.loads((run / "report.json").read_text())["usage"]["agent_calls"], 3)
+            finished = json.loads((run / "report.json").read_text())["usage"]
+            self.assertEqual(finished["agent_calls"], 3)
+            self.assertGreater(finished["stage_elapsed_s"]["worker"], usage["stage_elapsed_s"]["worker"])
+            self.assertGreater(finished["stage_elapsed_s"]["reviewer"], 0)
 
     def test_runtime_budget_interrupts_live_agent_and_reaps_child(self):
         import shlex
@@ -71,7 +78,9 @@ class BudgetTests(unittest.TestCase):
             result = Supervisor(RunConfig("task", root, worker, no_review=True, checks=[check], run_dir=root / "run", max_runtime_s=0.3), log=lambda _: None).run()
             self.assertEqual(result.status, "budget_exceeded")
             self.assertFalse(result.status == "done")
-            self.assertEqual(json.loads((root / "run/report.json").read_text())["usage"]["agent_calls"], 1)
+            usage = json.loads((root / "run/report.json").read_text())["usage"]
+            self.assertEqual(usage["agent_calls"], 1)
+            self.assertGreater(usage["stage_elapsed_s"]["checks"], 0)
 
     def test_large_stdin_and_both_output_streams_do_not_deadlock(self):
         with tempfile.TemporaryDirectory() as tmp:

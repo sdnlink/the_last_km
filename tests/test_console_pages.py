@@ -82,6 +82,7 @@ class ConsolePageTests(unittest.TestCase):
                 return [dict(schedule)] if schedule else []
             if action == 'create':
                 name = args[args.index('--name') + 1]
+                self.assertTrue(name.startswith('Auto Monitor supervision'))
                 self.assertIn('--task-id ' + name.rsplit(' ', 1)[-1], args[-1])
                 self.assertIn('--console-port ' + str(self.server.server_port), args[-1])
                 self.assertNotIn('Requirement for supervision test', args[-1])
@@ -106,10 +107,13 @@ class ConsolePageTests(unittest.TestCase):
             self.assertEqual(task['supervision_preferences'], preferences)
             self.assertEqual(task['supervision']['status'], 'active')
             path = f"/api/tasks/{task['id']}/supervision"
+            schedule['name'] = schedule['name'].replace('Auto Monitor', 'Auto Moniter', 1)
             status, paused = self.post(path, {'action': 'pause'})
             self.assertEqual((status, paused['status'], paused['next_run_at']), (200, 'paused', None))
             self.assertEqual(self.post(path, {'action': 'resume'})[1]['status'], 'active')
-            self.assertEqual(json.loads(self.get('/api/supervision')[1])['status'], 'unconfigured')
+            global_supervision = json.loads(self.get('/api/supervision')[1])
+            self.assertEqual(global_supervision['status'], 'unconfigured')
+            self.assertIsNone(global_supervision['timezone'])
             _, snapshot = self.get(f"/api/tasks/{task['id']}/snapshot")
             self.assertEqual([row['id'] for row in json.loads(snapshot)['tasks']], [task['id']])
             self.assertNotIn(payload['requirement'], snapshot)
@@ -202,6 +206,7 @@ class ConsolePageTests(unittest.TestCase):
         status, home = self.get(f'/tasks/{self.task["id"]}')
         self.assertEqual(status, 200)
         self.assertIn('detail-menu', IdParser(home).ids)
+        self.assertIn('detail-usage', IdParser(home).ids)
         self.assertFalse(set(markers.values()) & IdParser(home).ids)
         self.assertIn('data-section="home"', home)
         for section in markers:
@@ -214,7 +219,7 @@ class ConsolePageTests(unittest.TestCase):
                 self.assertIn(marker, ids)
                 self.assertFalse((set(markers.values()) - {marker}) & ids)
                 self.assertIn(f'data-section="{section}"', body)
-                self.assertIn(f'<title>{titles[section]} · Auto Moniter 开发控制台</title>', body)
+                self.assertIn(f'<title>{titles[section]} · Auto Monitor 开发控制台</title>', body)
                 self.assertIn('href="/tasks">← 返回开发任务</a>', body)
                 self.assertIn('detail-menu',ids)
                 self.assertFalse({'role-details', 'workflow-stages', 'detail-live'} & ids)

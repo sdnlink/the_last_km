@@ -1,4 +1,4 @@
-import {i18n,i18nHTML,locale} from './i18n.js';
+import {browserTimeZone,i18n,i18nHTML,locale} from './i18n.js';
 import {$,escape,icon,timeLabel,dateTimeLabel,stableHTML} from './ui.js';
 import {paginate,resetPage,onPaginationChange} from './pagination.js';
 import {api,config,fragment,toast,runAction,refresh} from './core.js';
@@ -246,6 +246,8 @@ function configureForm() {
 function updateCreateSupervision(form){
  const fields=$('#create-supervision-fields');
  if(fields)fields.hidden=fields.disabled=!form.elements.enable_supervision?.checked;
+ const timezone=form.elements.supervision_timezone;
+ if(timezone&&!timezone.value.trim())timezone.value=browserTimeZone();
 }
 function updateProviderHint() {
   if (!state.config) return;

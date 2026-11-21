@@ -29,8 +29,9 @@ def select_language(cookie='', accept_language=''):
         except ValueError:continue
         if 0<quality<=1:weighted.append((quality,-index,name))
     for _,_,name in sorted(weighted,reverse=True):
-        if name.startswith('zh'):return 'zh-CN'
-        if name.startswith('en'):return 'en'
+        language = name.split('-', 1)[0]
+        if language == 'zh':return 'zh-CN'
+        if language == 'en':return 'en'
     return 'en' if accept_language.strip() else 'zh-CN'
 
 

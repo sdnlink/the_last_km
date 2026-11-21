@@ -155,7 +155,7 @@ class AgentManager:
             else:
                 url={'grok':'https://x.ai/cli/install.sh','hermes':'https://hermes-agent.nousresearch.com/install.sh',
                      'antigravity':'https://antigravity.google/cli/install.sh'}[name]
-                with urlopen(Request(url,headers={'User-Agent':'AutoMoniter/1.0'}),timeout=30) as response:
+                with urlopen(Request(url,headers={'User-Agent':'AutoMonitor/1.0'}),timeout=30) as response:
                     content=response.read(2*1024*1024+1)
                 if len(content)>2*1024*1024:raise ValueError('官方安装脚本超过大小限制')
                 script=self.tools/(name+'-install.sh');script.write_bytes(content);os.chmod(script,0o700)

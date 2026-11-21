@@ -260,6 +260,7 @@ class Supervisor:
         self._started = time.monotonic()
         self._elapsed_before = 0.0
         self._agent_calls = 0
+        self._stage_elapsed = {}
         self._no_progress = 0
         self._progress_reset = False
         self._recovery_count = 0
@@ -2278,7 +2279,15 @@ class Supervisor:
                 "max_history_bytes": self.config.max_history_bytes, "max_agent_state_bytes": self.config.max_agent_state_bytes,
                 "storage": getattr(self, '_storage', {}),
                 "provider_reported": self.meter.state,
+                "stage_elapsed_s": {key: round(seconds, 3) for key, seconds in self._stage_elapsed.items()},
                 "metering_scope": 'Terminal provider reports only; cumulative reports conservatively summed; unreported internal/subagent usage is unknown.'}
+
+    def _record_stage_elapsed(self, stage, elapsed):
+        self._stage_elapsed[stage] = self._stage_elapsed.get(stage, 0.0) + elapsed
+        state_path = self.run_dir / 'state.json'
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+        state['usage'] = self._usage()
+        write_json(state_path, state, durable=True)
 
     def _review_schedule(self) -> dict:
         return {"enabled": not self.config.no_review, "every_worker_rounds": self.config.review_every,
@@ -3072,6 +3081,7 @@ class Supervisor:
             live_check = LiveOutput(self.run_dir, 'check', index, '验收检查')
             live_check.emit({'kind': 'command', 'text': redact(command), 'status': 'running'})
             result = None
+            check_started = time.monotonic()
             try:
                 result = run_command(
                     PreparedCommand(["sh", "-c", command]), self.config.cwd,
@@ -3083,12 +3093,14 @@ class Supervisor:
                     heartbeat=self._heartbeat, heartbeat_note=f"round {index}: acceptance check {number}",
                     on_output=live_check.feed,
                 )
+                check_elapsed = time.monotonic() - check_started
                 completed = True
             finally:
                 live_check.close()
                 self._forget_child(completed=completed)
                 if result is not None:
                     path = self._record_check_result(index, number, command, result, before, final, check_results, failures, verdict)
+                    self._record_stage_elapsed('checks', check_elapsed)
             if result is None:
                 self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
                 raise
@@ -4185,6 +4197,12 @@ class Supervisor:
         self._recovery_note = str(state.get("recovery_note") or "")
         usage = state.get("usage") or {}
         self.meter = UsageMeter(usage.get('provider_reported'))
+        stage_elapsed = usage.get('stage_elapsed_s')
+        if isinstance(stage_elapsed, dict):
+            for stage in ('worker', 'reviewer', 'checks'):
+                seconds = stage_elapsed.get(stage)
+                if type(seconds) in (int, float) and 0 <= seconds <= 1e15:
+                    self._stage_elapsed[stage] = float(seconds)
         self._elapsed_before = float(usage.get("elapsed_s") or 0)
         try:
             heartbeat = json.loads(self._heartbeat.read_text(encoding="utf-8"))
@@ -5227,9 +5245,7 @@ class Supervisor:
                 self.quality.config['max_tokens'] and not self.meter.last_tokens_reported
                 or self.quality.config['max_cost_usd'] and not self.meter.last_cost_reported):
             self._meter_missing = True
-        current_state = json.loads(state_path.read_text())
-        current_state['usage'] = self._usage()
-        write_json(state_path, current_state, durable=True)
+        self._record_stage_elapsed(role, elapsed)
         # Captured output is already on disk. A budget stop must not discard it.
         self._check_budget()
         return _CompletedTurn(

@@ -1,5 +1,5 @@
-import {i18n,i18nHTML} from '../i18n.js';
-import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel} from '/ui.js';
+import {i18n,i18nHTML,locale} from '../i18n.js';
+import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration} from '/ui.js';
 import {api,watch,toast} from '/core.js';
 import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
@@ -35,7 +35,10 @@ function render(t){
  $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
  stableHTML($('#detail-current-state'),taskNarrativeHTML(t));
- if(section==='home')renderWorkflow(t,{role});
+ if(section==='home'){
+  renderUsage(t.health.usage||{});
+  renderWorkflow(t,{role});
+ }
  if(section==='conclusions')renderConclusions(t,{groupByRound:true});
  if(section==='git')stableHTML($('#detail-git'),gitHistoryHTML(t));
  if(section==='requirements')renderRequirements(t);
@@ -43,6 +46,33 @@ function render(t){
  if(t.health.health==='heartbeat_stale')alerts.push(i18n('监督器心跳已超时，请核对 watcher 工作记录。'));
  if(t.status==='interrupted')alerts.push(i18n('任务执行已中断，可查看工作记录后从检查点恢复。'));
  if($('#detail-alerts'))$('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
+}
+function renderUsage(usage){
+ const stages=usage.stage_elapsed_s||{};
+ const meter=usage.provider_reported||{};
+ const count=new Intl.NumberFormat(locale());
+ const usd=new Intl.NumberFormat(locale(),{style:'currency',currency:'USD',maximumFractionDigits:6});
+ const fact=(label,value)=>`<div><dt>${escape(i18n(label))}</dt><dd>${escape(value)}</dd></div>`;
+ const elapsed=(value,limit)=>duration(value)+(limit?' / '+duration(limit):'');
+ const reported=(value,missing,format)=>{
+  const unknown=missing??meter.unreported_turns;
+  if(!Number.isFinite(value))return '—';
+  const partial=unknown>0?i18n`${count.format(unknown)} 轮未上报`:'';
+  const recorded=(meter.reported_turns||0)+(meter.unreported_turns||0);
+  if(recorded<=(unknown||0))return partial||'—';
+  const amount=format.format(value);
+  return partial?amount+' · '+partial:amount;
+ };
+ stableHTML($('#detail-usage'),[
+  fact('累计运行耗时',elapsed(usage.elapsed_s,usage.max_runtime_s)),
+  fact('Worker 耗时',duration(stages.worker)),
+  fact('Reviewer 耗时',duration(stages.reviewer)),
+  fact('验收命令耗时',duration(stages.checks)),
+  fact('模型调用',Number.isFinite(usage.agent_calls)?
+   count.format(usage.agent_calls)+(usage.max_agent_calls?' / '+count.format(usage.max_agent_calls):''):'—'),
+  fact('后端已报告 token',reported(meter.tokens,meter.unknown_token_turns,count)),
+  fact('后端报告费用（保守累计）',reported(meter.cost_usd,meter.unknown_cost_turns,usd)),
+ ].join(''));
 }
 function deliveryDiagnosis(t){
  const d=t.delivery_diagnosis;if(!d?.code)return '';

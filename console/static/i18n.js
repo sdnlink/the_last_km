@@ -1,7 +1,16 @@
 import english from './translations.js';
 
 export function language(){return globalThis.document?.documentElement?.lang?.startsWith('en')?'en':'zh-CN';}
-export function locale(){return language()==='en'?'en-US':'zh-CN';}
+export function locale(){
+ const languageTag=language();
+ const preferences=globalThis.navigator?.languages||[];
+ const primary=languageTag.split('-')[0];
+ const matching=preferences.filter(tag=>tag.toLowerCase().split('-')[0]===primary);
+ return Intl.DateTimeFormat.supportedLocalesOf(matching)[0]||(languageTag==='en'?'en-US':'zh-CN');
+}
+export function browserTimeZone(){
+ return new Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
+}
 const normalize=value=>value.replace(/\s+/g,' ').trim();
 function translated(value){
   if(language()!=='en')return value;
@@ -33,10 +42,12 @@ export function localizeHTML(source){
 export function i18nHTML(source,...values){const text=template(source,values);return substitute(localizeHTML(text.source),text.values);}
 export function initializeLanguage(){
   const field=document.querySelector('#language-select');if(!field)return;
-  field.value=language();
+  const preference=document.cookie?.match(/(?:^|;\s*)auto_moniter_lang=(en|zh-CN)(?:;|$)/)?.[1];
+  field.value=preference||'auto';
   field.addEventListener('change',()=>{
-    const value=field.value==='en'?'en':'zh-CN';
-    document.cookie=`auto_moniter_lang=${value}; Path=/; Max-Age=31536000; SameSite=Lax`;
+    const value=field.value;
+    const maxAge=value==='auto'?0:31536000;
+    document.cookie=`auto_moniter_lang=${value==='auto'?'':value}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
     location.reload();
   });
 }

@@ -1,4 +1,4 @@
-import {i18n} from './i18n.js';
+import {browserTimeZone,i18n} from './i18n.js';
 import {$,dateTimeLabel} from './ui.js';
 import {api} from './core.js';
 
@@ -18,14 +18,17 @@ export function mountSupervision(path,{setupFailed=false}={}){
     error.textContent=i18n('开发任务已创建。监督日程创建失败，可检查配置后重试。');
     error.hidden=false;
    }
-   for(const name of ['cron','timezone','provider'])form.elements[name].value=current[name];
+   form.elements.cron.value=current.cron;
+   form.elements.timezone.value=current.timezone||browserTimeZone();
+   form.elements.provider.value=current.provider;
    save.textContent=i18n(current.id?'保存日程':'启用监督');
    toggle.hidden=!['active','paused'].includes(current.status);
    toggle.textContent=i18n(current.status==='paused'?'恢复监督':'暂停监督');
    next.hidden=!current.next_run_at;
    const time=next.querySelector('time');
    time.dateTime=current.next_run_at||'';
-   time.textContent=current.next_run_at?dateTimeLabel(current.next_run_at):'';
+   time.textContent=current.next_run_at?dateTimeLabel(current.next_run_at,current.timezone):'';
+   time.title=current.timezone||'';
   }catch(exc){
    error.textContent=(setupFailed&&!current?i18n('开发任务已创建。监督日程创建失败，可检查配置后重试。')+' ':'')+exc.message;
    error.hidden=false;

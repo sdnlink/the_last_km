@@ -30,6 +30,12 @@ body[data-page="detail"] .page-heading { display:none; }
 .detail-git-content { padding:0 24px 24px; }
 .detail-git-content .git-history, .detail-git-content .git-history-empty { margin-top:0; }
 .detail-metadata .detail-body > h3:first-child { margin-top:0; }
+.usage-panel { margin-bottom:18px; }
+.usage-panel .panel-heading { padding-bottom:10px; }
+#detail-usage { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:12px 18px; margin:0; padding:0 24px; }
+#detail-usage dt,.usage-panel>p { color:var(--muted); font-size:12px; }
+#detail-usage dd { margin:4px 0 0; font-size:14px; font-variant-numeric:tabular-nums; }
+.usage-panel>p { margin:14px 24px 18px; }
 .requirement-queue-list article { padding:14px 0; border-top:1px solid var(--line); }
 .requirement-queue-list p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; font-size:13px; }
 .dispatch-panel { margin-bottom:22px; }

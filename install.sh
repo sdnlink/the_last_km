@@ -12,7 +12,7 @@ for argument in "$@"; do
         --start) start=true ;;
         -h|--help)
             printf '%s\n' '用法：./install.sh [--languages] [--start]' \
-                '在项目的 .venv 中安装 Auto Moniter。' \
+                '在项目的 .venv 中安装 Auto Monitor。' \
                 '  --languages   一并安装其他语言的函数解析器' \
                 '  --start       安装后启动控制台，首次访问首页进入配置指引'
             exit 0 ;;
@@ -57,7 +57,7 @@ if ! "$venv_python" -m pip --version >/dev/null 2>&1 && ! "$venv_python" -m ensu
     exit 1
 fi
 
-printf '%s\n' '将 Auto Moniter 安装到 .venv…'
+printf '%s\n' '将 Auto Monitor 安装到 .venv…'
 if ! "$venv_python" -m pip install -e "$package"; then
     printf '%s\n' '安装未完成。请根据上方 pip 输出检查包索引或构建依赖，再重新运行本脚本。' >&2
     exit 1

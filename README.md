@@ -1,8 +1,8 @@
-# Auto Moniter
+# Auto Monitor
 
 **English** | [简体中文](README.zh-CN.md)
 
-Auto Moniter runs coding tasks through a worker, an independent reviewer, and the acceptance checks you configure. Use it from the command line or the local web console.
+Auto Monitor runs coding tasks through a worker, an independent reviewer, and the acceptance checks you configure. Use it from the command line or the local web console.
 
 ## Worker, reviewer, and watcher
 
@@ -37,7 +37,7 @@ cd the_last_km
 ./install.sh --start
 ```
 
-The installer creates or reuses `.venv` and installs Auto Moniter there. Open `http://127.0.0.1:8765`. The first visit to the homepage opens the setup guide, which checks task prerequisites and walks you through installing, authenticating and enabling the agents you choose. Later, start the console with `./start.sh`.
+The installer creates or reuses `.venv` and installs Auto Monitor there. Open `http://127.0.0.1:8765`. The first visit to the homepage opens the setup guide, which checks task prerequisites and walks you through installing, authenticating and enabling the agents you choose. Later, start the console with `./start.sh`.
 
 For function checks in TypeScript/TSX, Go, Rust, Java, C/C++, C#, Kotlin, Swift, Ruby, PHP, Lua, or Bash, install the optional parsers in the same environment:
 
@@ -93,7 +93,7 @@ Copilot, Hermes, Kimi, and CodeBuddy start a new CLI session for each turn; the 
 
 Open **Agent 管理** in the web console and click an agent's name to configure its model, endpoint, authentication, and executable path. You can use an existing CLI installation or install one from that page. Installation progress appears above the agent list.
 
-Complete any required CLI login in a terminal under the same user account that runs Auto Moniter. The reviewer must support a read-only or planning mode. See [agent configuration](console/AGENT_SETUP.md) for the available roles and settings.
+Complete any required CLI login in a terminal under the same user account that runs Auto Monitor. The reviewer must support a read-only or planning mode. See [agent configuration](console/AGENT_SETUP.md) for the available roles and settings.
 
 Console settings are saved in `<data-dir>/agents.json`. To use those settings from the CLI, set the file's absolute path:
 
@@ -115,7 +115,7 @@ Start from the repository root:
 ./start.sh
 ```
 
-The web console supports English and Simplified Chinese. It initially follows your browser's language; use the language selector in the top bar to switch. Your choice is remembered across pages and visits. Interface labels, dialogs, status messages, pagination, and times follow the selected language. Task names, requirements, AI output, code, and raw logs stay in their original language.
+The web console supports English and Simplified Chinese. Use the language selector in the top bar to pick a language or restore the browser default. Dates and numbers use the browser's regional preference for the interface language, such as English (United Kingdom). Task timestamps use the browser's time zone. New Paseo schedules default to that zone, and schedule previews show the zone configured for the schedule. Task names, requirements, AI output, code, and raw logs keep their original language.
 
 Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-moniter-console` after installation. To choose a port, default project, and external data directory:
 

@@ -1,8 +1,8 @@
-# Auto Moniter
+# Auto Monitor
 
 [English](README.md) | **简体中文**
 
-Auto Moniter 通过 Worker 实现、Reviewer 独立审核和已配置的验收检查执行开发任务，可使用命令行或本地 Web 控制台。
+Auto Monitor 通过 Worker 实现、Reviewer 独立审核和已配置的验收检查执行开发任务，可使用命令行或本地 Web 控制台。
 
 ## Worker、Reviewer 与 Watcher
 
@@ -97,7 +97,7 @@ Copilot、Hermes、Kimi 和 CodeBuddy 每轮启动新的 CLI 会话，Watcher �
 
 在 Web 控制台打开“Agent 管理”，点击名称配置模型、服务地址、认证和可执行文件路径。可复用已有 CLI，也可从页面安装；安装进度显示在 Agent 列表上方。
 
-需要 CLI 登录的执行器，应使用运行 Auto Moniter 的同一系统用户在终端完成登录。审查器须支持只读或规划模式。各执行器的角色支持和配置见 [Agent 安装与配置](console/AGENT_SETUP.md)。
+需要 CLI 登录的执行器，应使用运行 Auto Monitor 的同一系统用户在终端完成登录。审查器须支持只读或规划模式。各执行器的角色支持和配置见 [Agent 安装与配置](console/AGENT_SETUP.md)。
 
 控制台配置保存于 `<data-dir>/agents.json`。命令行任务需要复用时，指定其绝对路径：
 
@@ -119,7 +119,7 @@ export AUTO_MONITER_AGENT_SETTINGS=/path/to/console-data/agents.json
 ./start.sh
 ```
 
-Web 控制台支持简体中文和英文，首次访问按浏览器语言选择。页面顶部可随时切换，选择会在后续页面及再次访问时保留。菜单、弹窗、状态提示、分页和时间显示使用所选语言；任务名称、需求正文、AI 输出、代码及原始日志保留原文。
+Web 控制台支持简体中文和英文，顶部语言菜单可固定界面语言或恢复跟随浏览器。日期和数字采用浏览器中与界面语言匹配的区域格式。任务时间按浏览器时区显示，新建 Paseo 日程也默认使用该时区。日程预览显示该日程配置的时区。任务名称、需求正文、AI 输出、代码及原始日志保留原文。
 
 打开 `http://127.0.0.1:8765`。也可运行 `python3 -m console`，安装后可使用 `auto-moniter-console`。指定端口、默认项目和外部数据目录：
 

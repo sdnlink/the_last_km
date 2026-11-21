@@ -16,7 +16,7 @@ function syncTaskLocation(){
  }
  history.replaceState(null,'',url);selectNavigation('tasks');
  $('#page-title').textContent=i18n('开发任务');$('#breadcrumb').textContent=i18n('开发任务');
- document.title=i18n('开发任务')+i18n(' · Auto Moniter 开发控制台');
+ document.title=i18n('开发任务')+i18n(' · Auto Monitor 开发控制台');
  $$('.filter').forEach(el=>{const selected=el.dataset.filter===state.filter;el.classList.toggle('active',selected);el.setAttribute('aria-pressed',String(selected));});
  $$('[data-task-scope]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.taskScope===state.filter)));
 }

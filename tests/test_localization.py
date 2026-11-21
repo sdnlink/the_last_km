@@ -35,6 +35,7 @@ class LocalizationTests(unittest.TestCase):
                  ('auto_moniter_lang=en', 'zh-CN', 'en'),
                  ('auto_moniter_lang=zh-CN', 'en-US', 'zh-CN'),
                  ('auto_moniter_lang=invalid', 'en-US', 'en'),
+                 ('', 'english;q=1,zh-SG;q=0.8', 'zh-CN'),
                  ('', 'en;q=invalid,zh;q=0.8', 'zh-CN')]
         for cookie, browser, expected in cases:
             with self.subTest(cookie=cookie, browser=browser):
@@ -58,7 +59,7 @@ class LocalizationTests(unittest.TestCase):
                 self.assertIsNone(re.search(r'[\u3400-\u9fff]', text), text)
         self.assertIn('data-workspace="/tmp/保留项目原文"', documents[0])
         self.assertIn('<html lang="en">', documents[0])
-        self.assertIn('<title>Overview · Auto Moniter Console</title>', documents[0])
+        self.assertIn('<title>Overview · Auto Monitor Console</title>', documents[0])
 
     def test_console_messages_translate_without_changing_user_or_raw_content(self):
         original = {'title':'执行失败', 'requirement':'执行失败', 'summary':'执行失败',
@@ -95,7 +96,8 @@ class LocalizationTests(unittest.TestCase):
         self.assertEqual(result['checks'][0]['command'],'echo 执行失败')
 
     def test_http_locale_applies_to_pages_fragments_and_errors_but_not_logs(self):
-        store = SimpleNamespace(cwd=Path('/tmp/项目'), agents=SimpleNamespace(initialized=lambda:True),
+        store = SimpleNamespace(cwd=Path('/tmp/项目'), data_dir=Path('/tmp/项目/.auto-moniter/console'),
+                                agents=SimpleNamespace(initialized=lambda:True),
                                 log_text=lambda *_:'执行失败\n原始日志',
                                 detail=lambda *_:{'requirement':'任务未完成','error':'任务不存在或运行目录已不可用'})
         with ConsoleServer(('127.0.0.1',0),store) as server:

@@ -205,15 +205,19 @@ function taskNarrativeHTML(t){
 }
 
 function timeLabel(value) {
+  if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? "—"
     : date.toLocaleTimeString(locale());
 }
 
-function dateTimeLabel(value) {
+function dateTimeLabel(value, timeZone) {
   const date = new Date(value);
-  return !value || Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(locale());
+  if (!value || Number.isNaN(date.getTime())) return '—';
+  return timeZone
+    ? date.toLocaleString(locale(), {timeZone, timeZoneName:'short'})
+    : date.toLocaleString(locale());
 }
 
 function stableHTML(el, html) {

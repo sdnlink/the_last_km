@@ -102,6 +102,12 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
         result.append('--function-dispatch')
     if state.get('full_function_plan'):
         result.append('--full-function-plan')
+    saved_referee = state.get('referee', {})
+    enabled_referee = args.referee if args.referee is not None else saved_referee.get('enabled', False)
+    result.append('--referee' if enabled_referee else '--no-referee')
+    referee_model = args.referee_model or saved_referee.get('model', '')
+    if referee_model:
+        result.append('--referee-model=' + referee_model)
     strings = {'model': '--model', 'mode': '--mode', 'paseo_backend': '--paseo-backend',
                'paseo_mode': '--paseo-mode', 'reviewer': '--reviewer', 'reviewer_model': '--reviewer-model',
                'reviewer_mode': '--reviewer-mode', 'reviewer_paseo_backend': '--reviewer-paseo-backend',

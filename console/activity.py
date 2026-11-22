@@ -48,6 +48,10 @@ def parse_time(value: str) -> datetime | None:
 
 
 EVENT_LABELS = {
+    'referee_start': '裁判正在诊断中断与停滞',
+    'referee_decision': '裁判已安排恢复路径',
+    'referee_rejected': '裁判决策未通过执行校验',
+    'referee_exhausted': '裁判恢复次数已用尽，保留工作等待处理',
     'git_checkpoint': '项目 Git 记录已保存',
     'agent_start': '开始执行', 'review_checkpoint': '提交独立审查', 'agent_failure': '执行异常，准备重试',
     'audit_issues_reported': '审查发现待解决问题', 'audit_issues_resolved': '审查问题已解决',
@@ -157,7 +161,7 @@ class ActivityReader:
         events = json_lines(run / 'events.previous.jsonl') + json_lines(run / 'events.jsonl')
         starts = [e for e in events if e.get('event') == 'agent_start']
         current = starts[-1] if starts else {}
-        match = re.search(r'round (\d+): (worker|reviewer)', health.get('activity', ''))
+        match = re.search(r'round (\d+): (worker|reviewer|referee)', health.get('activity', ''))
         role = match[2] if match else str(current.get('role', 'worker'))
         if health.get('phase') == 'validating':
             role = 'check'
@@ -231,7 +235,7 @@ class ActivityReader:
             if isinstance(text, str) and len(text) == 4000 and not entry.get('truncated'):
                 entry['preview_only'] = True
             round_id, entry_role = str(entry.get('round', '')), entry.get('role')
-            if round_id.isdecimal() and len(round_id) <= 9 and entry_role in {'worker', 'reviewer'}:
+            if round_id.isdecimal() and len(round_id) <= 9 and entry_role in {'worker', 'reviewer', 'referee'}:
                 name = f'{int(round_id):03d}-{entry_role}-text.md'
                 path = run / name
                 if path.is_file() and not path.is_symlink():

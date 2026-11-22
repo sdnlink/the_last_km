@@ -64,9 +64,10 @@ function roleSceneHTML(name){
     reviewer:'<path class="scene-window" d="M47 12h49l20 20v53H47z"/><path class="scene-divider" d="M96 12v20h20"/><path class="scene-line" d="M59 42h38m-38 11h29m-29 11h35"/><rect class="scene-scan" x="48" y="35" width="67" height="12" rx="2"/><circle class="scene-lens" cx="109" cy="66" r="15"/><path class="scene-lens" d="m120 77 12 12"/><path class="scene-check" d="m102 66 5 5 9-10"/>',
     watcher:'<circle class="scene-orbit" cx="80" cy="49" r="36"/><circle class="scene-orbit" cx="80" cy="49" r="24"/><circle class="scene-orbit" cx="80" cy="49" r="12"/><path class="scene-axis" d="M36 49h88M80 5v88"/><g class="scene-sweep"><path d="M80 49V13A36 36 0 0 1 116 49Z"/><path class="scene-ray" d="M80 49V13"/></g><circle class="scene-signal signal-one" cx="99" cy="32" r="3"/><circle class="scene-signal signal-two" cx="65" cy="62" r="3"/><circle cx="80" cy="49" r="3"/>',
   };
-  return `<svg class="role-scene" viewBox="0 0 160 98" fill="none" aria-hidden="true">${scenes[name]}</svg>`;
+  return `<svg class="role-scene" viewBox="0 0 160 98" fill="none" aria-hidden="true">${scenes[name]||scenes.reviewer}</svg>`;
 }
 function roleActivity(t,name,r,presentation){
+  if(name==='referee')return {title:presentation.state==='running'?i18n('裁判正在安排恢复'):presentation.label,work:r.decision?.summary||r.current_work||i18n('仅在中断、连续失败或停滞时介入。')};
   if(presentation.state==='running'){
     if(name==='watcher'){
       const phase=t.health?.phase;
@@ -83,10 +84,10 @@ function roleActivity(t,name,r,presentation){
   return {title:presentation.label,work:r.last_conclusion?.summary||r.current_work||i18n('暂无工作记录')};
 }
 function roleDetailsHTML(t) {
-  return ["worker", "reviewer", "watcher"].map(name => {
+  return ["worker", "reviewer", ...(t.work?.roles?.referee ? ["referee"] : []), "watcher"].map(name => {
     const r = t.work?.roles?.[name] || {status:"not_started"};
     const presentation=rolePresentation(t,name,r);
-    const titles = {worker:i18n("任务实现"), reviewer:i18n("独立审查"), watcher:i18n("监督与调度")};
+    const titles = {worker:i18n("任务实现"), reviewer:i18n("独立审查"), referee:i18n("异常恢复决策"), watcher:i18n("监督与调度")};
     const last = r.last_conclusion;
     const activity=roleActivity(t,name,r,presentation);
     const facts = name === "watcher"

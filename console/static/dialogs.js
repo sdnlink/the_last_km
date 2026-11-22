@@ -38,7 +38,7 @@ function currentCreate(sequence){return sequence===createSequence&&$('#create-di
 const CUSTOM_MODEL='__custom_model__';
 function providerOptions(cfg,reviewer=false){return cfg.providers.map(p=>`<option value="${escape(p.name)}" ${p.enabled===false||reviewer&&p.can_review===false?'disabled':''}>${escape(p.label||p.name)}${p.enabled===false?i18n('（未启用）'):p.available?'':i18n('（未安装）')}${reviewer&&p.can_review===false?i18n('（仅 worker）'):''}</option>`).join('');}
 export function selectedModels(form,data){
- for(const key of ['model','reviewer_model']){
+ for(const key of ['model','reviewer_model','referee_model']){
   if(data[key]===CUSTOM_MODEL){
    const value=form.elements[key+'_custom']?.value.trim();
    if(!value)throw new Error(i18n('请填写自定义模型 ID'));
@@ -48,13 +48,13 @@ export function selectedModels(form,data){
  }
  return data;
 }
-export function modelChoices(form,cfg,{preserve=false,values={},roles=['worker','reviewer']}={}){
+export function modelChoices(form,cfg,{preserve=false,values={},roles=['worker','reviewer','referee']}={}){
  const catalog=cfg.agent_catalog||{};
- for(const [role,providerKey,modelKey,backendKey] of [['worker','provider','model','paseo_backend'],['reviewer','reviewer','reviewer_model','reviewer_paseo_backend']]){
+ for(const [role,providerKey,modelKey,backendKey] of [['worker','provider','model','paseo_backend'],['reviewer','reviewer','reviewer_model','reviewer_paseo_backend'],['referee','reviewer','referee_model','reviewer_paseo_backend']]){
   if(!roles.includes(role))continue;
   const field=form.elements[modelKey];if(!field)continue;
-  const provider=form.elements[providerKey].value;
-  const backend=form.elements[backendKey];
+  const provider=form.elements[providerKey]?.value||values[providerKey];
+  const backend=form.elements[backendKey]||{value:values[backendKey]};
   let rows=catalog.models?.[provider]?.models||[];
   let note=catalog.models?.[provider]?.note||i18n('未枚举到模型，可选择执行器默认或填写自定义 ID。');
   if(provider==='paseo'){
@@ -64,7 +64,7 @@ export function modelChoices(form,cfg,{preserve=false,values={},roles=['worker',
   const previous=values[modelKey]??field.value;
   const items=[...rows];
   if(preserve&&previous&&previous!==CUSTOM_MODEL&&!items.some(m=>m.id===previous))items.push({id:previous,label:previous+i18n('（已保存，未在当前目录发现）')});
-  const label=role==='reviewer'?i18n('自动选择（同执行器及后端沿用 Worker，否则使用默认模型）'):i18n('使用执行器默认模型');
+  const label=role==='referee'?(form.elements.reviewer?i18n('留空沿用 Reviewer 模型'):i18n('沿用当前设置')):role==='reviewer'?i18n('自动选择（同执行器及后端沿用 Worker，否则使用默认模型）'):i18n('使用执行器默认模型');
   field.innerHTML=`<option value="">${label}</option>`+items.map(m=>`<option value="${escape(m.id)}">${m.label&&m.label!==m.id?escape(m.label)+' — ':''}${escape(m.id)}</option>`).join('')+i18nHTML`<option value="${CUSTOM_MODEL}">自定义模型 ID…</option>`;
   field.value=items.some(m=>m.id===previous)||(preserve&&previous===CUSTOM_MODEL)?previous:'';
   const custom=form.elements[modelKey+'_custom'];if(custom)custom.hidden=field.value!==CUSTOM_MODEL;
@@ -80,8 +80,8 @@ function backendChoices(form,cfg){
  }
 }
 function bindModels(form,cfg){
- for(const [key,role] of [['provider','worker'],['reviewer','reviewer'],['paseo_backend','worker'],['reviewer_paseo_backend','reviewer']])form.elements[key]?.addEventListener('change',()=>modelChoices(form,cfg(),{roles:[role]}));
- for(const key of ['model','reviewer_model'])form.elements[key]?.addEventListener('change',()=>{
+ for(const [key,role] of [['provider','worker'],['reviewer','reviewer'],['paseo_backend','worker'],['reviewer_paseo_backend','reviewer']])form.elements[key]?.addEventListener('change',()=>modelChoices(form,cfg(),{roles:role==='reviewer'?['reviewer','referee']:[role]}));
+ for(const key of ['model','reviewer_model','referee_model'])form.elements[key]?.addEventListener('change',()=>{
   const custom=form.elements[key+'_custom'];if(custom)custom.hidden=form.elements[key].value!==CUSTOM_MODEL;
  });
 }
@@ -209,6 +209,8 @@ export async function openResume(id){
   const u=task.usage||task.health?.usage||{};
   $('#resume-usage').textContent=i18n`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
   $('#resume-form').reset();$('#resume-error').hidden=true;showTaskDialog('resume',id);
+  const cfg=await config();if(!currentTaskDialog('resume',sequence,id))return;
+  modelChoices($('#resume-form'),cfg,{preserve:true,roles:['referee'],values:{reviewer:task.reviewer,reviewer_paseo_backend:task.reviewer_paseo_backend||'claude',referee_model:task.referee?.model||''}});
  }catch(error){if(currentTaskDialog('resume',sequence))toast(error.message,true);}
 }
 export async function openRoles(id){
@@ -418,12 +420,21 @@ function bind(name){
   });return;
  }
  if(name==='resume'){
+  $('#resume-form').elements.referee_model?.addEventListener('change',()=>{
+   const form=$('#resume-form');form.elements.referee_model_custom.hidden=form.elements.referee_model.value!==CUSTOM_MODEL;
+  });
   $('#resume-form').addEventListener('submit',async e=>{
    e.preventDefault();const view=taskDialogs.resume,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
-   const data=Object.fromEntries(new FormData(e.target));
+   let data;
+   try{data=selectedModels(e.target,Object.fromEntries(new FormData(e.target)));}
+   catch(error){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;return;}
+   const referee=data.referee,refereeModel=String(data.referee_model||'').trim();
+   delete data.referee;delete data.referee_model;
    const additionalChecks=String(data.additional_checks||'').split(/\r?\n/).map(c=>c.trim()).filter(Boolean);
    delete data.additional_checks;
    for(const key of Object.keys(data))data[key]=Number(data[key]);
+   if(referee==='on'||referee==='off')data.referee=referee==='on';
+   if(refereeModel)data.referee_model=refereeModel;
    view.pending.add(id);
    $('#resume-submit').disabled=true;$('#resume-error').hidden=true;
    try{if(additionalChecks.length)await api(`/api/tasks/${id}/checks`,{additional_checks:additionalChecks});await api(`/api/tasks/${id}/resume`,data);if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();toast(i18n`任务 ${id} 已请求恢复`);await refresh();}
@@ -473,7 +484,7 @@ function bind(name){
   $('#create-form').elements.auto_start.addEventListener('change',e=>$('#create-submit').textContent=e.target.checked?i18n('创建并启动任务'):i18n('保存待启动任务'));
   $('#create-form').addEventListener('submit',async e=>{
    e.preventDefault();const sequence=createSequence;if(createPending.has(sequence))return;
-   const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
+   const form=e.target,data=Object.fromEntries(new FormData(form));data.auto_start=form.elements.auto_start.checked;data.referee=form.elements.referee?.checked??false;data.checks=data.checks.split('\n').map(s=>s.trim()).filter(Boolean);
    data.title=data.title.trim()||[...data.requirement.trim().split(/\r?\n/,1)[0]].slice(0,160).join('');
    if(form.elements.enable_supervision?.checked)data.supervision={cron:data.supervision_cron.trim(),timezone:data.supervision_timezone.trim(),provider:data.supervision_provider.trim()};
    for(const key of ['enable_supervision','supervision_cron','supervision_timezone','supervision_provider'])delete data[key];

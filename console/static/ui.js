@@ -26,6 +26,7 @@ const phases = {
   preparing: i18n("准备环境"),
   working: i18n("实现需求中"),
   reviewing: i18n("独立审查中"),
+  refereeing: i18n("裁判介入中"),
   refining_requirements: i18n("reviewer 完善需求中"),
   validating: i18n("验收检查中"),
   publishing: i18n("提交已审核代码中"),
@@ -155,7 +156,7 @@ function activityState(t,item,{plan=false}={}) {
 }
 function stateGlyph(){return '<span class="state-glyph" aria-hidden="true"></span>';}
 function stateLabel(state,label){return `<span class="component-state" data-motion="${escape(state)}">${stateGlyph()}${escape(label)}</span>`;}
-const roleName=name=>({worker:i18n('执行器'),reviewer:i18n('审查器'),watcher:i18n('监督器')})[name]||name;
+const roleName=name=>({worker:i18n('执行器'),reviewer:i18n('审查器'),referee:i18n('裁判'),watcher:i18n('监督器')})[name]||name;
 function rolePresentation(t,name,r={}) {
   const taskState=taskMotion(t);
   const state=taskState==='running'?motionState(r.status):taskState;
@@ -186,6 +187,7 @@ function taskNarrative(t) {
   if(!words&&t.control==='stop')words=[i18n('正在停止并保存进度'),i18n('等待进程退出与检查点保存。')];
   if(!words&&t.control==='pause')words=[i18n('已请求暂停，等待本轮结束'),i18n('本轮结束后保留上下文并暂停。')];
   const phasesText={
+    refereeing:[i18n('裁判正在安排恢复'),i18n('保留已完成工作，诊断中断并继续剩余计划。')],
     refining_requirements:[i18n('审查器正在梳理需求'),i18n('明确范围和验收标准后，再交给执行器。')],
     working:[i18n('执行器正在实现需求'),i18n('候选完成后运行固定检查，再交独立审核。')],
     reviewing:[i18n('审查器正在核对候选'),i18n('结合代码与检查结果给出结论，再决定提交或修复。')],

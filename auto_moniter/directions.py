@@ -113,7 +113,7 @@ class Directions:
 
     def _receipts(self) -> dict:
         receipts = self.read('direction-receipts.json')
-        for role in ('worker', 'reviewer'):
+        for role in ('worker', 'reviewer', 'referee'):
             values = receipts.get(role, {})
             if not isinstance(values, dict) or any(
                     not isinstance(value, dict) or value.get('status') not in {'sent', 'responded'}

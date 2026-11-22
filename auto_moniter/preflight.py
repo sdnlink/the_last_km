@@ -27,6 +27,11 @@ def validate_task_type(config) -> None:
 
 def validate(config) -> None:
     validate_task_type(config)
+    if (config.referee is not None and type(config.referee) is not bool
+            or not isinstance(config.referee_model, str) or len(config.referee_model) > 2000):
+        raise ValueError('Invalid referee configuration')
+    if config.referee and (config.no_review or config.reviewer is None):
+        raise ValueError('Referee requires a configured independent reviewer')
     if config.workflow not in ('legacy','review-first','auto') or config.workflow=='auto' and not config.resume:
         raise ValueError('Invalid workflow')
     if config.workflow=='review-first' and config.no_review:

@@ -1,5 +1,7 @@
 # Auto Monitor
 
+An optional **Referee** intervenes only when work stalls, repeated calls fail, or recovery is blocked. Enable it when creating or resuming a task and select a separate model from the review provider's catalog. Its read-only scheduling decisions can direct retries, resume review of a saved candidate, or replan remaining work. Original requirements, accepted work, checks, controls and cumulative budgets remain enforced. See [Referee recovery](docs/referee-recovery.md).
+
 **English** | [简体中文](README.zh-CN.md)
 
 Auto Monitor runs coding tasks through a worker, an independent reviewer, and the acceptance checks you configure. Use it from the command line or the local web console.

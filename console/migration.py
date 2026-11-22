@@ -98,6 +98,9 @@ def build(meta, state, run, requirement):
     keys = (*DEFAULTS, 'provider', 'reviewer', 'model', 'reviewer_model', 'paseo_backend',
             'reviewer_paseo_backend', 'protect_paths', 'review_every')
     payload = {key: meta[key] for key in keys if key in meta}
+    referee = state.get('referee')
+    if isinstance(referee, dict):
+        payload.update(referee=referee.get('enabled', False), referee_model=referee.get('model', ''))
     payload.update({key: state['execution_settings'][key] for key in DEFAULTS
                     if key in (state.get('execution_settings') or {})})
     if 'protect_paths' in state:

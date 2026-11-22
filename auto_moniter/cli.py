@@ -55,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reviewer provider. Required unless --no-review. Use a different provider from the worker when you can.",
     )
     run.add_argument("--reviewer-model", default="", help="Reviewer model id")
+    run.add_argument('--referee', action=argparse.BooleanOptionalAction, default=None,
+                     help='Invoke an optional read-only Referee for interrupted or stalled work (default: disabled; inherited on resume)')
+    run.add_argument('--referee-model', default='', help='Referee model id (default: reviewer model; inherited on resume)')
     run.add_argument("--reviewer-mode", default="", help="Reviewer mode: read-only (Codex) or plan; writable modes are rejected")
     run.add_argument("--review-isolation", choices=("provider", "strict"), default="provider", help="strict verifies and enforces read-only filesystem mounts with bwrap (native reviewers only)")
     run.add_argument("--reviewer-paseo-backend", default="", help="Paseo backend for the reviewer")
@@ -368,6 +371,8 @@ def _run(args: argparse.Namespace) -> int:
         reviewer=reviewer,
         model=args.model,
         reviewer_model=args.reviewer_model,
+        referee=args.referee,
+        referee_model=args.referee_model,
         extra_args=list(args.extra_arg),
         reviewer_extra_args=list(args.reviewer_extra_arg),
         max_rounds=args.max_rounds,

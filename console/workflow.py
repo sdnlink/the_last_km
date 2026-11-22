@@ -44,6 +44,8 @@ def review_wait(state: dict, health: dict, status: str, rounds: list, current_ro
         reason = '任务当前未在执行；下方为最近一次审核结论。' if last else '任务当前未在执行，尚无审核结论。'
     elif phase == 'refining_requirements':
         reason='reviewer 正在补充需求、验收标准与边界；worker 尚未开始实现。'
+    elif phase == 'refereeing':
+        reason = '裁判正在诊断中断与停滞，安排剩余计划。'
     elif phase == 'reviewing':
         reason = f'正在独立审核第 {current_round} 轮工作及项目改动。'
     elif phase == 'validating':
@@ -114,6 +116,16 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
                        'current_work_generated': not bool(focus),
                        'last_conclusion': last, 'events': role_events}
     roles['reviewer'].update(review_wait(state, health, status, rounds, current_round))
+    referee = state.get('referee') or {}
+    if referee.get('enabled'):
+        roles['referee'] = {'role': 'referee', 'provider': reviewer,
+            'status': 'running' if active and phase == 'refereeing' else 'waiting' if active else 'stopped',
+            'current_work': '裁判正在诊断中断与停滞，安排剩余计划。' if phase == 'refereeing' else
+                            '仅在中断、连续失败或停滞时介入。',
+            'wait_reason': (referee.get('decision') or {}).get('summary') or '仅在中断、连续失败或停滞时介入。',
+            'model': referee.get('model', ''), 'decision': referee.get('decision'),
+            'pid': heartbeat.get('child_pid') if active and phase == 'refereeing' else None,
+            'events': [e for e in workflow if e.get('role') == 'referee'][-16:]}
     roles['watcher'] = {'role': 'watcher', 'provider': 'auto-moniter',
                         'status': 'monitoring' if active or status == 'paused' else
                                   'not_started' if status == 'queued' else 'stopped',

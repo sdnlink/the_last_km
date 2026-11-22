@@ -168,6 +168,8 @@ def run_health(run_dir: Path, stale_after: float = 60, *, snapshot: dict | None 
             break
     if any(token in note for token in ("awaiting_permission", "waiting_for_permission", "waiting_for_approval", "awaiting_approval", "waiting_for_input", "awaiting_input", "needs_input", "requires_action", "requires_permission")):
         phase = "waiting_for_input"
+    if 'referee' in note.lower():
+        phase = 'refereeing'
     if health in {"finished", "monitor_exited"}:
         phase = health
     elif health == "recovering":

@@ -64,6 +64,8 @@
 | `--modules FILE` | 无固定模块 | JSON 数组；每项必填 `id/title/acceptance`，可填 `depends_on/checks/files`。固定验收不可被 agent 改写 |
 | `--quality-policy FILE` | 不启用额外质量策略 | 读取 JSON 质量策略；非空策略会补齐字段默认值；恢复沿用原策略，不能替换 |
 | `--resume` | 否 | 恢复 `--run-dir` 中的任务，不创建新任务；须传原 provider、reviewer 和后端配置 |
+| `--referee`, `--no-referee` | 关闭；恢复沿用检查点 | 启用异常恢复裁判。正常开发不调用；连续失败、停滞、审核或规划恢复受阻时以独立只读会话安排恢复；不得替代最终审核 |
+| `--referee-model MODEL` | 沿用 Reviewer 模型 | 单独指定审查执行器支持的裁判模型，调用计入原任务累计预算；恢复时保留已保存模型 |
 | `-h`, `--help` | — | 查看实际 run 参数 |
 
 默认运行目录根为 `AUTO_MONITER_STATE_DIR`；未设置时使用 `$XDG_STATE_HOME/auto-moniter`，再未设置则为 `~/.local/state/auto-moniter`。实际任务目录为 `<根>/<项目路径哈希>/runs/<时间戳>`。Web 默认目录另见前表。

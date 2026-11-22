@@ -73,6 +73,7 @@ from auto_moniter import function_plan, deployment, documentation_tasks
 from auto_moniter.skills import browser_guidance, guidance
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 from auto_moniter import migration
+from auto_moniter import referee
 
 
 LogFn = Callable[[str], None]
@@ -84,6 +85,10 @@ class BudgetExceeded(RuntimeError):
 
 class RecoveryError(RuntimeError):
     pass
+
+
+class RefereeRedirect(RuntimeError):
+    """Reload a durable recovery decision at a normal dispatch boundary."""
 
 
 _EXECUTION_DEFAULTS = {"turn_timeout_s": 0, "idle_timeout_s": 900, "retry_delay_s": 5,
@@ -134,6 +139,8 @@ class RunConfig:
     function_dispatch: bool = False
     full_function_plan: bool = False
     task_type: str = 'code'
+    referee: bool | None = None
+    referee_model: str = ''
 
 
 @dataclass
@@ -212,6 +219,11 @@ class RunReport:
 class Supervisor:
     def __init__(self, config: RunConfig, log: LogFn | None = None) -> None:
         self.config = config
+        self._referee_override = config.referee
+        if config.referee is None:
+            config.referee = False
+        self._referee_decision = None
+        self._referee_replan = False
         self._execution_overrides = {key for key in _EXECUTION_DEFAULTS if getattr(config, key) is not None}
         for key, value in _EXECUTION_DEFAULTS.items():
             if getattr(config, key) is None:
@@ -277,7 +289,7 @@ class Supervisor:
         self._pruned_records = 0
         self._pruned_failures = {"worker": 0, "reviewer": 0}
         self.directions = Directions(self.run_dir)
-        self._direction_ids = {'worker': [], 'reviewer': []}
+        self._direction_ids = {'worker': [], 'reviewer': [], 'referee': []}
         self.git_history: GitHistory | None = None
         self._git_before = ''
         self.quality = Quality({}, {})
@@ -344,6 +356,9 @@ class Supervisor:
                     while True:
                         try:
                             return self._run_locked()
+                        except RefereeRedirect:
+                            self.config.resume = True
+                            self._started = time.monotonic()
                         except ProjectInputsChanged:
                             self._check_budget()
                             self._project_replan = True
@@ -514,9 +529,10 @@ class Supervisor:
             self._sync_business_head(records)
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
-                or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1):
-            if not self._elaborate_requirement(records, next_function=bool(self.config.function_dispatch and
-                    (self.function_tasks.current or self.function_tasks.accepted))):
+                or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1
+                or self._referee_replan):
+            if not self._elaborate_requirement(records, next_function=bool(self._referee_replan or
+                    self.config.function_dispatch and (self.function_tasks.current or self.function_tasks.accepted))):
                 return self._finish('stopped' if self._stop_requested else 'action_required',
                                     self.requirements_review.get('summary','Requirement review did not complete; worker was not started.'), records, None)
 
@@ -530,6 +546,11 @@ class Supervisor:
             if self._stop:
                 break
             self._check_budget()
+            if self._referee_replan:
+                if not self._elaborate_requirement(records, next_function=True):
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                        self.requirements_review.get('summary', 'Referee-directed replanning did not complete'), records, last_worker)
+                last_worker = last_review = None
             from auto_moniter.runtime_policy import reserve_seconds
             reserve = reserve_seconds(self.config.max_runtime_s)
             if reserve and self.config.max_runtime_s - self._elapsed() <= reserve:
@@ -794,6 +815,8 @@ class Supervisor:
 
                 if failure and not checkpoint_due:
                     if turn.interruption == 'network retry budget':
+                        if self._consult_referee('worker_failure', failure, records, candidate=record):
+                            continue
                         return self._finish('action_required', 'Continuous model connection failures exceeded the transport retry budget; work saved. Resolve service availability before resuming.', records, verdict)
                     category, recovery = classify(failure)
                     self._event("agent_failure", role="worker", category=category, recovery=recovery)
@@ -824,6 +847,10 @@ class Supervisor:
                             records,
                             verdict,
                         )
+                    if (self._last_invocation.get('role') != 'referee'
+                            and (worker_failures >= 2 or turn.timed_out or turn.interruption)) and self._consult_referee(
+                            'worker_failure', failure, records, candidate=record):
+                        continue
                     self._retry_pause(worker_failures + (3 if recovery == "backoff" else 0), category + " worker failure")
                     continue
                 worker_failures = 0
@@ -938,6 +965,9 @@ class Supervisor:
                     if self._pending_directions() and not self._stop:
                         last_worker = None
                         continue
+                    if self._consult_referee('worker_report', record.failure or 'Function report correction did not finish',
+                                             records, candidate=record):
+                        continue
                     return self._finish('stopped' if self._stop else 'action_required',
                         record.failure or 'Function completion report needs correction; implementation was preserved.',
                         records, record.verdict)
@@ -953,6 +983,9 @@ class Supervisor:
                     if correction is None:
                         if self._pending_directions() and not self._stop:
                             last_worker = None
+                            continue
+                        if self._consult_referee('worker_report', record.failure or 'Module report correction did not finish',
+                                                 records, candidate=record):
                             continue
                         return self._finish('stopped' if self._stop else 'action_required',
                             record.failure or 'Module completion report needs correction; candidate preserved.',
@@ -981,6 +1014,10 @@ class Supervisor:
                 if repeated:
                     record.watcher_result['repeated_review_test'] = repeated
                     self._event('reviewer_test_failure_repeated', round=round_index, **repeated)
+                    if self._consult_referee('candidate_checks',
+                            'Unchanged implementation repeatedly fails the same reviewer-authored test: ' + repeated['log'],
+                            records, candidate=record):
+                        continue
                     return self._finish('action_required',
                         'The unchanged implementation still fails the same reviewer-authored test. '
                         'Candidate and review preserved. Inspect ' + repeated['log'] + ' before resuming.',
@@ -1036,6 +1073,8 @@ class Supervisor:
                 if not stopped or not archived:
                     raise RuntimeError("Could not close Paseo reviewer; stop before starting another worker round.")
                 self._active_reviewer_id = ""
+            if record.watcher_result.get('referee_route', {}).get('action') == 'retry_reviewer':
+                record.watcher_result.pop('referee_route', None)
             review = self._verdict_from_turn(review_turn, role="reviewer")
             reported_review_status = review.status
             if self.project:
@@ -1157,11 +1196,23 @@ class Supervisor:
                         review,
                     )
                 if self.config.workflow == 'review-first':
+                    if self._consult_referee('reviewer_failure', review_failure, records, candidate=record):
+                        continue
+                    if self._stop_requested:
+                        return self._finish('stopped', self._stop_reason, records, verdict)
+                    if self._stop:
+                        return self._finish('action_required', self._stop_reason, records, verdict)
                     return self._finish('action_required', 'Reviewer did not finish; worker candidate saved. ' + review_failure,
                                         records, verdict)
                 self._retry_pause(reviewer_failures + (3 if recovery == "backoff" else 0), category + " reviewer failure")
                 continue
             if review.parse_error and self.config.workflow == 'review-first':
+                if self._consult_referee('reviewer_report', '; '.join(watcher_result.get('reasons') or [review.parse_error]),
+                                         records, candidate=record):
+                    continue
+                if self._stop:
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                                        self._stop_reason, records, verdict)
                 retried = getattr(self, '_review_audit_retry_exhausted', None) == round_index
                 return self._finish('action_required',
                                     ('Reviewer audit update rejected after reviewer-only retry; worker candidate saved. ' if retried
@@ -1222,6 +1273,8 @@ class Supervisor:
                 except ValueError as exc:
                     review.status = 'continue'
                     review_record.watcher_result.update(status='rejected', reasons=[str(exc)])
+                    if self._consult_referee('handoff', str(exc), records, candidate=record):
+                        continue
                     return self._finish('action_required', 'Function handoff rejected: ' + str(exc), records, review)
                 if next_functions is not None:
                     self._apply_function_assessment(record, review_record)
@@ -1250,6 +1303,8 @@ class Supervisor:
             if self.config.quality_policy:
                 blocked = self._check_review_blockers(record, review_record, review_tree)
                 if blocked:
+                    if self._consult_referee('blockers', blocked, records, candidate=record):
+                        continue
                     return self._finish('action_required', blocked, records, review)
 
             legacy_review = self.config.workflow != 'review-first'
@@ -1386,7 +1441,7 @@ class Supervisor:
 
         follow_up_stopped = self._stop_reason.startswith('Next requirement not ready')
         return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(
-                                ('Verified progress', 'Acceptance environment', 'Project dependencies cancelled')) else 'stopped',
+                                ('Verified progress', 'Acceptance environment', 'Project dependencies cancelled', 'Referee')) else 'stopped',
                             self._stop_reason if follow_up_stopped else f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
 
     def _business_head_changed(self):
@@ -1663,6 +1718,8 @@ class Supervisor:
         self._event('requirement_follow_up', cycle=handoff['cycle'], tree=self._delivery_tree, commit=handoff['commit'])
         self.requirements_review = {}
         self.function_plan = None
+        self._referee_decision = None
+        self._referee_replan = False
         self.active_queued_requirement = ({key: next_queued[key] for key in ('id', 'text', 'at')}
                                           if next_queued else None)
         self.worker_session_id = ''
@@ -1693,6 +1750,11 @@ class Supervisor:
                 self._check_budget()
                 continue
             if not self._project_review_changed or self._stop:
+                if not result and not self._stop and self._consult_referee(
+                        'planning', self.requirements_review.get('summary', 'Requirement planning did not finish'), records):
+                    next_function = bool(self.requirements_review.get('acceptance_criteria') or self.function_tasks.current
+                                         or self._referee_replan)
+                    continue
                 return result
             self._event('project_review_retry', reason='Concurrent changes invalidated the review; preserving work and reviewing current inputs')
             self._check_budget()
@@ -1724,7 +1786,12 @@ class Supervisor:
         staged = ModuleLedger.restore(self.modules.export())
         staged.merge(proposed)
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
-        if next_function and dispatch.current:
+        if self._referee_replan and dispatch.current:
+            revised = function_tasks.validate(assignment, staged.items)
+            if self._assignment_worker_started(dispatch.current) and revised['id'] == dispatch.current['id']:
+                raise ValueError('Referee replacement of a started assignment requires a fresh task ID')
+            dispatch.current = None
+        elif next_function and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if self._unstarted_assignment_test_conflicts():
                 # Repair the test declaration only before this assignment starts.
@@ -1755,7 +1822,7 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
-            if not self.function_tasks.current or self._unstarted_assignment_test_conflicts():
+            if self._referee_replan or not self.function_tasks.current or self._unstarted_assignment_test_conflicts():
                 self._validate_new_assignment_tests(dispatch.current)
         elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
             raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
@@ -1997,7 +2064,13 @@ class Supervisor:
                                'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
-                    if self.function_tasks.current:
+                    if self._referee_replan:
+                        prompt += ('\nThe Referee has directed replanning of the remaining work. Its recovery '
+                                   'decision supersedes the usual requirement to keep the unfinished assignment identity. '
+                                   'Preserve its existing candidate, every accepted assignment and every pending original '
+                                   'criterion. Use a fresh ID when replacing a started task. Return the complete remaining '
+                                   'plan through final verification. Decision:\n' + json.dumps(self._referee_decision, ensure_ascii=False))
+                    elif self.function_tasks.current:
                         conflicts = self._unstarted_assignment_test_conflicts()
                         if conflicts:
                             fixed = [key for key in self.function_tasks.current['check_ids']
@@ -2096,6 +2169,7 @@ class Supervisor:
                     self.modules = staged
                     self._dispatch_directions = list(self._direction_ids['reviewer'])
                     self._record_assignment(dispatch.current)
+                    self._referee_replan = False
                 elif assignment is not None or backlog:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
@@ -2112,6 +2186,8 @@ class Supervisor:
                 brief['reviewed_direction_sha256'] = self._last_invocation['requirement_revision']['sha256']
                 brief['reviewed_checks_sha256'] = requirement_context.checks_digest(review_checks)
             self.requirements_review=brief
+            if brief['status'] == 'ready' and not self.config.function_dispatch:
+                self._referee_replan = False
             if self.project and brief['status']=='ready':
                 self.project.mark_reviewed(project_signature)
                 self._project_replan = False
@@ -2634,6 +2710,10 @@ class Supervisor:
                         and getattr(self.config.reviewer, 'backend', None) == getattr(self.config.provider, 'backend', None))
         return self.config.reviewer_model or (self.config.model if same_backend else '')
 
+    def _referee_snapshot(self):
+        return {'enabled': self.config.referee, 'model': self.config.referee_model,
+                'decision': self._referee_decision, 'replan': self._referee_replan}
+
     def _provider_config(self) -> dict:
         def identity(provider):
             if provider is None:
@@ -2682,6 +2762,113 @@ class Supervisor:
         except (OSError, ValueError, TypeError, RuntimeError, AttributeError) as exc:
             raise RecoveryError(f"Resume recovery failed: {exc}. No new agent was started.") from exc
 
+    def _consult_referee(self, kind, reason, records, *, candidate=None):
+        """Apply one bounded scheduling decision without granting acceptance."""
+        if not self.config.referee or self.config.no_review or not self.config.reviewer or self._stop:
+            return ''
+        self._process_control()
+        if self._stop or classify(reason)[1] == 'stop':
+            return ''
+        self._check_budget(new_call=True)
+        tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        revision = self.directions.revision(self.config.requirement)['sha256']
+        current = self.function_tasks.current
+        context = {'kind': kind, 'tree': tree, 'task': current,
+                   'cycle': len(self.requirement_cycles) + 1, 'revision': revision,
+                   'provider_config': self._provider_config(), 'checks': self.config.checks,
+                   'referee_model': self.config.referee_model or self._reviewer_model()}
+        journal = referee.Journal(self.run_dir)
+        try:
+            ticket = journal.begin(context, reason)
+        except (OSError, ValueError, RecursionError) as exc:
+            self.log('Referee recovery unavailable: ' + str(exc))
+            self._stop = True
+            self._stop_reason = 'Referee recovery unavailable: ' + str(exc)
+            return ''
+        if ticket is None:
+            self._event('referee_exhausted', incident=kind, reason=reason)
+            self._stop = True
+            self._stop_reason = 'Referee recovery exhausted; preserved work needs an external change or decision.'
+            return ''
+        index = 920000 + ticket['id']
+        diagnosis = {**context, 'incident': reason, 'original_requirement': self.config.requirement,
+            'acceptance': self.config.acceptance, 'requirements_review': self.requirements_review,
+            'original_plan': self.function_plan, 'assignments': self.function_tasks.export(),
+            'modules': self.modules.export(), 'audit_issues': self.audit.export(), 'usage': self._usage(),
+            'recent_records': [record for record in RunReport('', 0, '', '', records[-8:]).to_dict()['records']],
+            'prior_decisions': journal.read()['decisions'][:-1]}
+        schema = self.schema_path
+        path = self.run_dir / 'referee.schema.json'
+        write_json(path, referee.SCHEMA)
+        self.schema_path = path
+        self._event('referee_start', incident=kind, decision_id=ticket['id'])
+        try:
+            self.config.reviewer.validate_review(self.config.reviewer_extra_args)
+            turn = self._invoke(self.config.reviewer, referee.prompt(diagnosis), '', role='referee', index=index,
+                model=self.config.referee_model or self._reviewer_model(),
+                extra_args=self.config.reviewer_extra_args, read_only=True)
+            self._process_control()
+            if self._stop:
+                return ''
+            if (workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree
+                    or self.directions.revision(self.config.requirement)['sha256'] != revision
+                    or self._business_head_changed() or self.project and self.project.needs_review):
+                raise ValueError('Referee inputs changed; decision was not applied')
+            if turn.exit_code or turn.timed_out or turn.interruption:
+                raise ValueError('Referee did not finish: ' + (turn.stderr or turn.interruption or str(turn.exit_code)))
+            decision = referee.parse(turn.text)
+            action = decision['action']
+            if kind == 'reviewer_failure' and action == 'retry_worker':
+                raise ValueError('Review transport failure cannot authorize repeating implementation')
+            if kind == 'planning' and action not in {'replan', 'wait'}:
+                raise ValueError('Failed planning requires replanning or a concrete external prerequisite')
+            if action == 'retry_reviewer' and (candidate is None or candidate.failure or candidate.interruption
+                                             or candidate.exit_code or candidate.timed_out):
+                raise ValueError('Reviewer retry requires an intact submitted worker candidate')
+            if (action == 'retry_reviewer' and candidate_checks.observed_assertion_failure(
+                    candidate.watcher_result.get('candidate_checks', {}), self.run_dir)):
+                raise ValueError('Failing behavioral assertions require implementation repair or replanning')
+            if action == 'replan' and self.config.workflow != 'review-first':
+                raise ValueError('Referee replanning requires the review-first workflow')
+            # Save the decision before changing any scheduling state. A crash
+            # here must not issue the same model call again on restart.
+            journal.update(ticket['id'], 'captured', decision=decision, output_file=turn.output_path.name)
+            self._referee_decision = {**decision, 'id': ticket['id'], 'cycle': context['cycle'],
+                                      'incident': kind, 'task_id': current['id'] if current else ''}
+            if action == 'wait':
+                self._stop = True
+                self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
+            else:
+                errors = self._close_delivered_sessions()
+                if errors:
+                    raise RecoveryError('Referee recovery cannot close previous agents: ' + '; '.join(errors))
+                self.worker_session_id = self.reviewer_session_id = ''
+                self._drop_worker_session = True
+                self._referee_replan = action == 'replan'
+                if candidate is not None:
+                    candidate.watcher_result['referee_route'] = {'action': action, 'id': ticket['id'], 'tree': tree}
+                self._recovery_note = 'Referee scheduling decision: ' + decision['instructions']
+            self.directions.receipt(self._direction_ids['referee'], 'referee', index, responded=True)
+            self._write_state(records, 'running', 0, '', tree)
+            journal.update(ticket['id'], 'applied')
+            self._event('referee_decision', decision_id=ticket['id'], action=action,
+                        summary=decision['summary'], output_file=turn.output_path.name)
+            return '' if action == 'wait' else action
+        except (ValueError, ProviderError) as exc:
+            journal.update(ticket['id'], 'failed', error=str(exc)[:4000])
+            self._event('referee_rejected', decision_id=ticket['id'], reason=str(exc))
+            self._stop = True
+            self._stop_reason = 'Referee recovery rejected: ' + str(exc)
+            return ''
+        finally:
+            self.schema_path = schema
+            if self.config.reviewer.name == 'paseo' and self._active_reviewer_id:
+                stopped = _paseo_stop(self.config.reviewer.binary, self._active_reviewer_id, self.config.cwd)
+                archived = _paseo_archive(self.config.reviewer.binary, self._active_reviewer_id, self.config.cwd)
+                if not stopped or not archived:
+                    raise RecoveryError('Referee session cleanup failed')
+                self._active_reviewer_id = ''
+
     def _track_stall(
         self,
         stall: int,
@@ -2695,12 +2882,19 @@ class Supervisor:
         progress = self._progress_reset or (changed and not self.quality.config.get('verified_progress'))
         self._no_progress = self._no_progress + 1 if previous_tree and not progress else 0
         limit = self.quality.config.get('no_progress_limit', 0)
-        if limit and self._no_progress >= limit:
-            self._stop = True
-            self._stop_reason = 'Verified progress limit reached; source edits alone do not establish progress.'
         self._progress_reset = False
         count = stall + 1 if key and key == previous_key and not progress else 0
         recovery_stall = max(count, self._no_progress)
+        threshold = self.config.restart_after_stall or 3
+        if recovery_stall >= threshold or limit and self._no_progress >= limit:
+            candidate = next((r for r in reversed(self._records) if r.role == 'worker'), None)
+            if self._consult_referee('stall', '\n'.join(verdict.gaps) or verdict.summary,
+                                     self._records, candidate=candidate):
+                self._no_progress = 0
+                return 0, key, tree
+        if limit and self._no_progress >= limit:
+            self._stop = True
+            self._stop_reason = self._stop_reason or 'Verified progress limit reached; source edits alone do not establish progress.'
         if recovery_stall:
             threshold = self.config.restart_after_stall
             if threshold and recovery_stall % threshold == 0 and not _limit_reached(self.config.stall_limit, count):
@@ -3709,6 +3903,9 @@ class Supervisor:
     def _finish_function_acceptance(self, record, records, reasons):
         """A watcher rejection is not a new implementation assignment."""
         reasons = list(dict.fromkeys(reasons or ['Function acceptance did not complete']))
+        worker = next((item for item in reversed(records) if item.role == 'worker'), None)
+        if self._consult_referee('candidate_checks', '; '.join(reasons), records, candidate=worker):
+            raise RefereeRedirect('Referee recovery decision saved')
         record.watcher_result.update(status='blocked', reasons=reasons, function_gate='checks')
         record.delivery = {'status': 'rejected', 'reasons': reasons}
         self._event('function_acceptance_blocked', task_id=record.verdict.task_id, reasons=reasons)
@@ -3718,7 +3915,7 @@ class Supervisor:
         if self._stop and 'budget' in self._stop_reason.lower():
             return self._finish('budget_exceeded', 'Stopped before publication: '+self._stop_reason,
                                 records, record.verdict)
-        stopped = self._stop_requested or self._stop and not self._stop_reason.startswith('Acceptance environment')
+        stopped = self._stop_requested or self._stop and not self._stop_reason.startswith(('Acceptance environment', 'Referee'))
         return self._finish('stopped' if stopped else 'action_required',
             ('Function acceptance blocked for ' + record.verdict.task_id if self.config.function_dispatch
              else 'Candidate acceptance blocked for round '+str(record.index)) +
@@ -4111,6 +4308,7 @@ class Supervisor:
                                          "audit_issues": self.audit.export(),
                                          "delivery_diagnosis": self._delivery_diagnosis,
                                          "function_tasks": self.function_tasks.export(),
+                                         "referee": self._referee_snapshot(),
                                          "history": self._history_info()})
         if status == 'action_required' and self.requirement_cycles and self.requirements_review.get('status') == 'needs_input':
             from auto_moniter.health import follow_up_wait_digest
@@ -4205,6 +4403,7 @@ class Supervisor:
             "function_tasks": self.function_tasks.export(),
             "function_plan": self.function_plan,
             "full_function_plan": self.config.full_function_plan,
+            "referee": self._referee_snapshot(),
             "dispatch_directions": self._dispatch_directions,
             "function_issue_ids": self._function_issue_ids,
             "planning_rejection": self._planning_rejection,
@@ -4377,6 +4576,26 @@ class Supervisor:
         if not isinstance(self.requirements_review,dict):
             raise ValueError('Invalid saved requirement elaboration')
         self.requirement_cycles = _restore_requirement_cycles(state.get('requirement_cycles', []))
+        saved_referee = state.get('referee', {'enabled': False, 'model': '', 'decision': None, 'replan': False})
+        if (not isinstance(saved_referee, dict) or set(saved_referee) != {'enabled', 'model', 'decision', 'replan'}
+                or type(saved_referee['enabled']) is not bool or type(saved_referee['replan']) is not bool
+                or not isinstance(saved_referee['model'], str)):
+            raise ValueError('Invalid saved referee configuration')
+        if self._referee_override is None:
+            self.config.referee = saved_referee['enabled']
+        if not self.config.referee_model:
+            self.config.referee_model = saved_referee['model']
+        decision = saved_referee['decision']
+        if decision is not None:
+            if (not isinstance(decision, dict) or set(decision) != set(referee.SCHEMA['required']) | {'id','cycle','incident','task_id'}
+                    or type(decision['id']) is not int or not 1 <= decision['id'] <= referee.MAX_DECISIONS
+                    or type(decision['cycle']) is not int or decision['cycle'] < 1):
+                raise ValueError('Invalid saved referee decision')
+            referee.parse(json.dumps({key: decision[key] for key in referee.SCHEMA['required']}))
+        if saved_referee['replan'] and not decision:
+            raise ValueError('Referee replanning lacks a saved decision')
+        self._referee_decision = decision
+        self._referee_replan = bool(self.config.referee and saved_referee['replan'])
         self.active_queued_requirement = state.get('active_queued_requirement') or None
         self.requirement_queue.snapshot(self._requirement_queue_state())
         # read_text normalizes CRLF, which would invalidate legacy hashes made
@@ -4942,6 +5161,9 @@ class Supervisor:
         worker = next((r for r in reversed(records) if r.role == 'worker'), None)
         if not worker:
             return None
+        route = worker.watcher_result.get('referee_route', {})
+        if route.get('action') == 'retry_worker' and route.get('tree') == worker.tree:
+            return None
         task = self.function_tasks.current
         if (self.config.function_dispatch and task and task['delivery_scope'] == 'requirement'
                 and len(self.modules.items) > 1 and worker.verdict.task_id == task['id']
@@ -4971,6 +5193,11 @@ class Supervisor:
             return worker
         if worker.failure or worker.interruption:
             return None
+        if (route.get('action') == 'retry_reviewer' and route.get('tree') == worker.tree
+                and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == worker.tree
+                and (not self.config.function_dispatch or self.function_tasks.current
+                     and self.function_tasks.current['id'] == worker.verdict.task_id)):
+            return worker
         rescope = worker.watcher_result.get('scope_replan', {})
         if (rescope.get('pending') and rescope.get('task') == self.function_tasks.current
                 and worker.tree == workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
@@ -5380,6 +5607,11 @@ class Supervisor:
             else:
                 prompt += 'When blocked, continue independent modules before repeating the same dependency. '
             prompt += 'Never modify existing protected test assertions.\n'
+        if role != 'referee' and self._referee_decision:
+            prompt += ('\nReferee scheduling decision: follow these recovery instructions ahead of conflicting '
+                       'worker/reviewer recommendations. Preserve user amendments, original scope, fixed checks '
+                       'and independent final acceptance. This is a scheduling decision, not delivery approval.\n'
+                       + json.dumps(self._referee_decision, ensure_ascii=False))
         if (role == 'worker' and self.config.workflow == 'review-first'
                 and (not read_only or self._verification_only())):
             prompt += (('\nVerification time management: inspect the current assignment without edits; report remaining behavior gaps. '
@@ -5481,7 +5713,7 @@ class Supervisor:
                     prompt_path, self.config.cwd, schema_path,
                     model=model, extra_args=extra_args, read_only=read_only,
                 )
-            if read_only and role == 'reviewer' and self.quality.config.get('review_tools') == 'files_only':
+            if read_only and role in ('reviewer', 'referee') and self.quality.config.get('review_tools') == 'files_only':
                 prepared.argv += ['--tools', 'Read,Glob,Grep', '--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', '{}']
                 # Keep only the model's own authentication; exclude common
                 # deployment/database credentials inherited by the service.
@@ -5494,6 +5726,10 @@ class Supervisor:
             if not read_only and self._worker_isolation:
                 prepared = self._worker_isolation.wrap(prepared, provider.name)
             timeout = self.config.turn_timeout_s
+            if role == 'referee':
+                timeout = min(timeout, referee.DECISION_TIMEOUT_S) if timeout else referee.DECISION_TIMEOUT_S
+            elif self.config.referee and not timeout:
+                timeout = referee.TURN_LIMIT_S
             from auto_moniter.runtime_policy import reserve_seconds
             reserve = reserve_seconds(self.config.max_runtime_s)
             if reserve and role == 'worker':
@@ -5504,7 +5740,8 @@ class Supervisor:
                 timeout = min(timeout, interval) if timeout else interval
             result = run_command(
                 prepared, self.config.cwd, timeout_s=timeout,
-                idle_timeout_s=self.config.idle_timeout_s,
+                idle_timeout_s=(min(self.config.idle_timeout_s, 60) if self.config.idle_timeout_s else 60)
+                               if role == 'referee' else self.config.idle_timeout_s,
                 on_child=on_started, heartbeat=self._heartbeat,
                 heartbeat_note=f"round {index}: {role} running",
                 should_stop=self._should_stop,
@@ -5655,10 +5892,14 @@ class Supervisor:
                 latest = TurnResult(previous_text, stdout=previous_text, exit_code=-1, interruption=self._stop_reason or "runtime budget")
                 break
             elapsed = time.monotonic() - started
-            if self.config.turn_timeout_s and elapsed >= self.config.turn_timeout_s:
+            turn_limit = (referee.DECISION_TIMEOUT_S if role == 'referee' else
+                          self.config.turn_timeout_s or (referee.TURN_LIMIT_S if self.config.referee else 0))
+            if turn_limit and elapsed >= turn_limit:
                 latest = TurnResult("", exit_code=-1, timed_out=True, interruption="turn limit")
                 break
-            if self.config.idle_timeout_s and time.monotonic() - last_activity >= self.config.idle_timeout_s:
+            idle_limit = ((min(self.config.idle_timeout_s, 60) if self.config.idle_timeout_s else 60)
+                          if role == 'referee' else self.config.idle_timeout_s)
+            if idle_limit and time.monotonic() - last_activity >= idle_limit:
                 latest = TurnResult("", exit_code=-1, timed_out=True, interruption="no output")
                 break
             self._beat(f"round {index}: {role} observing Paseo agent {session_id}")

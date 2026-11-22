@@ -67,6 +67,8 @@
             </div>
           </div>
           <button type="button" id="refresh-agents" class="button secondary">重新枚举执行器与模型</button>
+          <label class="check"><input type="checkbox" name="referee">启用裁判，在中断或停滞时安排恢复</label>
+          <label>裁判模型<select name="referee_model"></select><input name="referee_model_custom" hidden maxlength="200" placeholder="自定义模型 ID"><small data-model-note="referee"></small><small>裁判使用独立只读会话，恢复调用计入原任务预算。</small></label>
           <p id="agent-catalog-status" role="status"></p>
             </div>
           </details>

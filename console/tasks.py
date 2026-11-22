@@ -422,6 +422,8 @@ class TaskStore:
                      'verification_mode': meta.get('verification_mode', 'legacy'),
                      'task_type': state.get('task_type', meta.get('task_type', 'code')),
                      'function_dispatch': state.get('function_dispatch', meta.get('function_dispatch', False)),
+                     'referee': state.get('referee', {'enabled': meta.get('referee', False),
+                                                    'model': meta.get('referee_model', ''), 'decision': None}),
                      'function_tasks': state.get('function_tasks', {}) if include_details else {},
                      'delivery_diagnosis': delivery_diagnosis if include_details else {},
                      'workflow':state.get('workflow',meta.get('workflow','legacy')),
@@ -682,6 +684,11 @@ class TaskStore:
             full_function_plan = False
         if type(full_function_plan) is not bool or full_function_plan and not function_dispatch:
             raise TaskError('完整函数计划需要开启逐函数派单')
+        use_referee = data.get('referee', False)
+        referee_model = data.get('referee_model', '')
+        if (type(use_referee) is not bool or not isinstance(referee_model, str)
+                or len(referee_model) > 2000 or '\0' in referee_model):
+            raise TaskError('裁判设置须为开关和有效模型名称')
         if provider not in PROVIDERS or reviewer not in PROVIDERS:
             raise TaskError('请选择支持的执行器和审查器')
         guided = None
@@ -783,6 +790,7 @@ class TaskStore:
                     'cwd': str(cwd), 'provider': provider, 'reviewer': reviewer, 'workflow':workflow, 'task_type':task_type,
                     'function_dispatch': function_dispatch,
                     'full_function_plan': full_function_plan,
+                    'referee': use_referee, 'referee_model': referee_model,
                     **models, **backends,
                     'checks': [c.strip() for c in checks], 'verification_mode': verification_mode, **numbers, **execution,
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
@@ -924,6 +932,9 @@ class TaskStore:
         argv.append('--function-dispatch' if meta.get('function_dispatch') else '--no-function-dispatch')
         if meta.get('full_function_plan'):
             argv.append('--full-function-plan')
+        argv.append('--referee' if meta.get('referee', False) else '--no-referee')
+        if meta.get('referee_model'):
+            argv.append('--referee-model=' + meta['referee_model'])
         if meta.get('acceptance'):
             argv.append('--accept=' + meta['acceptance'])
         # Legacy metadata keeps the old provider boundary; new tasks store an
@@ -1207,6 +1218,15 @@ class TaskStore:
                     arguments = self._resume_args(meta)
                     usage = read_json(run / 'state.json').get('usage', {})
                     additions = data or {}
+                    if 'referee' in additions:
+                        if type(additions['referee']) is not bool:
+                            raise TaskError('裁判开关必须为布尔值')
+                        arguments.append('--referee' if additions['referee'] else '--no-referee')
+                    if 'referee_model' in additions:
+                        value = additions['referee_model']
+                        if not isinstance(value, str) or len(value) > 2000 or '\0' in value:
+                            raise TaskError('裁判模型名称无效')
+                        arguments.append('--referee-model=' + value)
                     for key, flag, used, scale in [
                         ('additional_runtime_minutes', '--max-runtime', float(usage.get('elapsed_s', 0)), 60),
                         ('additional_agent_calls', '--max-agent-calls', int(usage.get('agent_calls', 0)), 1)]:
@@ -1245,8 +1265,8 @@ class TaskStore:
         for path in run.glob('*'):
             if path.is_symlink() or not path.is_file():
                 continue
-            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl',
-                                 'requirements-workspace-change.json', 'assignment-preflight.log'} and not re.fullmatch(r'\d+-(?:(worker|reviewer(?:-repair-\d+|-preflight)?)(-text)?\.(log|md)|check-\d+(?:-attempt-\d+)?\.log)', path.name):
+            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl', 'referee-decisions.json',
+                                 'requirements-workspace-change.json', 'assignment-preflight.log'} and not re.fullmatch(r'\d+-(?:(worker|referee|reviewer(?:-repair-\d+|-preflight)?)(-text)?\.(log|md)|check-\d+(?:-attempt-\d+)?\.log)', path.name):
                 continue
             try:
                 files.append((path.stat().st_mtime, path.name))

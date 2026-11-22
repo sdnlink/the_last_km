@@ -410,6 +410,8 @@
 
 /* Keep current work prominent; technical detail expands independently below. */
 .role-details { align-items:start; gap:18px; }
+.role-details:has(.role-referee) { grid-template-columns:repeat(2,minmax(0,1fr)); }
+@media (max-width:1100px) { .role-details:has(.role-referee) { grid-template-columns:1fr; } }
 .role-card { --role-color:#087d78; --role-soft:#edf7f5; display:flex; flex-direction:column; padding:0; border-radius:14px; background:#fff; overflow:hidden; box-shadow:none; }
 .role-card.role-reviewer { --role-color:#5d70bd; --role-soft:#f0f2fc; }
 .role-card.role-watcher { --role-color:#a47636; --role-soft:#faf5ec; }

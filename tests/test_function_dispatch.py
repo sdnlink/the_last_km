@@ -68,6 +68,78 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_reviewer_authored_test_is_run_again_after_function_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_file = 'test_parse_input.py'
+            test_code = (
+                'import unittest\nfrom app import parse_input\n\n'
+                'class TestParseInput(unittest.TestCase):\n'
+                '    def test_approved_behavior(self):\n        self.assertEqual(parse_input(), 42)\n'
+            )
+            assignment = {**task('F1', 'app.py'), 'test_files': [test_file],
+                          'review_test': {'path': test_file, 'source': test_code}}
+            worker = FunctionWorker('worker', [
+                {**result('F1', 'done'), 'source': 'def parse_input(): return 0\n'},
+                {**result('F1', 'done'), 'touch': 'app.py'},
+            ])
+            defect = 'main/parse_input() returned 0 instead of 42 in the reviewer test'
+            approved = result('F1', 'accepted')
+            approved['verdict']['issue_resolutions'] = [{'id': 'AUD-1', 'summary': 'Verified against the original test',
+                                                          'evidence': ['check:002-check-02.log']}]
+            reviewer = ScriptedProvider('reviewer', [
+                plan(assignment), result('F1', 'changes_required', gaps=[defect]), approved,
+            ])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=2, review_every=1)
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            self.assertEqual((root / test_file).read_text(), test_code)
+            self.assertIn(defect, worker.calls[1]['prompt'])
+            receipts = [record.watcher_result['candidate_checks'] for record in report.records if record.role == 'worker']
+            self.assertEqual([receipt['checks'][1]['status'] for receipt in receipts], ['check_failed', 'passed'])
+            state = json.loads((root / 'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['accepted'][0]['task']['id'], 'F1')
+
+    def test_worker_cannot_replace_reviewer_authored_assertions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_file = 'test_parse_input.py'
+            assignment = {**task('F1', 'app.py'), 'test_files': [test_file],
+                          'review_test': {'path': test_file, 'source': 'assert False\n'}}
+            worker = FunctionWorker('worker', [{**result('F1', 'done'),
+                'writes': {'app.py': 'def parse_input(): return 42\n', test_file: 'assert True\n'}}])
+            reviewer = ScriptedProvider('reviewer', [
+                plan(assignment), result('F1', 'changes_required', gaps=['Original test was changed']),
+            ])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=1, review_every=1)
+            candidate = next(record for record in report.records if record.role == 'worker')
+            receipt = candidate.watcher_result['candidate_checks']
+            self.assertFalse(receipt['passed'])
+            self.assertFalse(receipt['checks'])
+            self.assertIn(test_file, receipt['scope_gaps'][0])
+            state = json.loads((root / 'run/state.json').read_text())
+            self.assertFalse(state['function_tasks']['accepted'])
+
+    def test_unchanged_function_failure_does_not_repeat_independent_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_file = 'test_parse_input.py'
+            source = ('import unittest\nfrom app import parse_input\n'
+                      'class TestBehavior(unittest.TestCase):\n'
+                      '    def test_result(self): self.assertEqual(parse_input(), 42)\n')
+            assignment = {**task('F1', 'app.py'), 'test_files': [test_file],
+                          'review_test': {'path': test_file, 'source': source}}
+            worker = FunctionWorker('worker', [
+                {**result('F1', 'done'), 'source': 'def parse_input(): return 0\n'},
+                result('F1', 'done'),
+            ])
+            reviewer = ScriptedProvider('reviewer', [plan(assignment),
+                result('F1', 'changes_required', gaps=['main/parse_input() returned 0 instead of 42'])])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=3, review_every=1)
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('same reviewer-authored test', report.summary)
+            self.assertEqual((len(worker.calls), len(reviewer.calls)), (2, 2))
+            self.assertEqual((root / test_file).read_text(), source)
+
     def test_approved_manifest_candidate_is_committed_without_a_second_evidence_check(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -407,7 +479,7 @@ class DispatchTests(unittest.TestCase):
                 response['function_plan'] = [assignment]
                 return {'verdict': {}, 'text': json.dumps(response)}
             reviewer=ScriptedProvider('reviewer',[complete_plan(verification_task()), missing_assignment,
-                rejected, complete_plan(implementation), accepted])
+                rejected, accepted])
             report=self.run_monitor(root,worker,reviewer,max_rounds=2,review_every=1,full_function_plan=True)
             self.assertEqual(report.status,'done',report.summary)
             self.assertEqual([call['read_only'] for call in worker.calls],[True,False])
@@ -415,7 +487,7 @@ class DispatchTests(unittest.TestCase):
             self.assertTrue(worker.calls[1]['prompt'].startswith('Continue the authorized task now'))
             self.assertIn('complete independent work within the current scope', worker.calls[1]['prompt'])
             self.assertIn('Respect tool permissions and safety requirements', worker.calls[1]['prompt'])
-            self.assertEqual(len(reviewer.calls),5)
+            self.assertEqual(len(reviewer.calls),4)
             self.assertIn('For an accepted result, use this exact next_task or null',reviewer.calls[1]['prompt'])
             self.assertIn('Provide a bounded implementation next_task',reviewer.calls[2]['prompt'])
             ledger=json.loads((root/'run/state.json').read_text())['function_tasks']

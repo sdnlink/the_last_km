@@ -247,6 +247,7 @@ class Supervisor:
         self._function_gate = self.config.function_dispatch
         self._function_baseline = None
         self._passed_function_checks = {}
+        self._local_check_receipt = None
         self._local_test_paths = []
         self._dispatch_directions = []
         self._function_issue_ids = []
@@ -640,7 +641,10 @@ class Supervisor:
                 before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir) if track_files else {}
                 if self._function_gate:
                     try:
-                        self._prepare_function_baseline(before_files)
+                        baseline = self._prepare_function_baseline(before_files)
+                        if self.function_tasks.current.get('review_test'):
+                            function_gate.materialize_review_test(self.config.cwd, self.function_tasks.current, baseline)
+                            before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
                     except (OSError, ValueError) as exc:
                         return self._finish('action_required', 'Function scope could not be initialized: ' + str(exc), records, last_worker)
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
@@ -963,6 +967,14 @@ class Supervisor:
                         'Acceptance commands changed workspace source content; submitted candidate is stale. '
                         'Inspect the check logs before resuming.', records, verdict)
                 check_failure, scope_gaps = self._review_check_results(record)
+                repeated = self._repeated_reviewer_test_failure(record)
+                if repeated:
+                    record.watcher_result['repeated_review_test'] = repeated
+                    self._event('reviewer_test_failure_repeated', round=round_index, **repeated)
+                    return self._finish('action_required',
+                        'The unchanged implementation still fails the same reviewer-authored test. '
+                        'Candidate and review preserved. Inspect ' + repeated['log'] + ' before resuming.',
+                        records, verdict)
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             self._process_control()
             if self._stop:
@@ -1163,6 +1175,17 @@ class Supervisor:
                         staged.current = None
                         staged.assign(review.next_task, self.modules.items)
                         self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+                        if self.config.full_function_plan and self._complete_function_plan_ready():
+                            remaining = function_plan.waiting(self.function_plan, staged)
+                            if staged.current['delivery_scope'] == 'requirement':
+                                remaining = [item for item in remaining if item['id'] != previous_id]
+                            try:
+                                self.function_plan = self._validate_complete_function_plan(
+                                    [staged.current, *remaining], staged, self.modules.items, self.requirements_review)
+                            except ValueError as exc:
+                                self._planning_rejection = {'task_id': staged.current['id'], 'reason': str(exc)[:2000]}
+                            else:
+                                self._planning_rejection = None
                         self.function_tasks = staged
                         self._dispatch_directions = list(self._direction_ids['reviewer'])
                         self._record_assignment(staged.current)
@@ -1371,6 +1394,12 @@ class Supervisor:
         before = self._business_input.get('after') or history.business_updates[0]['before']
         current = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
         baseline = update_baseline(history, self.quality, before, current)
+        if self._function_gate and baseline != self._baseline_files:
+            scope = function_gate.reconcile_protected_baseline(
+                self.run_dir / 'function-baseline.json.gz', self.config.cwd, self.function_tasks.current,
+                self._baseline_files, baseline)
+            if scope is not None:
+                self._function_baseline = scope
         self._baseline_saved &= baseline == self._baseline_files
         self._baseline_files = baseline
         self.quality.baseline = baseline
@@ -1684,8 +1713,8 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
-        elif dispatch.current.get('kind') in ('integration','verification'):
-            raise ValueError('Integration and verification assignments require the verified function gate')
+        elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
+            raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
         complete = (self._validate_complete_function_plan(backlog, dispatch, staged.items, brief)
                     if self.config.full_function_plan else None)
         return staged, dispatch, complete
@@ -2134,15 +2163,11 @@ class Supervisor:
                 if record.role == 'reviewer':
                     data['audit_issues'] = self.audit.export()
                 return data
-            problem = ((self.active_queued_requirement or {}).get('text')
-                       or self.requirements_review.get('refined_requirement') or self.config.requirement)
             receipt = worker.watcher_result.get('candidate_checks') if self._uses_candidate_checks(worker) else None
-            previous_requirement_round = self.requirement_cycles[-1]['handoff']['round'] if self.requirement_cycles else 0
             try:
                 worker.git_checkpoint, reviewer.git_checkpoint = publish(
                     self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text,
-                    boundary=lambda: self._publication_boundary(reviewer), problem=problem, receipt=receipt,
-                    previous_requirement_round=previous_requirement_round)
+                    boundary=lambda: self._publication_boundary(reviewer), receipt=receipt)
             except PublicationRefused:
                 return False
             except BusinessHeadChanged:
@@ -2336,7 +2361,8 @@ class Supervisor:
         findings, references = self.audit.local_findings(_audit_findings(review))
         open_before = {item["id"] for item in self.audit.pending()}
         reported, closed = self.audit.update(findings, review.issue_resolutions, index, tree, modules,
-                                            self._audit_evidence_guard(record, tree), known_modules=self.modules.items)
+                                            self._audit_evidence_guard(record, tree), known_modules=self.modules.items,
+                                            check_paths=lambda item, evidence: self._audit_check_paths(record, item, evidence))
         if references:
             for reference in references:
                 reference['local_ids'] = [item['id'] for item in self.audit.items if item['summary'] == reference['finding']]
@@ -2351,6 +2377,29 @@ class Supervisor:
                 self._progress_reset |= any([self.quality.milestone('audit:' + ident) for ident in closed])
         return {'status': 'applied', 'reported': reported, 'closed': closed, 'reasons': [],
                 'issues': {item['id']: item['status'] for item in self.audit.items}}
+
+    def _audit_check_paths(self, record, item, evidence):
+        from auto_moniter.local_tests import command
+
+        cited_logs = {value.removeprefix('check:') for value in evidence if value.startswith('check:')}
+        task = self.function_tasks.current
+        if (not cited_logs or not record or not self._function_gate or not task
+                or item['module_ids'] != [task['module_id']]
+                or not self.modules.impact_files(task['module_id'])):
+            return []
+        receipt = record.watcher_result['candidate_checks']  # The evidence guard checked the receipt and logs.
+        if receipt['context']['task'] != task:
+            return []
+        try:
+            tests = {command(self.config.cwd, name): name for name in task.get('test_files', [])}
+        except (OSError, ValueError):
+            return []
+        sources = {check['log']: tests.get(check['command']) for check in receipt['checks']}
+        paths = [sources.get(name) for name in cited_logs]
+        if not all(paths):
+            return []
+        paths = sorted({Path(name).as_posix() for name in [*paths, *function_tasks.writable_files(task)]})
+        return paths if all(len(name.encode()) <= 1024 for name in paths) else []
 
     def _checkpoint(self, record: RoundRecord, raw: str, before: str) -> None:
         data = RunReport('', 0, '', '', [record]).to_dict()['records'][0]
@@ -2927,6 +2976,8 @@ class Supervisor:
         snapshot = {'checks':[]}
         passed = False
         scope_gaps = []
+        local_keys = self._local_check_keys(context)
+        reusable = self._reusable_local_checks(context, local_keys)
         # Early precondition failures may return without executing a command.
         # Never attach the preceding attempt's snapshot to this new receipt.
         self._write_acceptance_snapshot(record.index, record.tree, context['final'], [], [], True, False)
@@ -2939,7 +2990,7 @@ class Supervisor:
             else:
                 passed = self._delivery_checks(record.index, verdict, final=context['final'],
                     expected_tree=record.tree, module_ids=set(context['module_ids']),
-                    function_commands=context['commands'], pre_review=True)
+                    function_commands=context['commands'], pre_review=True, reusable=reusable)
         finally:
             # Budget and stop exceptions still keep the checks captured so far.
             path = self.run_dir/'acceptance-results.json'
@@ -2953,6 +3004,9 @@ class Supervisor:
             receipt['failures'] = list(verdict.gaps[len(record.verdict.gaps):])
             receipt['digest'] = candidate_checks.digest({key:value for key,value in receipt.items() if key!='digest'})
             record.watcher_result['candidate_checks'] = receipt
+            if (local_keys and passed and candidate_checks.valid(receipt, self.run_dir, context)
+                    and local_keys == self._local_check_keys(context)):
+                self._local_check_receipt = (receipt, local_keys)
             if self.config.function_dispatch and self.function_tasks.current:
                 from auto_moniter.experience import Experience
                 try:
@@ -2963,6 +3017,91 @@ class Supervisor:
                     self.log('Project experience update deferred: ' + redact(str(exc)))
             self._write_state(self._records, 'running', 0, '', record.tree)
         self._event('candidate_checks_completed', round=record.index, tree=record.tree, passed=passed)
+
+    def _local_check_keys(self, context):
+        task = context['task']
+        if (not self._function_gate or self.config.task_type != 'code' or context['final']
+                or not task or task.get('kind') not in (None, 'verification')):
+            return {}
+        from auto_moniter.local_tests import reuse_key
+        return {command: key for command in context['commands']
+                if command not in self.config.checks and (key := reuse_key(self.config.cwd, command)) is not None}
+
+    def _reusable_local_checks(self, context, keys):
+        if not keys or self._local_check_receipt is None:
+            return {}
+        receipt, previous_keys = self._local_check_receipt
+        previous = receipt['context']
+        scope_fields = {'round', 'task', 'commands', 'module_ids'}
+        execution = {key: value for key, value in previous.items() if key not in scope_fields}
+        if (execution != {key: value for key, value in context.items() if key not in scope_fields}
+                or not candidate_checks.valid(receipt, self.run_dir, previous)):
+            return {}
+        return {command: (result, receipt['logs'][result['log']], keys[command])
+                for command, result in zip(previous['commands'], receipt['checks'])
+                if command in keys and keys[command] == previous_keys.get(command)}
+
+    def _reuse_local_check(self, index, number, command, saved, tree, results):
+        if saved is None:
+            return False
+        from auto_moniter.local_tests import reuse_key
+
+        result, digest, key = saved
+        if reuse_key(self.config.cwd, command) != key:
+            return False
+        original = self.run_dir / result['log']
+        try:
+            if original.is_symlink():
+                return False
+            content = original.read_bytes()
+        except OSError:
+            return False
+        if hashlib.sha256(content).hexdigest() != digest:
+            return False
+        target = self.run_dir / f"{index:03d}-check-{number:02d}.log"
+        if target.is_symlink():
+            return False
+        target.write_bytes(content)
+        results.append({**result, 'log': target.name, 'reused_from': result.get('reused_from', original.name)})
+        self._passed_function_checks[command] = target.name
+        self._event('local_check_reused', round=index, tree=tree, log=target.name, source=original.name)
+        return True
+
+    def _repeated_reviewer_test_failure(self, record):
+        task = self.function_tasks.current
+        if not task or not task.get('review_test') or self._pending_directions():
+            return None
+        from auto_moniter.local_tests import command
+
+        receipt = record.watcher_result['candidate_checks']
+        context = self._candidate_check_context(record)
+        check_command = command(self.config.cwd, task['review_test']['path'])
+        if (not check_command or not candidate_checks.valid(receipt, self.run_dir, context)
+                or not receipt['complete'] or receipt['source_changed']):
+            return None
+        logged_command = redact(check_command)
+        signature = candidate_checks.assertion_signature(receipt, self.run_dir, logged_command)
+        if signature is None:
+            return None
+        previous = next((item for item in reversed(self._records)
+                         if item.role == 'worker' and item.index < record.index), None)
+        if not previous or previous.verdict.task_id != task['id'] or previous.tree != record.tree:
+            return None
+        review = next((item for item in reversed(self._records)
+                       if item.role == 'reviewer' and item.index == previous.index), None)
+        if (not review or review.failure or review.interruption or review.verdict.parse_error
+                or review.verdict.task_status != 'changes_required'):
+            return None
+        old = previous.watcher_result.get('candidate_checks')
+        if not candidate_checks.valid(old, self.run_dir, {**context, 'round': previous.index}):
+            return None
+        if (not old['complete'] or old['source_changed']
+                or candidate_checks.assertion_signature(old, self.run_dir, logged_command) != signature
+                or [item['status'] for item in old['checks']] != [item['status'] for item in receipt['checks']]):
+            return None
+        failure = next(item for item in receipt['checks'] if item['command'] == logged_command)
+        return {'task_id': task['id'], 'test': task['review_test']['path'], 'previous_round': previous.index,
+                'log': failure['log'], 'tree': record.tree}
 
     def _review_check_results(self, record):
         """Load the check stage's result once, before handing the candidate to the reviewer."""
@@ -3016,7 +3155,7 @@ class Supervisor:
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
-                         pre_review=False) -> bool:
+                         pre_review=False, reusable=None) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
         if final and self.config.task_type == 'deployment':
             try:
@@ -3106,6 +3245,10 @@ class Supervisor:
                     verdict.gaps.extend(failures)
                     raise budget_stop
                 return False
+            if reusable and self._reuse_local_check(index, number, command, reusable.get(command), before, check_results):
+                self._progress_reset |= self.quality.check_result(command, True)
+                self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
+                continue
             self._beat(f"round {index}: acceptance check {number}")
             completed = False
             live_check = LiveOutput(self.run_dir, 'check', index, '验收检查')
@@ -3246,7 +3389,9 @@ class Supervisor:
 
     def _writable_function_tests(self, task):
         protected = self.quality.protected(self.config.cwd)
-        return [name for name in task.get('test_files', []) if str(self.config.cwd / name) not in protected]
+        authored = (task.get('review_test') or {}).get('path')
+        return [name for name in task.get('test_files', [])
+                if name != authored and str(self.config.cwd / name) not in protected]
 
     def _function_test_scope(self, task):
         return ('Watcher scope for this assignment. Editable focused tests: '
@@ -3301,7 +3446,11 @@ class Supervisor:
                 'Existing tests and test configuration remain protected. Do not list directories, patterns or unrelated files. '
                 'A scope_repair rejection authorizes reviewer-only correction of edit_files for the SAME unfinished task, '
                 'preserving its ID, primary function, tests, criteria and dependencies; do not redo the implementation. '
-                'You own acceptance design: specify positive, negative and boundary assertions for the worker. '
+                'You own acceptance design. For new implementation, supply review_test={path,source} when a local '
+                'runner can exercise the assigned function or its public entry point. Put that new path in test_files '
+                'and write executable assertions for normal, invalid and boundary inputs tied to the listed criteria. '
+                'Use review_test=null when no such runnable case applies. Keep existing review_test unchanged on retry. '
+                'Watcher stages the exact test source for the Worker and binds it to the assignment. '
                 'Watcher automatically derives and executes local tests declared in test_files, even if not selected. '
                 'Supported: Python unittest test_*.py or *_test.py; Node *.js/*.cjs/*.mjs; '
                 'Rust Cargo package tests/name.rs or tests/name/main.rs with an existing Cargo.toml; '
@@ -3309,8 +3458,8 @@ class Supervisor:
                 'Use auto:N in check_ids for the Nth test_files entry (one-based); no shell commands or test installation. '
                 'For verification-only delivery with test_files=[], select regression:N from previously accepted tests. '
                 'Current test files become eligible for regression:N only after this assignment is accepted. '
-                'These local tests need no manually supplied check command. The worker must implement real assertions, '
-                'show failure before the fix and success after; reviewer independently checks the behavior and test relevance. '
+                'These local tests need no manually supplied check command. The worker implements the feature against '
+                'the reviewer-authored test and can provide additional focused regressions within its scope. '
                 'Watcher rejects missing, empty or entirely skipped test suites and reruns accepted regressions at delivery. '
                 'Select behavioral checks relevant to the target; git diff --check alone is insufficient. '
                 'Missing native tools are verification limitations, not a request for the person to invent check IDs. '
@@ -3690,8 +3839,8 @@ class Supervisor:
                 else:
                     self._planning_rejection = None
             else:
-                if isinstance(candidate, dict) and candidate.get('kind') in ('integration','verification'):
-                    raise ValueError('Integration and verification assignments require the verified function gate')
+                if candidate.get('kind') in ('integration','verification') or candidate.get('review_test'):
+                    raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
                 staged.assign(candidate, self.modules.items)
         return staged
 
@@ -4504,14 +4653,23 @@ class Supervisor:
         candidate = next((record for record in reversed(self._records)
                           if record.role=='worker' and record.index==index),None)
         receipt = candidate.watcher_result.get('candidate_checks') if candidate else None
+        task = self.function_tasks.current
+        focused = bool(task and task.get('review_test') and task['delivery_scope'] == 'function')
+        audit_scope = None
+        if focused:
+            audit_scope = {task['module_id'], *(key.split(':', 1)[0] for key in task['criterion_ids'])}
+            if last_review and last_review.task_id != task['id']:
+                last_review = None
         return "\n".join(
             [
                 *([deployment.instructions(
                     'reviewer', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
                 *([documentation_tasks.instructions('reviewer')] if self.config.task_type == 'documentation' else []),
                 *(['Fixed checks executed BEFORE this review for the exact submitted candidate:',
-                   json.dumps(safe(receipt),ensure_ascii=False),
-                   'Read the saved check logs and assess the requirement, implementation and observed failures in this review. '
+                   json.dumps(safe(candidate_checks.review_summary(receipt)), ensure_ascii=False),
+                   'Each log starts with the executed command. Inspect failed or relevant logs as needed, '
+                   'and use the worker round in state.json for the complete receipt. '
+                   'Assess the requirement, implementation and observed failures in this review. '
                    'Do not request another identical worker submission or another semantic review of unchanged work. '
                    'For a concrete defect within this assignment, return changes_required with the minimal repair boundary. '
                    'For failures outside this assignment, identify their scope explicitly; do not invent permission to edit '
@@ -4531,8 +4689,10 @@ class Supervisor:
                  if self._verification_only() else "The worker alone implements fixes and runs builds or tests that write files. ")+
                 "Inspect code and existing evidence; the watcher runs approved acceptance checks. "
                 "Do not run commands that generate files or alter the workspace.",
-                "Inspect the working tree yourself. Do not trust the worker's summary.",
-                "Recheck previously reported audit gaps and failed monitor checks against the current code and evidence. "
+                "Start from the assigned criterion, observable interface behavior and actual check results. "
+                "Inspect implementation only as needed to validate wiring, edge cases or a reproducible failure.",
+                ("Recheck audit gaps that the submitted change affects and inspect failed monitor checks. "
+                 if focused else "Recheck previously reported audit gaps and failed monitor checks against the current code and evidence. ") +
                 "Do not drop an unresolved issue because the worker restarted or claimed it was fixed. "
                 "The previous conclusion is context, not proof; judge it independently. "
                 "Previously accepted module milestones do not imply completion of pending modules.",
@@ -4599,10 +4759,10 @@ class Supervisor:
                 json.dumps(last_review.to_dict(), ensure_ascii=False, indent=2) if last_review else "(no previous review)",
                 "",
                 "Last completed business audit (retained across reviewer failures):",
-                self._audit_context(last_review),
+                '(See the current assignment and its audit issues below.)' if focused else self._audit_context(last_review),
                 "",
                 "Open audit issues (must not disappear by omission):",
-                json.dumps(self.audit.prompt(), ensure_ascii=False),
+                json.dumps(self.audit.prompt(audit_scope), ensure_ascii=False),
                 "AUD IDs belong only to THIS run's ledger above. IDs quoted in predecessor tasks, documents, "
                 "requirements or transcripts are historical references, not current issue identifiers. "
                 "Report newly found or inherited defects as plain findings prefixed by their current module ID. "
@@ -4622,8 +4782,10 @@ class Supervisor:
                 "",
                 "Accepted module milestones:",
                 self._module_progress(),
-                "Monitor module ledger (check every pending module and its acceptance criteria):",
-                json.dumps(self.modules.export(), ensure_ascii=False),
+                ("Monitor module ledger for the assigned criteria:" if focused else
+                 "Monitor module ledger (check every pending module and its acceptance criteria):"),
+                json.dumps([item for item in self.modules.export() if audit_scope is None or item['id'] in audit_scope],
+                           ensure_ascii=False),
                 "",
                 "Workspace snapshot:",
                 workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir),
@@ -5132,7 +5294,8 @@ class Supervisor:
                        +json.dumps(remaining[0] if remaining else None,ensure_ascii=False)
                        +'\nFor an accepted result, use this exact next_task or null. '
                         'For rejected verification with a runnable code repair, give the bounded implementation '
-                        'next_task described above. The watcher requests a revised complete plan for that repair.\n')
+                        'next_task described above. The watcher inserts a valid repair into the existing plan and '
+                        'keeps the pending verification unless the repair delivers the entire requirement.\n')
         if self.project:
             task_boundary = ('Only edit the declared file or directory scope. ' if self.project.scope else
                              'Develop according to the task requirement in this task branch and working copy; '

@@ -53,10 +53,14 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
                 worker = FunctionWorker('worker', [
                     result('VERIFY', 'incomplete', gaps=['Incorrect return value']),
                     {**result('REPAIR', 'done'), 'touch': 'app.py'}, verify])
-                reviewer = ScriptedProvider('reviewer', [plan(verification), rejected, approval, deliver])
+                planning = plan(verification)
+                full_plan = json.loads(planning['text'])
+                full_plan['function_plan'] = [verification]
+                planning['text'] = json.dumps(full_plan)
+                reviewer = ScriptedProvider('reviewer', [planning, rejected, approval, deliver])
                 monitor = Supervisor(RunConfig('Verify the return value', root, worker, reviewer=reviewer,
                     workflow='review-first', function_dispatch=True, git_history='off', run_dir=root/'run',
-                    checks=[CHECK], review_every=1, retry_delay_s=0), log=lambda _: None)
+                    checks=[CHECK], review_every=1, retry_delay_s=0, full_function_plan=True), log=lambda _: None)
                 if mode != 'continuous':
                     on_event = monitor._event
 
@@ -85,6 +89,7 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
                     continue
                 self.assertEqual(report.status, 'done', report.summary)
                 self.assertEqual([c['read_only'] for c in worker.calls], [True, False, True])
+                self.assertEqual(len(reviewer.calls), 4)
                 self.assertEqual([item['task']['id'] for item in monitor.function_tasks.accepted], ['REPAIR', 'VERIFY'])
 
     def test_amended_next_assignment_starts_worker_with_a_fresh_baseline(self):

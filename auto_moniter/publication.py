@@ -11,6 +11,8 @@ from auto_moniter.redaction import redact
 from auto_moniter.storage import write_json
 from auto_moniter.workspace import _ignored
 
+BUSINESS_MESSAGE_LIMIT = 500
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -207,26 +209,18 @@ def check_unborn_staging(history):
 def _reviewed_checks(receipt, index):
     """Describe the receipt supplied after Watcher's candidate and approval gates."""
     if not receipt:
-        return ['Check receipt unavailable.']
-    commands = receipt['context']['commands']
-    if not commands:
-        return ['No checks configured for this candidate.']
-
+        return 'Check receipt unavailable.'
+    count = len(receipt['context']['commands'])
+    if not count:
+        return 'No fixed checks configured.'
+    passed = sum(check.get('status') == 'passed' for check in receipt['checks'])
+    summary = f'Checks: {passed}/{count} passed.'
     if 'reused_from' in receipt:
         reused = receipt['reused_from']
         source = reused.get('round') if isinstance(reused, dict) else None
-        origin = (f'Reused from round {source}.' if type(source) is int and 0 < source < index
-                  else 'Reused checks. Source round unavailable.')
-    else:
-        origin = f'Executed for round {index}.'
-    results = [origin]
-    for command, check in zip(commands, receipt['checks']):
-        details = check.get('status') or 'Result detail unavailable'
-        if type(check.get('exit_code')) is int:
-            details += f' (exit {check["exit_code"]})'
-        command = redact(command).replace('\n', r'\n').replace('\r', r'\r')
-        results.append(f'- {command} — {details}')
-    return results
+        summary += (f' Reused from round {source}.' if type(source) is int and 0 < source < index
+                    else ' Reused checks.')
+    return summary
 
 
 def _portable_commit_text(text, cwd=None):
@@ -265,8 +259,7 @@ def _portable_commit_text(text, cwd=None):
     return tokens.sub(display, redact(text))
 
 
-def _business_commit_message(index, previous_round, worker, reviewer, changed, problem, receipt,
-                             *, previous_requirement_round=0, cwd=None):
+def _business_commit_message(index, worker, reviewer, changed, receipt, *, cwd=None):
     task = (receipt or {}).get('context', {}).get('task') or {}
     if reviewer.get('task_status') == 'accepted' and task.get('delivery_scope') == 'function':
         scope = 'function'
@@ -276,52 +269,42 @@ def _business_commit_message(index, previous_round, worker, reviewer, changed, p
         scope = 'module'
     else:
         scope = 'scope unavailable'
-    modules = sorted(set(worker.get('module_ids', [])) & set(reviewer.get('module_ids', [])))
-    if scope == 'function' and task.get('module_id'):
-        modules = [task['module_id']]
+    def excerpt(text, limit):
+        return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
-    changes = worker.get('done', [])
-    subject = ''
-    for text in [worker.get('summary', ''), *changes]:
-        text = _portable_commit_text(text, cwd).strip()
+    lines = []
+    seen = set()
+    for text in [worker.get('summary', ''), *worker.get('done', [])]:
+        text = _portable_commit_text(text, cwd).replace('\0', '').strip()
         if not text:
             continue
         line = ' '.join(text.splitlines()[0].split())
+        line = re.split(r'(?<=[。！？])|(?<=[.!?])\s+', line, maxsplit=1)[0]
         normalized = line.casefold().rstrip('.。')
-        if (normalized in {'done', 'complete', 'completed', 'worker', '已完成', '完成'}
+        if (not normalized or normalized in seen
+                or normalized in {'done', 'complete', 'completed', 'worker', '已完成', '完成'}
                 or re.fullmatch(r'implement reviewed task round [0-9]+', normalized)):
             continue
-        subject = line
-        break
-    paths = ', '.join(os.fsdecode(path) for path in sorted(changed))
-    subject = subject or 'Update ' + ' '.join(redact(paths).split())
-    if len(subject) > 100:
-        subject = subject[:99].rstrip() + '…'
+        lines.append(line)
+        seen.add(normalized)
+        if len(lines) == 3:
+            break
 
-    # Reconfirmation updates the closure round and tree. Require a finding
-    # reported in this requirement cycle, within the approved module scope.
-    module_ids = set(modules)
-    issues = [item for item in reviewer.get('audit_issues', {}).get('items', [])
-              if item['status'] == 'resolved' and previous_round < item['resolved_round'] <= index
-              and item['last_seen_round'] > previous_requirement_round
-              and item['tree'] == reviewer.get('tree')
-              and (not item['module_ids'] or module_ids.intersection(item['module_ids']))]
-    parts = [subject, '', 'Problem', problem or 'No separate problem description recorded for this delivery.']
-    parts.extend(f'- {item["id"]} — {item["summary"]}' for item in issues)
-    parts.extend(['', 'Behavior change', *[f'- {change}' for change in (changes or [subject])],
-                  f'Changed paths: {paths}', '', 'Independent review',
-                  f'Approved ({scope}) in round {index}.'])
-    if modules:
-        parts.append('Modules: ' + ', '.join(modules))
-    if reviewer.get('summary'):
-        parts.append(reviewer['summary'])
-    parts.extend(f'- {item["id"]} resolved — {item["resolution"]["summary"]}' for item in issues)
-    parts.extend(['', 'Pre-review checks', *_reviewed_checks(receipt, index)])
-    return _portable_commit_text('\n'.join(parts), cwd).replace('\0', '').encode('utf-8', errors='replace') + b'\n'
+    if not lines:
+        paths = ', '.join(os.fsdecode(path) for path in sorted(changed)[:3])
+        lines.append('Update ' + ' '.join(_portable_commit_text(paths, cwd).split()))
+    subject = excerpt(lines[0], 100)
+    outcome = f'Approved ({scope}) in round {index}. ' + _reviewed_checks(receipt, index)
+    sections = [subject]
+    if len(lines) > 1:
+        # Count the blank-line separators and the trailing newline in Git.
+        sections.append(excerpt('\n'.join(f'- {line}' for line in lines[1:]),
+                                BUSINESS_MESSAGE_LIMIT - len(subject) - len(outcome) - 5))
+    sections.append(outcome)
+    return ('\n\n'.join(sections) + '\n').encode('utf-8', errors='replace')
 
 
-def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text, boundary=None, *,
-            problem='', receipt=None, previous_requirement_round=0):
+def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_text, boundary=None, *, receipt=None):
     history.verify()
     previous = history.last_business_commit
     if (previous.get('round') == index and previous.get('candidate_tree') == history.candidate['commit']
@@ -378,9 +361,7 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
                 raise PublicationRefused('Publication refused during preparation: watcher stop or budget is active')
             commit = parent
             if code_tree != parent_tree:
-                message = _business_commit_message(
-                    index, previous.get('round', 0), worker_data, reviewer_data, changed, problem, receipt,
-                    previous_requirement_round=previous_requirement_round, cwd=history.cwd)
+                message = _business_commit_message(index, worker_data, reviewer_data, changed, receipt, cwd=history.cwd)
                 commit = history.git('commit-tree', code_tree, *(['-p', parent] if parent else []),
                                      data=message).decode().strip()
             business = {'ref': before_business['ref'], 'commit': commit, 'parent': parent,

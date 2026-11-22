@@ -182,6 +182,8 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
         issue_resolutions=data.get("issue_resolutions", []),
         task_id=data.get("task_id", ""), task_status=data.get("task_status", ""), next_task=data.get("next_task"),
     )
+    if isinstance(verdict.next_task, dict) and "review_test" in verdict.next_task and verdict.next_task["review_test"] is None:
+        verdict.next_task = {key: value for key, value in verdict.next_task.items() if key != "review_test"}
     # Older conclusions may omit the closure array. They cannot close any issue.
     invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data and name != "issue_resolutions"]
     if function_gate:

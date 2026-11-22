@@ -64,6 +64,10 @@ class CandidateHandoffTests(unittest.TestCase):
             self.assertTrue(snapshot['complete'])
             self.assertIn('checks executed BEFORE this review',prompt)
             self.assertIn('"status": "passed"',prompt)
+            receipt = prompt.split('exact submitted candidate:\n', 1)[1].splitlines()[0]
+            self.assertEqual(json.loads(receipt)['checks'][0]['log'], snapshot['checks'][0]['log'])
+            self.assertNotIn('configured_checks', receipt)
+            self.assertNotIn('command', json.loads(receipt)['checks'][0])
             inspected.append(int(self.counter.read_text()))
         final=final_task('F2','next.py',depends=['F1'])
         worker=FunctionWorker('worker',[{**result('F1','done'),'touch':'app.py'},

@@ -48,11 +48,11 @@ class BusinessCommitMessageTests(unittest.TestCase):
         message = follow_up._git(self.root, 'log', '-1', '--format=%s%n%b')
         subject, body = message.split('\n', 1)
         self.assertEqual(subject, title)
-        for expected in [change, finding, 'AUD-1', resolution, conclusion, 'Approved (requirement)',
-                         'Executed for round 2', *[command + ' — passed (exit 0)' for command in commands]]:
+        for expected in [change, 'Approved (requirement) in round 2.', 'Checks: 2/2 passed.']:
             with self.subTest(expected=expected):
                 self.assertIn(expected, body)
-        self.assertLess(body.index(commands[0]), body.index(commands[1]))
+        for excluded in [finding, resolution, conclusion, *commands]:
+            self.assertNotIn(excluded, body)
         self.assertEqual(follow_up._git(self.root, 'rev-list', '--count', 'HEAD'), '2')
         self.assertTrue(reviewer.calls[-1]['read_only'])
 
@@ -101,10 +101,9 @@ class BusinessCommitMessageTests(unittest.TestCase):
         subject, body = follow_up._git(self.root, 'log', '-1', '--format=%s%n%b').split('\n', 1)
         with self.subTest(field='subject'):
             self.assertEqual(subject, change)
-        for expected in [problem, change, f'Approved ({scope})', 'Approved the follow-up marker.',
-                         'Modules: main', 'AUD-2', new_finding, new_resolution]:
-            self.assertIn(expected, body)
-        for excluded in ['AUD-1', old_finding, old_resolution, 'Implement reviewed task round 53']:
+        self.assertIn(f'Approved ({scope}) in round 4.', body)
+        for excluded in [problem, change, old_finding, new_finding, old_resolution, new_resolution,
+                         'Implement reviewed task round 53']:
             with self.subTest(excluded=excluded):
                 self.assertNotIn(excluded, body)
         state = json.loads((self.root / 'run' / 'state.json').read_text())
@@ -155,8 +154,7 @@ class BusinessCommitMessageTests(unittest.TestCase):
         self.assertEqual(prior['count'], '2')
         self.assertEqual(self.git('log', '-1', '--format=%s%n%b', 'refs/heads/main'), prior['message'])
         self.assertTrue(prior['message'].startswith('Write completion marker\n'))
-        self.assertIn('Approved (module) in round 1.\nModules: main\nApproved the marker module.', prior['message'])
-        self.assertIn('Executed for round 1.', prior['message'])
+        self.assertIn('Approved (module) in round 1. Checks: 2/2 passed.', prior['message'])
         render.assert_called_once()
 
         outcome = next(row for row in report.to_dict()['records'] if row['role'] == 'worker' and row['index'] == 2)
@@ -186,12 +184,11 @@ class BusinessCommitMessageTests(unittest.TestCase):
         self.assertTrue(published_review['business_commit']['created'])
         subject, body = follow_up._git(root, 'log', '-1', '--format=%s%n%b').split('\n', 1)
         self.assertEqual(subject, 'Verify the complete delivery')
-        self.assertIn('Approved the complete delivery.', body)
-        self.assertEqual(body.split('Pre-review checks\n', 1)[1].splitlines(),
-                         ['Reused from round 1.', *[f'- {check} — passed (exit 0)' for check in commands]])
+        self.assertEqual(body.strip(), 'Approved (requirement) in round 2. Checks: 2/2 passed. Reused from round 1.')
+        for command in commands:
+            self.assertNotIn(command, body)
         without_source = {**receipt, 'reused_from': {'checks_digest': receipt['reused_from']['checks_digest']}}
-        self.assertEqual(publication._reviewed_checks(without_source, 2)[0],
-                         'Reused checks. Source round unavailable.')
+        self.assertEqual(publication._reviewed_checks(without_source, 2), 'Checks: 2/2 passed. Reused checks.')
 
     def test_published_message_handles_absent_optional_check_detail_and_audits(self):
         record_result = Supervisor._record_check_result
@@ -207,10 +204,28 @@ class BusinessCommitMessageTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         subject, body = self.git('log', '-1', '--format=%s%n%b').split('\n', 1)
         self.assertEqual(subject, 'Update app.py')
-        self.assertIn('Independently verified the marker.', body)
-        self.assertIn('test -f app.py — passed', body)
+        self.assertIn('Approved (requirement) in round 1. Checks: 1/1 passed.', body)
+        self.assertNotIn('test -f app.py', body)
         self.assertNotIn('(exit ', body)
         self.assertNotIn('AUD-', body)
+
+    def test_long_message_is_limited_in_the_published_git_object(self):
+        title = '修复组件保存失败并保留草稿' + '功能说明' * 90
+        verdict = {**_verdict('done', evidence=['app.py']), 'summary': title,
+                   'done': ['检查通过后的变更说明' * 90]}
+        worker = ScriptedProvider('worker', [{'verdict': verdict, 'touch': 'app.py'}])
+        reviewer = follow_up.CitingReviewer([
+            {'verdict': {}, 'text': json.dumps(BRIEF)},
+            {'verdict': _verdict('done'), 'cite': True},
+        ], self.root)
+        report = self.fixture.loop(worker, reviewer, requirement='Save the draft.',
+                                   checks=['test -f app.py'], max_rounds=1)
+
+        self.assertEqual(report.status, 'done', report.summary)
+        message = self.git('cat-file', 'commit', 'HEAD').split('\n\n', 1)[1] + '\n'
+        self.assertLessEqual(len(message), 500)
+        self.assertTrue(message.startswith('修复组件保存失败并保留草稿'))
+        self.assertIn('Checks: 1/1 passed.', message)
 
     def test_failed_check_leaves_business_ref_unchanged(self):
         report = self.run_single_publication('exit 7')

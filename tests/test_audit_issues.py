@@ -43,6 +43,16 @@ class AuditLedgerTests(unittest.TestCase):
         self.assertEqual(ledger.invalidate('b' * 64, {'other'}, ['other.py']), ['AUD-1'])
         self.assertEqual(ledger.pending()[0]['status'], 'needs_review')
 
+    def test_scoped_check_evidence_survives_unrelated_changes_after_resume(self):
+        ledger = AuditLedger()
+        ledger.record(['Missing empty state'], 1, ['main'])
+        ledger.resolve([resolution(evidence=['check:001-check-01.log'])], 2, TREE, lambda evidence: [],
+                       check_paths=lambda item, evidence: ['app.py', 'tests/test_empty.py'])
+        restored = AuditLedger.restore(ledger.export())
+        self.assertEqual(restored.invalidate('b' * 64, {'other'}, ['other.py']), [])
+        self.assertFalse(restored.pending())
+        self.assertEqual(restored.invalidate('c' * 64, {'other'}, ['tests/test_empty.py']), ['AUD-1'])
+
     def test_omission_and_dedup_preserve_stable_issue_ids(self):
         ledger = AuditLedger()
         self.assertEqual(ledger.record(["Missing test", "Missing route"], 1), ["AUD-1", "AUD-2"])

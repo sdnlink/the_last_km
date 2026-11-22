@@ -17,6 +17,14 @@ def observed_assertion_failure(receipt, run):
     return any(output for _, output in _failed_assertion_outputs(receipt, run))
 
 
+def assertion_signature(receipt, run, command):
+    for executed, output in _failed_assertion_outputs(receipt, run):
+        if executed == command and output:
+            stable = re.sub(r'(?m)^\s*duration_ms: .*\n|^Ran (\d+) tests? in [\d.]+s$', r'\1', output)
+            return hashlib.sha256(stable.encode()).hexdigest()
+    return None
+
+
 def failed_assertion_locations(receipt, run, root, paths):
     """Find corroborating test locations in every failed check's saved output."""
     locations = []
@@ -77,6 +85,22 @@ def create(run, context, snapshot, passed):
                                    if item['status']=='passed'}}
     receipt['digest'] = digest(receipt)
     return receipt
+
+
+def review_summary(receipt):
+    """Present check results once, with log references for the full evidence."""
+    context = receipt['context']
+    summary = {key: receipt[key] for key in ('passed', 'complete', 'source_changed', 'digest')}
+    summary.update(round=context['round'], tree=context['tree'], expected_checks=len(context['commands']))
+    if receipt.get('reused_from'):
+        summary['reused_from'] = receipt['reused_from']
+    if receipt.get('scope_gaps'):
+        summary['scope_gaps'] = receipt['scope_gaps']
+    summary['checks'] = [
+        {key: check[key] for key in ('status', 'exit_code', 'log', 'reused_from') if key in check}
+        for check in receipt['checks']
+    ]
+    return summary
 
 
 def valid(receipt, run, context):

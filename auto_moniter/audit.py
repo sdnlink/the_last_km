@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from pathlib import PurePosixPath
 
 from auto_moniter.redaction import redact
 
@@ -144,7 +145,7 @@ class AuditLedger:
             or identity and finding_key(item["summary"]) == identity)), None)
 
     def update(self, findings: list[str], proposals: object, index: int, tree: str,
-               module_ids: list[str], check_evidence, *, known_modules=()) -> tuple[list[str], list[str]]:
+               module_ids: list[str], check_evidence, *, known_modules=(), check_paths=None) -> tuple[list[str], list[str]]:
         """Apply valid closures and new findings together within the capacity budget."""
         module_ids = sorted(set(module_ids))
         try:
@@ -157,7 +158,7 @@ class AuditLedger:
             if mentioned.intersection(item["id"] for item in proposals):
                 raise ValueError("An issue cannot be closed while the same review reports it as an open finding")
             staged = copy.deepcopy(self)
-            closed = staged.resolve(proposals, index, tree, check_evidence)
+            closed = staged.resolve(proposals, index, tree, check_evidence, check_paths=check_paths)
             reported = staged.record(findings, index, module_ids, known_modules=known_modules)
         except AuditCapacityError:
             raise
@@ -180,9 +181,11 @@ class AuditLedger:
             if modules != item['module_ids']:
                 changes.append({'id': item['id'], 'before': item['module_ids'], 'after': modules})
                 item['module_ids'] = modules
+                if item['resolution']:
+                    item['resolution'].pop('check_paths', None)
         return changes
 
-    def resolve(self, proposals: object, index: int, tree: str, check_evidence) -> list[str]:
+    def resolve(self, proposals: object, index: int, tree: str, check_evidence, *, check_paths=None) -> list[str]:
         proposals = resolutions(proposals)
         items = copy.deepcopy(self.items)
         for proposal in proposals:
@@ -196,6 +199,9 @@ class AuditLedger:
             item.update(status="resolved", resolved_round=index, tree=tree,
                         resolution={"summary": redact(proposal["summary"]),
                                     "evidence": [redact(text) for text in proposal["evidence"]]})
+            paths = check_paths(item, proposal["evidence"]) if check_paths else []
+            if paths:
+                item["resolution"]["check_paths"] = paths
         self._commit(items, self.next_id)
         return [item["id"] for item in proposals]
 
@@ -205,10 +211,12 @@ class AuditLedger:
         for item in self.items:
             if item["status"] == "resolved" and item["tree"] != tree:
                 from auto_moniter.quality import cited
+                evidence = item['resolution']['evidence']
+                check_paths = item['resolution'].get('check_paths', [])
                 evidence_changed = changed_files is not None and any(
-                    cited([name], item['resolution']['evidence']) for name in changed_files)
-                check_evidence = any(entry.startswith('check:') for entry in item['resolution']['evidence'])
-                if (not check_evidence and affected_modules is not None and item['module_ids']
+                    name in check_paths or cited([name], evidence) for name in changed_files)
+                unscoped_check = not check_paths and any(entry.startswith('check:') for entry in evidence)
+                if (not unscoped_check and affected_modules is not None and item['module_ids']
                         and not affected_modules.intersection(item['module_ids']) and not evidence_changed):
                     item['tree'] = tree
                     continue
@@ -222,8 +230,9 @@ class AuditLedger:
         return copy.deepcopy([item for item in self.items if item["status"] != "resolved"
                               and (module_ids is None or not item["module_ids"] or module_ids.intersection(item["module_ids"]))])
 
-    def prompt(self) -> list[dict]:
-        return [{key: item[key] for key in ("id", "summary", "module_ids", "status", "resolution")} for item in self.pending()]
+    def prompt(self, module_ids: set[str] | None = None) -> list[dict]:
+        return [{key: item[key] for key in ("id", "summary", "module_ids", "status", "resolution")}
+                for item in self.pending(module_ids)]
 
     @classmethod
     def restore(cls, value: object) -> AuditLedger:
@@ -257,9 +266,18 @@ class AuditLedger:
             if item["status"] in {"resolved", "needs_review"}:
                 if not re.fullmatch(r"[0-9a-f]{64}", item["tree"]) or item["resolved_round"] < item["last_seen_round"]:
                     raise ValueError("Invalid saved audit closure")
-                if not isinstance(item["resolution"], dict) or set(item["resolution"]) != {"summary", "evidence"}:
+                closure = item["resolution"]
+                if not isinstance(closure, dict) or set(closure) - {"check_paths"} != {"summary", "evidence"}:
                     raise ValueError("Invalid saved audit closure")
-                resolutions([{"id": ident, **item["resolution"]}])
+                resolutions([{"id": ident, "summary": closure["summary"], "evidence": closure["evidence"]}])
+                if "check_paths" in closure:
+                    paths = closure["check_paths"]
+                    if (not isinstance(paths, list) or not 1 <= len(paths) <= 64
+                            or any(not isinstance(path, str) or not path or len(path.encode()) > 1024
+                                   or PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts
+                                   or str(PurePosixPath(path)) != path for path in paths)
+                            or not any(text.startswith("check:") for text in closure["evidence"])):
+                        raise ValueError("Invalid saved audit check paths")
             elif item["status"] != "open" or item["resolution"] is not None or item["tree"] or item["resolved_round"]:
                 raise ValueError("Invalid saved open audit issue")
             seen.add(ident)

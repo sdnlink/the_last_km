@@ -206,6 +206,41 @@ class BusinessRecoveryTests(unittest.TestCase):
         self.assertIn('Protected acceptance baseline', result.summary)
         self.assertEqual(worker.calls, [])
 
+    def test_resume_with_new_protected_assertion_preserves_pending_function(self):
+        from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task
+
+        regression = 'test_original.py'
+        self.external(regression, '# old protected check\n')
+        (self.project / 'app.py').write_text('def parse_input(): return 0\n')
+        self.git('add', 'app.py')
+        self.commit('initial function')
+        assignment = task('F1', 'app.py')
+        assignment['check_ids'] = ['check:2']
+        worker = FunctionWorker('worker', [
+            {**result('F1', 'done'), 'writes': {'project/app.py': 'def parse_input(): return 42\n'}}])
+        monitor = self.monitor(worker, SnapshotReviewer('reviewer', [plan(assignment)]),
+                               function_dispatch=True)
+        monitor.config.checks.append(CHECK)
+        monitor.log = lambda text: monitor.request_stop() if 'worker status=' in text else None
+        stopped = monitor.run()
+        self.assertEqual(stopped.status, 'stopped', stopped.summary)
+        new_head = self.external(regression, '# revised protected check\n')
+        worker = FunctionWorker('worker', [result('F1', 'done')])
+        reviewer = SnapshotReviewer('reviewer', [result('F1', 'accepted')])
+        monitor = self.monitor(worker, reviewer, function_dispatch=True, resume=True)
+        monitor.config.checks.append(CHECK)
+        event = monitor._event
+        def stop_after_acceptance(name, **fields):
+            event(name, **fields)
+            if name == 'function_accepted':
+                monitor.request_stop()
+        monitor._event = stop_after_acceptance
+        report = monitor.run()
+        self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), new_head)
+        self.assertEqual(self.git('show', 'HEAD:app.py'), 'def parse_input(): return 42')
+        self.assertEqual(self.git('show', 'HEAD:' + regression), '# revised protected check')
+
     def test_adoption_is_replayed_after_git_state_was_saved_before_monitor_state(self):
         self.pause_before_work()
         self.external()

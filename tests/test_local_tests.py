@@ -4,11 +4,25 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from auto_moniter.local_tests import catalog, command
+from auto_moniter.local_tests import catalog, command, reuse_key
 
 
 class LocalTestTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required')
+    def test_node_reuse_requires_the_same_known_local_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            check = command(root, 'test_behavior.cjs')
+            key = reuse_key(root, check)
+            self.assertIsNotNone(key)
+            self.assertIsNone(reuse_key(root, check + ' && true'))
+            with patch.dict('os.environ', {'TEST_REUSE_ENVIRONMENT': 'changed'}):
+                self.assertNotEqual(reuse_key(root, check), key)
+            (root / 'node_modules').mkdir()
+            self.assertIsNone(reuse_key(root, check))
+
     def test_unittest_runner_requires_real_non_skipped_assertions(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -318,6 +319,10 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
                 or any(part.startswith('.') for part in test.parts)
                 or test.name in {'__init__.py', 'conftest.py'} or not test_asset(name)):
             raise ValueError('Additional function files must be focused regression test paths: ' + name)
+    if review_test := task.get('review_test'):
+        from auto_moniter.local_tests import command
+        if command(root, review_test['path']) is None:
+            raise ValueError('Reviewer test requires a supported local test runner: ' + review_test['path'])
 
 
 def baseline(path, root, task, snapshot, *, missing_ok, historical_source=None):
@@ -365,6 +370,48 @@ def _write_baseline(path, saved):
     tmp.replace(path)
 
 
+def reconcile_protected_baseline(path, root, task, before, after):
+    """Carry committed changes to protected assets into the active scope baseline."""
+    if not path.is_file() or not task:
+        return None
+    changed = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    changed.difference_update(str(root / name) for name in writable_files(task))
+    if not changed:
+        return None
+    with gzip.open(path, 'rt', encoding='utf-8') as handle:
+        saved = json.load(handle)
+    if saved['id'] != task['id']:
+        return None
+    files = saved['files']
+    for name in changed:
+        if files.get(name) == before.get(name):
+            if name in after:
+                files[name] = after[name]
+            else:
+                files.pop(name, None)
+    _write_baseline(path, saved)
+    return saved
+
+
+def materialize_review_test(root, task, saved):
+    test = task.get('review_test')
+    if not test:
+        return
+    path = _path(root, test['path'])
+    if str(path) in saved['files']:
+        raise ValueError('Reviewer test would replace an existing file: ' + test['path'])
+    source = test['source'].encode()
+    if path.is_file() and path.read_bytes() == source:
+        return
+    if path.exists():
+        raise ValueError('Restore the reviewer-authored acceptance test: ' + test['path'])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.review-test-', dir=path.parent) as directory:
+        written = Path(directory) / 'test'
+        written.write_bytes(source)
+        os.link(written, path)
+
+
 def scope_problems(root, task, saved, snapshot):
     before = saved['files']
     target_paths = {file: _path(root, file) for file, _ in targets(task)}
@@ -385,6 +432,10 @@ def scope_problems(root, task, saved, snapshot):
         return ['Preserve existing regression test files'], None
     if any(str(root / name) not in snapshot for name in task['test_files']):
         return ['Add the declared focused regression tests in the monitored workspace'], None
+    if review_test := task.get('review_test'):
+        path = _path(root, review_test['path'])
+        if not path.is_file() or path.read_bytes() != review_test['source'].encode():
+            return ['Restore the reviewer-authored acceptance test: ' + review_test['path']], None
     states = saved.get('targets')
     if states is None and task.get('kind') != 'integration':
         states = {task['file']: saved.get('target')}

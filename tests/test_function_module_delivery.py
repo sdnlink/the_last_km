@@ -1,6 +1,7 @@
 """Final function reports jointly confirm the whole requirement's module ledger."""
 import copy
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,35 @@ def conclusion(ident, decision, ids, *, final=False, file='app.py', next_task=No
 
 
 class FunctionModuleDeliveryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required')
+    def test_module_verification_reuses_passed_local_check_on_same_tree(self):
+        from auto_moniter.local_tests import command
+
+        regression = 'test_behavior.cjs'
+        source = (
+            "const test = require('node:test');\n"
+            "test('input', () => require('node:assert/strict').match("
+            "require('node:fs').readFileSync('app.py', 'utf8'), /return 42/));\n")
+        first = {**self.first, 'test_files': [regression]}
+        verify = {**self.first, 'id': 'VERIFY_A', 'kind': 'verification',
+                  'delivery_scope': 'module', 'depends_on': ['F1']}
+        verification = conclusion('VERIFY_A', 'done', ['A'], final=True)
+        approval = conclusion('VERIFY_A', 'accepted', ['A'], final=True)
+        verification['verdict']['scope'] = approval['verdict']['scope'] = 'module'
+        planning = self.planning()
+        planning['text'] = json.dumps({**json.loads(planning['text']), 'next_task': first})
+        worker = FunctionWorker('worker', [{**conclusion('F1', 'done', ['A']),
+            'writes': {'app.py': 'def parse_input(): return 42\n', regression: source}}, verification])
+        reviewer = ScriptedProvider('reviewer', [
+            planning, conclusion('F1', 'accepted', [], next_task=verify), approval])
+        monitor = self.monitor(worker, reviewer)
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(monitor.modules.items['A']['status'], 'accepted')
+        receipts = [record.watcher_result['candidate_checks'] for record in report.records if record.role == 'worker']
+        original = receipts[0]['passed_commands'][command(self.root, regression)]
+        self.assertEqual([check.get('reused_from') for check in receipts[1]['checks']], [None, original])
+
     def test_prerequisite_module_verification_allows_the_dependent_milestone_and_final_delivery(self):
         implementation = {**self.final,'delivery_scope':'function'}
         verify = {**self.first,'id':'VERIFY_A','kind':'verification','delivery_scope':'module','depends_on':['F2']}

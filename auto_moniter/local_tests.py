@@ -1,5 +1,7 @@
 """Watcher-owned test commands derived from reviewer-approved file paths."""
 from pathlib import Path
+import hashlib
+import os
 import shlex
 import shutil
 import sys
@@ -53,3 +55,27 @@ def command(root, name):
 def catalog(root, task):
     return {f'auto:{index}': value for index, name in enumerate(task.get('test_files', []), 1)
             if (value := command(root, name)) is not None}
+
+
+def reuse_key(root, check):
+    """Identify a monitor-generated Node test and the local runtime it will use."""
+    if '--runner node ' not in check or os.environ.get('NODE_PATH') or os.environ.get('NODE_OPTIONS'):
+        return None
+    try:
+        args = shlex.split(check)
+        if len(args) != 10 or args[2:9:2] != ['--project', '--path', '--runner', '--executable']:
+            return None
+        if command(root, args[5]) != check:
+            return None
+        test_dir = (root / args[5]).parent
+        if any((path / 'node_modules').exists() for path in (test_dir, *test_dir.parents)):
+            return None
+        files = [Path(name).resolve(strict=True) for name in (args[0], args[1], args[9], '/bin/sh')]
+        runtime = []
+        for path in files:
+            stat = path.stat()
+            runtime.append((str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_ctime_ns))
+        environment = hashlib.sha256(repr(sorted(os.environ.items())).encode()).digest()
+        return runtime, environment
+    except (OSError, RuntimeError, ValueError):
+        return None

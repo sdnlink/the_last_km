@@ -44,6 +44,7 @@ def identity(task):
     return (task['id'], task['module_id'], task['delivery_scope'], task['depends_on'],
             task.get('kind'), task.get('integration_scope'), sorted(targets(task)),
             sorted(task['test_files']) if task.get('kind') == 'integration' else None,
+            task.get('review_test'),
             sorted(task.get('edit_files', [])))
 
 
@@ -88,8 +89,11 @@ def validate_identifiers(value):
 
 
 def validate(value, modules=None):
-    if not isinstance(value,dict) or set(value) - {'edit_files'} not in (FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
+    if not isinstance(value,dict) or set(value) - {'edit_files', 'review_test'} not in (
+            FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
+    value = copy.deepcopy(value)
+    review_test = value.pop('review_test', None)
     validate_identifiers(value)
     for key in ['objective','inputs','outputs']:
         if not isinstance(value[key],str) or not value[key].strip() or len(value[key])>2000 or '\0' in value[key]:
@@ -130,8 +134,6 @@ def validate(value, modules=None):
         raise ValueError('Invalid function delivery scope')
     if modules is not None and value['module_id'] not in modules:
         raise ValueError('Function assignment names an unknown module')
-    if len(json.dumps(value,ensure_ascii=False).encode())>16000:
-        raise ValueError('Function assignment exceeds 16 KiB')
     if GATE_FIELDS <= value.keys():
         for key in GATE_FIELDS:
             entries = value[key]
@@ -139,7 +141,16 @@ def validate(value, modules=None):
                     or any(not isinstance(x, str) or not x or len(x) > 512 for x in entries)
                     or len(set(entries)) != len(entries) or (not entries and key != 'test_files')):
                 raise ValueError('Invalid function assignment ' + key)
-    return copy.deepcopy(value)
+    if review_test is not None:
+        if (not isinstance(review_test, dict) or set(review_test) != {'path', 'source'}
+                or not isinstance(review_test['path'], str) or review_test['path'] not in value.get('test_files', [])
+                or not isinstance(review_test['source'], str) or not review_test['source'].strip()
+                or '\0' in review_test['source'] or len(review_test['source'].encode()) > 8192):
+            raise ValueError('Reviewer test must provide one declared test path and 1–8192 bytes of test source')
+        value['review_test'] = review_test
+    if len(json.dumps(value,ensure_ascii=False).encode())>16000:
+        raise ValueError('Function assignment exceeds 16 KiB')
+    return value
 
 
 class FunctionTasks:
@@ -246,6 +257,15 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
             })
             grouped['required'] = sorted(INTEGRATION_TASK_FIELDS | {'edit_files'})
             next_schema['anyOf'].append(grouped)
+        for variant in next_schema['anyOf'][1:]:
+            test_schema = {'type': 'object', 'additionalProperties': False,
+                           'properties': {'path': {'type': 'string'}, 'source': {'type': 'string'}},
+                           'required': ['path', 'source']}
+            verification_only = variant is verification
+            variant['properties']['review_test'] = ({'type': 'null'} if verification_only else
+                {'anyOf': [{'type': 'null'}, test_schema],
+                 'description': 'Reviewer-authored test that invokes the assigned behavior. Path must be in test_files.'})
+            variant['required'].append('review_test')
     if planning:
         additions={'next_task':next_schema,'modules':module_schema()}
         if full_plan:
@@ -288,7 +308,9 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
              'Verification-only: inspect existing code and evidence, do not edit source or tests or run commands that write files. '
              'Report concrete defects as incomplete; the watcher executes approved checks. '
              if task.get('kind') == 'verification' else f'Only implement {scope} and its focused verification. Do not start other work. ')+
-            manifest + 'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
+            manifest + ('Implement against the fixed reviewer-authored acceptance test at ' + task['review_test']['path']
+                        + '. Keep its source unchanged. ' if task.get('review_test') else '')
+            + 'Return task_id='+task['id']+' and task_status=done only when the whole assignment has been assessed and is ready for watcher acceptance; '
             'otherwise task_status=incomplete. Return next_task=null and modules=[]. '
             'For delivery_scope=function return status=continue even when task_status=done. '
             + completion +
@@ -317,6 +339,8 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
            'and return next_task=null. '
            if task.get('kind') == 'verification' else
            'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +
+        'For failed behavior, cite the criterion, entry point, input, expected and observed results, and the failing '
+        'test or log. Ask for the smallest behavior correction and verify it with the same case on the next submission. '
         'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
         'and propose exactly one next_task that can be implemented and verified on its own. '
         + completion +

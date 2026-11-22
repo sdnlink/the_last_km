@@ -73,13 +73,12 @@ class BusinessCommitMessagePathTests(unittest.TestCase):
         self.assertIn('using <local-path>', message.splitlines()[0])
         self.assertIn('docs/guide.md', message)
         self.assertIn('./app.py', message)
-        self.assertIn('https://example.org/docs/reference?q=/tmp/public.', message)
-        self.assertIn('https://example.org/results.', message)
-        if not reused:
-            self.assertIn('AUD-1', message)
-        self.assertIn('python -c', message)
-        self.assertIn('node -e', message)
-        self.assertEqual(message.count('— passed (exit 0)'), 2)
+        self.assertNotIn('AUD-1', message)
+        self.assertIn('Checks: 2/2 passed.', message)
+        if reused:
+            self.assertIn('Reused from round 1.', message)
+        for command in commands:
+            self.assertNotIn(command, message)
 
     def test_real_git_message_is_portable_and_raw_evidence_stays_exact(self):
         report, commands, title = self.run_publication()
@@ -117,13 +116,10 @@ class BusinessCommitMessagePathTests(unittest.TestCase):
         baseline = history.begin_round(2)
         shutil.copyfile(self.root/'app.py', fixture.root/'app.py')
         history.prepare_review(2, baseline)
-        _, published = publication.publish(history, 2, worker, reviewer, '', '',
-                                           problem=f'Inspect {self.root}/app.py; see https://example.org/docs/reference?q=/tmp/public.',
-                                           receipt=receipt)
+        _, published = publication.publish(history, 2, worker, reviewer, '', '', receipt=receipt)
         self.assertTrue(published['business_commit']['created'])
         message = follow_up._git(fixture.root, 'log', '-1', '--format=%s%n%b')
         self.assert_portable(message, commands, reused=True)
-        self.assertIn('Reused from round 1.', message)
         self.assertEqual(receipt, before)
         self.assertTrue(candidate_checks.valid(receipt, run, receipt['context']))
 

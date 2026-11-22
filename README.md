@@ -4,6 +4,10 @@
 
 Auto Monitor runs coding tasks through a worker, an independent reviewer, and the acceptance checks you configure. Use it from the command line or the local web console.
 
+## License
+
+Auto Monitor is free for personal, non-commercial use. Commercial use, including internal business use, requires prior written authorization. Licensing requests go to [support@sdnlink.cn](mailto:support@sdnlink.cn). The terms cover both source code and distributions. [Full license](LICENSE)
+
 ## Worker, reviewer, and watcher
 
 | Role | Responsibility |

@@ -4,6 +4,10 @@
 
 Auto Monitor 通过 Worker 实现、Reviewer 独立审核和已配置的验收检查执行开发任务，可使用命令行或本地 Web 控制台。
 
+## 许可与商业授权
+
+Auto Monitor 免费供个人非商业使用。商业使用（包括企业内部使用）须事先取得书面授权，申请请联系 [support@sdnlink.cn](mailto:support@sdnlink.cn)。许可适用于源码和发行包。 [完整许可条款](LICENSE)
+
 ## Worker、Reviewer 与 Watcher
 
 | 角色 | 职责 |

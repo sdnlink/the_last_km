@@ -3,6 +3,7 @@ name = "auto-moniter"
 version = "0.4.1"
 description = "Supervise coding agents until an independent review accepts the work."
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 classifiers = [
     "Operating System :: POSIX :: Linux",

@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -56,7 +55,7 @@ def documents(run):
         if path.exists():
             if path.is_symlink() or path.stat().st_size > 32 * 1024 * 1024:
                 raise ValueError('Unsafe task checkpoint')
-            value = json.loads(path.read_text())
+            value = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(value, dict):
                 raise ValueError('Invalid task checkpoint')
             result[name] = value
@@ -299,7 +298,7 @@ def expire_archives(git, keep, age, *, apply, errors):
         if not manifest_path.is_file() or manifest_path.is_symlink() or manifest_path.stat().st_size > 4*1024*1024:
             continue
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         except ValueError:
             continue
         if not isinstance(manifest, dict) or not isinstance(manifest.get('run_dir'), str):
@@ -379,7 +378,7 @@ def restore(cwd, run):
                 manifest_path = target.with_suffix('.json')
                 if not manifest_path.is_file() or manifest_path.is_symlink():
                     raise ValueError('Archive metadata is absent')
-                manifest = json.loads(manifest_path.read_text())
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
                 if manifest.get('project') != str(git.cwd) or manifest.get('run_dir') != str(run):
                     raise ValueError('Archive metadata does not match task')
                 docs, history = {}, manifest['history']

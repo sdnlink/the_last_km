@@ -65,7 +65,7 @@ def selftest() -> dict:
                               checks=[check], max_rounds=2, max_runtime_s=20, retry_delay_s=0,
                               git_history='off', run_dir=root / 'run'), log=lambda _: None).run()
         path = root / 'run/report.json'
-        report = json.loads(path.read_text()) if path.exists() else {}
+        report = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
         resolved = any(i['id'] == 'AUD-1' and i['status'] == 'resolved' for i in report.get('audit_issues', {}).get('items', []))
         passed = (result.status == 'done' and worker.calls == reviewer.calls == 2 and reviewer.requirement_calls==1 and resolved
                   and report.get('modules', [{}])[0].get('status') == 'accepted'

@@ -11,7 +11,6 @@ import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 
 from auto_moniter.storage import write_json
 from auto_moniter.paths import default_run_dir, private_directory, state_root

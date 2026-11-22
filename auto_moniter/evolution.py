@@ -52,7 +52,7 @@ def git(cwd, *args):
 def read(path):
     if path.is_symlink() or path.stat().st_size > 32*1024*1024:
         raise ValueError('Unsafe evolution evidence: '+str(path))
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(value,dict):
         raise ValueError('Evolution evidence must be an object')
     return value
@@ -275,9 +275,9 @@ class Evolution:
         content='#!/bin/sh\nexec '+shlex.quote(sys.executable)+' "$@"\n'
         for name in ('python','python3'):
             for path in (tools/name,local/'bin'/name):
-                if path.is_symlink() or (path.exists() and path.read_text()!=content):
+                if path.is_symlink() or (path.exists() and path.read_text(encoding='utf-8')!=content):
                     raise ValueError('Evolution Python tool wrapper changed')
-                path.write_text(content)
+                path.write_text(content, encoding='utf-8')
                 path.chmod(0o700)
         environment_path=str(tools)+os.pathsep+os.environ.get('PATH','')
         return PreparedCommand(['/usr/bin/env','PATH='+environment_path,'/bin/sh','-c',command])
@@ -293,7 +293,7 @@ class Evolution:
                 should_stop=self._cancelled,detect_input_requests=False,
                 heartbeat=self.path.parent/'heartbeat',heartbeat_note='evolution '+stage+' validation')
             path=self.path.parent/f'{stage}-{index:02d}.log'
-            path.write_text('$ '+command+'\n'+result.stdout+'\n'+result.stderr)
+            path.write_text('$ '+command+'\n'+result.stdout+'\n'+result.stderr, encoding='utf-8')
             source_changed=git(cwd,'rev-parse','HEAD')!=expected
             results.append({'command':command,'exit_code':result.exit_code,'timed_out':result.timed_out,
                 'interruption':result.interruption,'source_changed':source_changed,'log':path.name,
@@ -399,7 +399,7 @@ class Evolution:
                 reap_background(launched[0].pid)
             passed=False
         name='rollback-activation.log' if self.record.get('phase')=='rolling_back' else 'activation.log'
-        (self.path.parent/name).write_text(result.stdout+'\n'+result.stderr)
+        (self.path.parent/name).write_text(result.stdout+'\n'+result.stderr, encoding='utf-8')
         self.record['activation']='ready' if passed else 'failed'
         return passed
 

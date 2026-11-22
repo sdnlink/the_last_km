@@ -32,7 +32,7 @@ def read(path):
     try:
         if path.stat().st_size > 1024 * 1024:
             raise ValueError('Project coordination file exceeds its limit')
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(value, dict):
             raise ValueError('Invalid project coordination record')
         return value

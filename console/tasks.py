@@ -121,13 +121,18 @@ class TaskStore:
 
     def refresh_agents(self):
         from console.agent_catalog import discover
-        self.agent_catalog = discover(self.cwd, discover_providers(), live=True)
+        catalog = discover(self.cwd, discover_providers(), live=True)
+        with self._lock:
+            self.agent_catalog = catalog
         return self.config()
 
     def agent_settings(self, action, data):
         try:
             if action=='save':
-                result=self.agents.save(data);self.agent_catalog=None;return result
+                result=self.agents.save(data)
+                with self._lock:
+                    self.agent_catalog=None
+                return result
             if action=='install':return self.agents.install(data.get('id'))
             if action=='probe':return self.agents.probe(data.get('id'))
             raise ValueError('Agent 操作不支持')
@@ -136,11 +141,15 @@ class TaskStore:
 
     def config(self) -> dict:
         available = self.agents.providers(discover_providers())
-        if self.agent_catalog is None:
+        with self._lock:
+            catalog_data = self.agent_catalog
+        if catalog_data is None:
             from console.agent_catalog import discover
-            self.agent_catalog = discover(self.cwd, available)
+            catalog_data = discover(self.cwd, available)
+            with self._lock:
+                self.agent_catalog = catalog_data
         profiles={row['id']:row for row in self.agents.snapshot()['agents']}
-        catalog=dict(self.agent_catalog)
+        catalog=dict(catalog_data)
         models=dict(catalog.get('models',{}))
         for name,row in profiles.items():
             if row['config']['model']:
@@ -160,39 +169,41 @@ class TaskStore:
             meta = read_json(path)
             if meta.get('id') == path.stem and re.fullmatch(r'(?:[0-9a-f]{32}|ext-[0-9a-f]{20})', path.stem):
                 tasks[meta['id']] = meta
-        if time.monotonic() - self._catalog_at > 5:
-            external = {}
-            warnings = []
-            for root in self.runs_dirs:
-                root = root.expanduser().resolve()
-                visited = 0
-                for current, dirs, files in os.walk(root, followlinks=False):
-                    visited += 1
-                    path = Path(current)
-                    depth = len(path.relative_to(root).parts)
-                    if '.catalog-ignore' in files:
+        with self._lock:
+            if time.monotonic() - self._catalog_at > 5:
+                external = {}
+                warnings = []
+                for root in self.runs_dirs:
+                    root = root.expanduser().resolve()
+                    visited = 0
+                    for current, dirs, files in os.walk(root, followlinks=False):
+                        visited += 1
+                        path = Path(current)
+                        depth = len(path.relative_to(root).parts)
+                        if '.catalog-ignore' in files:
+                            dirs[:] = []
+                            continue
+                        dirs[:] = [name for name in dirs if not name.startswith('.') and name not in
+                                   {'node_modules', 'site-packages', 'validation-env', 'venv', '__pycache__'}]
+                        if visited > 2000:
+                            warnings.append(f'目录 {root} 已达到扫描上限，请将 --runs-dir 指向更接近任务的位置')
+                            break
+                        if depth >= 5 and dirs:
+                            warnings.append(f'目录 {root} 有更深层级，请使用 --runs-dir 指定深层任务目录')
+                            dirs[:] = []
+                        artifacts = {'requirement.md', 'supervisor.lock', 'guardian.lock', 'report.json'}
+                        if 'state.json' not in files or not artifacts.intersection(files):
+                            continue
                         dirs[:] = []
-                        continue
-                    dirs[:] = [name for name in dirs if not name.startswith('.') and name not in
-                               {'node_modules', 'site-packages', 'validation-env', 'venv', '__pycache__'}]
-                    if visited > 2000:
-                        warnings.append(f'目录 {root} 已达到扫描上限，请将 --runs-dir 指向更接近任务的位置')
-                        break
-                    if depth >= 5 and dirs:
-                        warnings.append(f'目录 {root} 有更深层级，请使用 --runs-dir 指定深层任务目录')
-                        dirs[:] = []
-                    artifacts = {'requirement.md', 'supervisor.lock', 'guardian.lock', 'report.json'}
-                    if 'state.json' not in files or not artifacts.intersection(files):
-                        continue
-                    dirs[:] = []
-                    run = path.resolve()
-                    ident = 'ext-' + hashlib.sha256(os.fsencode(run)).hexdigest()[:20]
-                    external[ident] = {'id': ident, 'run_dir': str(run), 'managed': False}
-            self._external = external
-            self._scan_warnings = list(dict.fromkeys(warnings))[:10]
-            self._catalog_at = time.monotonic()
+                        run = path.resolve()
+                        ident = 'ext-' + hashlib.sha256(os.fsencode(run)).hexdigest()[:20]
+                        external[ident] = {'id': ident, 'run_dir': str(run), 'managed': False}
+                self._external = external
+                self._scan_warnings = list(dict.fromkeys(warnings))[:10]
+                self._catalog_at = time.monotonic()
+            cached_external = dict(self._external)
         managed_paths = {item['run_dir'] for item in tasks.values()}
-        tasks.update({key: item for key, item in self._external.items() if item['run_dir'] not in managed_paths})
+        tasks.update({key: item for key, item in cached_external.items() if item['run_dir'] not in managed_paths})
         removed = {ident for ident, item in tasks.items()
                    if (self.deleted_dir / (run_key(item['run_dir']) + '.json')).exists()}
         for item in tasks.values():
@@ -246,7 +257,7 @@ class TaskStore:
 
     def _view_data(self, meta: dict, processes: dict, *, include_details: bool = True) -> dict:
         run = Path(meta['run_dir'])
-        state = read_json(run / 'state.json')
+        state = {}
         status = meta.get('status', 'unknown')
         health = {'health': 'not_started', 'phase': status, 'rounds': 0, 'usage': {}}
         live = self._launcher_alive(meta)
@@ -254,7 +265,10 @@ class TaskStore:
             snapshot = read_run_snapshot(run)
             health = run_health(run, snapshot=snapshot)
             # A report is authoritative only once the supervisor and guardian have released their locks.
-            state = {**state, **snapshot['state']}
+            if snapshot['finished']:
+                state = {**read_json(run / 'state.json'), **snapshot['state']}
+            else:
+                state = dict(snapshot['state'])
             if health['delivery_confirmed']:
                 status = 'done'
             elif health['lock_held'] or health['guardian_lock_held']:
@@ -266,6 +280,7 @@ class TaskStore:
             else:
                 status = 'interrupted'
         except (OSError, ValueError, TypeError):
+            state = read_json(run / 'state.json')
             if state and not live:
                 raise
             if live:
@@ -273,7 +288,7 @@ class TaskStore:
             elif meta.get('started_at'):
                 status = 'failed'
         heartbeat = read_json(run / 'heartbeat')
-        guardian = read_json(run / 'guardian.json')
+        guardian = health.get('guardian') or read_json(run / 'guardian.json')
         roots = []
         if live:
             child = self._children.get(meta['id'])

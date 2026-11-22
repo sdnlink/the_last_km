@@ -568,7 +568,7 @@ class Supervisor:
             if scope_candidate is not None:
                 recovery_path = self.run_dir / 'scope-recovery.json'
                 key = {'task_id': self.function_tasks.current['id'], 'tree': scope_candidate.tree}
-                if recovery_path.exists() and json.loads(recovery_path.read_text()).get('candidate') == key:
+                if recovery_path.exists() and json.loads(recovery_path.read_text(encoding='utf-8')).get('candidate') == key:
                     return self._finish('action_required',
                         'Assignment scope repair did not resolve the monitor gate; candidate preserved. '
                         'No further unchanged worker/reviewer rounds will be started.', records, last_worker)
@@ -1503,7 +1503,7 @@ class Supervisor:
         for name in ('acceptance-results.json', 'requirement-coverage.json'):
             path = self.run_dir / name
             if path.is_file() and not path.is_symlink():
-                value = json.loads(path.read_text())
+                value = json.loads(path.read_text(encoding='utf-8'))
                 value.update(invalidated=True, invalidated_reason='Business HEAD changed; revalidation required', complete=False)
                 write_json(path, value, durable=True)
         self._event('business_head_adopted', **self._business_input, modules=invalidated, reopened_issues=reopened)
@@ -1986,7 +1986,7 @@ class Supervisor:
             # This file is written only after a fully validated planning result.
             saved = self.run_dir / 'reviewed-requirement.json'
             if saved.is_file() and not saved.is_symlink():
-                approved = json.loads(saved.read_text())
+                approved = json.loads(saved.read_text(encoding='utf-8'))
                 if (isinstance(approved, dict) and approved.get('status') == 'ready'
                         and approved.get('cycle') == len(self.requirement_cycles) + 1
                         and approved.get('original_sha256') == requirements_review.requirement_hash(self.config.requirement)):
@@ -2017,7 +2017,7 @@ class Supervisor:
         schema=self.run_dir/'requirements.schema.json'
         plan_schema = function_tasks.schema(requirements_review.SCHEMA, planning=True, gate=self._function_gate,
             integration=bool(self._integration_scopes()), full_plan=self.config.full_function_plan) if self.config.function_dispatch else requirements_review.SCHEMA
-        schema.write_text(json.dumps(plan_schema))
+        schema.write_text(json.dumps(plan_schema), encoding='utf-8')
         self.schema_path=schema
         self.log('requirements: reviewer continuing saved analysis; checking only pending work and changed inputs' if continuation else
                  'requirements: reviewer elaborating next requirement; worker has not started' if follow_up else
@@ -2631,7 +2631,7 @@ class Supervisor:
             return None
         self._check_budget(new_call=True)
         self._module_report_attempts.add(key)
-        saved = json.loads((self.run_dir/'state.json').read_text())
+        saved = json.loads((self.run_dir/'state.json').read_text(encoding='utf-8'))
         report = {'status': 'attempted', 'errors': errors, 'original': record.verdict.to_dict()}
         previous_failure = record.failure
         if previous:
@@ -3259,7 +3259,7 @@ class Supervisor:
             # Budget and stop exceptions still keep the checks captured so far.
             path = self.run_dir/'acceptance-results.json'
             if path.is_file() and not path.is_symlink():
-                saved = json.loads(path.read_text())
+                saved = json.loads(path.read_text(encoding='utf-8'))
                 if saved.get('round') == record.index and saved.get('tree') == record.tree:
                     snapshot = saved
             receipt = candidate_checks.create(self.run_dir, context, snapshot, passed)
@@ -4003,7 +4003,7 @@ class Supervisor:
             record.failure = 'Function report correction requires a supported read-only worker: ' + str(exc)
             return None
         # Preserve the candidate before a budget interruption can prevent correction.
-        saved = json.loads((self.run_dir/'state.json').read_text())
+        saved = json.loads((self.run_dir/'state.json').read_text(encoding='utf-8'))
         self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
         self._check_budget(new_call=True)
         artifact = f'{record.index:03d}-worker-report-original-{self._agent_calls}'
@@ -4288,7 +4288,7 @@ class Supervisor:
             checks = {}
             if check_path.is_file() and not check_path.is_symlink() and check_path.stat().st_size <= 512*1024:
                 try:
-                    checks = json.loads(check_path.read_text())
+                    checks = json.loads(check_path.read_text(encoding='utf-8'))
                 except (OSError, ValueError):
                     pass
             self._delivery_diagnosis = diagnose(report.to_dict()['records'], last_call=self._last_invocation,
@@ -4491,7 +4491,7 @@ class Supervisor:
         self.log(summary)
         status = 'invalid' if isinstance(exc, (OSError, ValueError, TypeError, AttributeError)) else 'recovery_failed'
         try:
-            original = json.loads((self.run_dir / 'state.json').read_text())
+            original = json.loads((self.run_dir / 'state.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             original = None
         if not isinstance(original, dict):
@@ -5331,7 +5331,7 @@ class Supervisor:
         if (not getattr(self.git_history, 'business_commits', False) or not path.is_file()
                 or path.is_symlink() or path.stat().st_size > 512*1024):
             return None
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         if (value.get('round') != index or value.get('tree') != tree
                 or value.get('candidate_tree') != self.git_history.candidate.get('commit')
                 or value.get('business_head') != self.git_history.business_head):
@@ -5515,7 +5515,7 @@ class Supervisor:
                                    watcher_result={'status': 'not_applied', 'closed': [], 'reasons': [str(invalid)],
                                                    'issues': {v['id']: v['status'] for v in self.audit.items}})
             self._records.append(rejected)
-            saved = json.loads((self.run_dir / 'state.json').read_text())
+            saved = json.loads((self.run_dir / 'state.json').read_text(encoding='utf-8'))
             self._write_state(self._records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), tree)
             # Keep the read-only tool and provider boundary. The next invocation is
             # charged to the existing cumulative call/time budget.
@@ -5550,7 +5550,7 @@ class Supervisor:
         if report_only:
             if role != 'worker' or not read_only:
                 raise RecoveryError('Report-only invocation requires a read-only worker')
-            schema = json.loads(self.schema_path.read_text())
+            schema = json.loads(self.schema_path.read_text(encoding='utf-8'))
             schema['properties']['issue_resolutions']['maxItems'] = 0
             schema_path = self.run_dir / f'{index:03d}-worker-report-schema.json'
             write_json(schema_path, schema, durable=True)
@@ -5665,7 +5665,7 @@ class Supervisor:
             messages = []
         blocked_path = self.run_dir / 'environment-blocks.json'
         if blocked_path.exists() and not blocked_path.is_symlink() and blocked_path.stat().st_size <= 65536:
-            prompt += '\nKnown environment validation gaps (not proof of code defects):\n' + blocked_path.read_text()
+            prompt += '\nKnown environment validation gaps (not proof of code defects):\n' + blocked_path.read_text(encoding='utf-8')
         if role == 'worker' and self.git_history:
             destination = (self.git_history.business_head['ref'] if getattr(self.git_history, 'business_commits', False)
                            else self.git_history.ref)

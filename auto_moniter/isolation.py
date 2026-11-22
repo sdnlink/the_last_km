@@ -34,7 +34,7 @@ class ReviewIsolation:
         # This is a capability reduction, not an HTTP endpoint firewall.
         import json
         try:
-            files_only = json.loads((self.run_dir / 'state.json').read_text()).get('quality_policy', {}).get('review_tools') == 'files_only'
+            files_only = json.loads((self.run_dir / 'state.json').read_text(encoding='utf-8')).get('quality_policy', {}).get('review_tools') == 'files_only'
         except FileNotFoundError:
             files_only = False
         if files_only and not isinstance(self, WorkerIsolation):
@@ -50,7 +50,7 @@ class ReviewIsolation:
         # up the probe even when sandbox support is unavailable.
         with tempfile.TemporaryDirectory(prefix=".review-probe-", dir=self.cwd) as directory:
             path = Path(directory) / "probe"
-            path.write_text("original")
+            path.write_text("original", encoding="utf-8")
             code = """import pathlib,sys
 p=pathlib.Path(sys.argv[1])
 assert p.read_text() == 'original'
@@ -64,7 +64,7 @@ for operation in (lambda: p.write_text('changed'), lambda: p.unlink(), lambda: p
                 result = subprocess.run(prepared.argv, capture_output=True, text=True, timeout=10)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise ProviderError(f"Cannot verify strict read-only isolation: {exc}") from exc
-            if result.returncode or not path.exists() or path.read_text() != "original":
+            if result.returncode or not path.exists() or path.read_text(encoding="utf-8") != "original":
                 raise ProviderError("Strict read-only probe failed; no worker started: " + result.stderr[-1000:])
 
 
@@ -77,7 +77,7 @@ class WorkerIsolation(ReviewIsolation):
         protected = []
         import json
         try:
-            state = json.loads((self.run_dir / "state.json").read_text())
+            state = json.loads((self.run_dir / "state.json").read_text(encoding="utf-8"))
             for name in state.get("protect_paths", []):
                 candidate = (self.cwd / name).resolve()
                 if not candidate.exists() or not candidate.is_relative_to(self.cwd):
@@ -111,12 +111,12 @@ class WorkerIsolation(ReviewIsolation):
         if provider == "paseo" or self.run_dir.is_relative_to(self.cwd):
             raise ProviderError("Protected worker requires native CLI and state outside project")
         path = self.run_dir / ".worker-isolation-probe"
-        path.write_text("protected")
+        path.write_text("protected", encoding="utf-8")
         try:
             code = "import pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.read_text()=='protected'; p.write_text('changed')"
             result = subprocess.run(self.wrap(PreparedCommand([sys.executable, "-c", code, str(path)]), provider).argv,
                                     capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 or "Read-only file system" not in result.stderr or path.read_text() != "protected":
+            if result.returncode == 0 or "Read-only file system" not in result.stderr or path.read_text(encoding="utf-8") != "protected":
                 raise ProviderError("Worker state isolation probe failed: " + result.stderr[-1000:])
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ProviderError(f"Worker isolation unavailable: {exc}") from exc

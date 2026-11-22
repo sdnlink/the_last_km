@@ -40,7 +40,7 @@ def command(root, name):
         if (not manifest.is_file() or manifest.resolve() != manifest
                 or manifest.stat().st_size > 512 * 1024):
             raise ValueError('Local Rust test needs its existing package Cargo.toml: ' + name)
-        data = tomllib.loads(manifest.read_text())
+        data = tomllib.loads(manifest.read_text(encoding='utf-8'))
         package = data.get('package', {})
         if not isinstance(package, dict) or not isinstance(package.get('name'), str):
             raise ValueError('Local Rust test must belong to a Cargo package: ' + name)

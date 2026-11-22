@@ -112,7 +112,7 @@ def recover(history):
         return
     if journal.is_symlink() or journal.stat().st_size > 4 * 1024 * 1024:
         raise GitHistoryError('Invalid publication journal')
-    saved = json.loads(journal.read_text())
+    saved = json.loads(journal.read_text(encoding='utf-8'))
     if saved.get('project') != str(history.cwd) or saved.get('audit_ref') != history.ref:
         raise GitHistoryError('Publication journal belongs to another task')
     business_ref = saved['before_business']['ref']
@@ -416,7 +416,7 @@ def publish(history, index, worker_data, reviewer_data, worker_text, reviewer_te
             history._defer_refs = False
             try:
                 recover(history)
-                restored = json.loads(history.state_path.read_text())
+                restored = json.loads(history.state_path.read_text(encoding='utf-8'))
                 history.head, history.initial = restored['head'], restored['initial']
                 history.last_worker, history.last_record = restored['last_worker'], restored['last_record']
                 history.business_head = restored['business_head']

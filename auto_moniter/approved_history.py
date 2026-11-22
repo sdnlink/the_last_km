@@ -30,13 +30,13 @@ class ApprovedHistory(GitHistory):
         from auto_moniter.work_checkpoint import recover as recover_work
         recover_work(self)
         if self.state_path.exists():
-            saved=json.loads(self.state_path.read_text())
+            saved=json.loads(self.state_path.read_text(encoding='utf-8'))
             if not saved.get('approval_only') or saved.get('project')!=str(self.cwd) or saved.get('ref') not in (self.ref, 'refs/heads/auto-moniter/'+self.key):
                 raise GitHistoryError('Saved Git policy does not match review-first workflow')
             self.ref=saved['ref']
             from auto_moniter.publication import recover
             recover(self)
-            saved=json.loads(self.state_path.read_text())
+            saved=json.loads(self.state_path.read_text(encoding='utf-8'))
             self.head,self.initial=saved['head'],saved['initial']
             self.last_worker,self.last_record=saved.get('last_worker',{}),saved.get('last_record',{})
             self.candidate=saved.get('candidate',{})

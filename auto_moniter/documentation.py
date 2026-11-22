@@ -62,7 +62,7 @@ def _verify(project, baseline_path):
     dev, contract = review.module('check_development_contracts'), review.module('check_hzd_contracts')
     docs, implementation, resources = dev.load_context()
     api = contract.load_spec()
-    record = json.loads((project / 'docs/sql/validation/2026-11-05-code-review.json').read_text())
+    record = json.loads((project / 'docs/sql/validation/2026-11-05-code-review.json').read_text(encoding='utf-8'))
     archived = {row['path'] for row in record['artifacts']
                 if row['path'].startswith('docs/') and Path(row['path']).suffix == '.md'
                 and hashlib.sha256((project / row['path']).read_bytes()).hexdigest() != row['sha256']}

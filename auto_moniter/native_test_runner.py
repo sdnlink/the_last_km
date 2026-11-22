@@ -12,7 +12,7 @@ def run(args, root, path):
     if not manifest.is_relative_to(root) or manifest.resolve() != manifest or not manifest.exists():
         print('Native test project is missing or outside the workspace.', flush=True)
         return 1
-    classes = re.findall(r'\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?XCTestCase\b', path.read_text())
+    classes = re.findall(r'\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?XCTestCase\b', path.read_text(encoding='utf-8'))
     if not classes:
         print('No XCTestCase classes found in the declared Swift test file.', flush=True)
         return 1

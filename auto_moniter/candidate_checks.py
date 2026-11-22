@@ -49,7 +49,7 @@ def _failed_assertion_outputs(receipt, run):
         try:
             # Callers validate receipt/log hashes first. Skip command text:
             # mentioning an assertion in the requested command is not evidence.
-            output = '\n'.join(path.read_text(errors='replace').splitlines()[2:])
+            output = '\n'.join(path.read_text(encoding='utf-8', errors='replace').splitlines()[2:])
         except OSError:
             pass
         asserted = re.search(r'AssertionError|FAILED \((?:failures|errors)=|'

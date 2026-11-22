@@ -20,6 +20,8 @@ from auto_moniter.failures import classify
 from auto_moniter.health import run_health
 from auto_moniter.live import LiveOutput
 from auto_moniter.metering import UsageMeter
+from auto_moniter.quality import Quality
+from auto_moniter.quota import history_roots
 from auto_moniter.redaction import redact, register_secrets, safe
 from auto_moniter.referee import Journal as RefereeJournal
 from auto_moniter.runlog import diagnostic_summary
@@ -343,6 +345,27 @@ class StorageAndCliImportTests(unittest.TestCase):
         self.assertIn("fatal: boom", summary)
         json_stderr = json.dumps({"error": "rate limited"}) + "\n"
         self.assertIn("rate limited", diagnostic_summary("", json_stderr, failed=True))
+
+    def test_quality_copies_state_rejects_falsy_non_dict_and_handles_bad_shlex(self):
+        saved = {"milestones": ["m1"], "checks": {"cmd": True}, "blocker_key": "", "blocker_count": 0}
+        quality = Quality({}, {}, saved)
+        quality.milestone("m2")
+        self.assertEqual(saved["milestones"], ["m1"])
+        self.assertEqual(Quality({}, {}, {}).state["milestones"], [])
+        for bad in ([], "", 0, False):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                Quality({}, {}, bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            quality.bind_checks(Path(tmp), ["echo 'unterminated quote"])
+            self.assertEqual(quality.command_assets, set())
+
+    def test_quota_history_roots_tolerates_missing_git(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("auto_moniter.quota.subprocess.run", side_effect=FileNotFoundError("git")):
+                self.assertEqual(history_roots(root), [root / ".auto-moniter/history"])
 
 
 if __name__ == "__main__":

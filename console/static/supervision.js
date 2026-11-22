@@ -44,7 +44,7 @@ export function mountSupervision(path,{setupFailed=false}={}){
   const input=Object.fromEntries(new FormData(form));
   update({action:'save',...input});
  });
- toggle.addEventListener('click',()=>update({action:current.status==='paused'?'resume':'pause'}));
- refresh.addEventListener('click',()=>update());
+ toggle.addEventListener('click',()=>{if(!current||toggle.disabled)return;update({action:current.status==='paused'?'resume':'pause'});});
+ refresh.addEventListener('click',()=>{if(refresh.disabled)return;update();});
  update();
 }

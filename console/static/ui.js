@@ -78,7 +78,7 @@ const escape = (value) =>
   );
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const bytes = (n) => {
-  if (!Number.isFinite(n)) return "—";
+  if (!Number.isFinite(n) || n < 0) return "—";
   if (n < 1024) return `${n} B`;
   const e = Math.min(4, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / 1024 ** e).toFixed(e > 1 ? 1 : 0)} ${["B", "KiB", "MiB", "GiB", "TiB"][e]}`;
@@ -118,7 +118,7 @@ function taskButtons(task, compact = false) {
             ? i18n("从检查点恢复，保留原模型、审核、隔离与预算配置")
             : "";
       const label = cancellingPause ? i18n("取消暂停") : actionLabels[action];
-      return `<button class="button ${compact ? "small-button" : ""} ${["stop","delete"].includes(action) ? "danger" : ["start", "resume", "continue"].includes(action) ? "primary" : "secondary"}" data-action="${action}" data-id="${task.id}" title="${title}" ${pending.has(task.id) ? "disabled" : ""}>${escape(label)}</button>`;
+      return `<button class="button ${compact ? "small-button" : ""} ${["stop","delete"].includes(action) ? "danger" : ["start", "resume", "continue"].includes(action) ? "primary" : "secondary"}" data-action="${escape(action)}" data-id="${escape(task.id)}" title="${escape(title)}" ${pending.has(task.id) ? "disabled" : ""}>${escape(label)}</button>`;
     })
     .join("");
 }
@@ -218,9 +218,14 @@ function timeLabel(value) {
 function dateTimeLabel(value, timeZone) {
   const date = new Date(value);
   if (!value || Number.isNaN(date.getTime())) return '—';
-  return timeZone
-    ? date.toLocaleString(locale(), {timeZone, timeZoneName:'short'})
-    : date.toLocaleString(locale());
+  if (timeZone) {
+    try {
+      return date.toLocaleString(locale(), {timeZone, timeZoneName:'short'});
+    } catch {
+      return date.toLocaleString(locale());
+    }
+  }
+  return date.toLocaleString(locale());
 }
 
 function stableHTML(el, html) {

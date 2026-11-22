@@ -5,6 +5,9 @@ import {api,fragment,toast,refresh} from './core.js';
 let loaded,sequence=0,readSequence=0,target=null,timer,data=null;
 const pending=new Set();
 const draftKey=id=>`auto-moniter-requirement-queue-${id}`;
+const readDraft=id=>{try{return localStorage.getItem(draftKey(id))||'';}catch{return '';}};
+const writeDraft=(id,value)=>{try{localStorage.setItem(draftKey(id),value);}catch{}};
+const clearDraft=(id,expected)=>{try{if(localStorage.getItem(draftKey(id))===expected)localStorage.removeItem(draftKey(id));}catch{}};
 const current=(seq,id)=>sequence===seq&&target===id&&$('#requirement-queue-dialog')?.open;
 
 export function positionOptions(waiting) {
@@ -51,7 +54,7 @@ async function mutate(body) {
   pending.add(id);readSequence++;render(data);$('#requirement-queue-error').hidden=true;
   try{
     const value=await api(`/api/tasks/${id}/requirement-queue`,body);
-    if(body.action!=='remove'&&localStorage.getItem(draftKey(id))===body.text)localStorage.removeItem(draftKey(id));
+    if(body.action!=='remove')clearDraft(id,body.text);
     if(current(seq,id)){
       if(body.action!=='remove'&&$('#requirement-queue-text').value===body.text)$('#requirement-queue-text').value='';
       render(value);
@@ -66,7 +69,7 @@ async function ensure() {
     if(!$('#dialog-styles')){const link=document.createElement('link');link.id='dialog-styles';link.rel='stylesheet';link.href='/dialogs.css';document.head.append(link);}
     $('#dialog-root').insertAdjacentHTML('beforeend',await fragment('requirement-queue'));
     $('#requirement-queue-dialog').addEventListener('close',()=>{sequence++;target=null;data=null;clearTimeout(timer);});
-    $('#requirement-queue-text').addEventListener('input',event=>{if(target)localStorage.setItem(draftKey(target),event.target.value);});
+    $('#requirement-queue-text').addEventListener('input',event=>{if(target)writeDraft(target,event.target.value);});
     $('#requirement-queue-form').addEventListener('submit',async event=>{
       event.preventDefault();const text=$('#requirement-queue-text').value,position=$('#requirement-queue-position').value;
       if(!data||!['first','last',...data.waiting.map(item=>item.id)].includes(position)){$('#requirement-queue-error').hidden=false;$('#requirement-queue-error').textContent=i18n('所选需求已离开等待队列，请重新选择位置');return;}
@@ -80,7 +83,7 @@ export async function openRequirementQueue(id) {
   const seq=++sequence;target=null;data=null;clearTimeout(timer);
   try{
     await ensure();if(seq!==sequence)return;
-    target=id;$('#requirement-queue-error').hidden=true;$('#requirement-queue-text').value=localStorage.getItem(draftKey(id))||'';
+    target=id;$('#requirement-queue-error').hidden=true;$('#requirement-queue-text').value=readDraft(id);
     $('#requirement-queue-title').textContent=i18n('读取任务…');$('#requirement-queue-notice').textContent=i18n('正在读取需求队列…');
     for(const selector of ['#requirement-queue-current','#requirement-queue-waiting','#requirement-queue-completed'])stableHTML($(selector),'');
     $('#requirement-queue-position').value='last';$('#requirement-queue-submit').disabled=true;

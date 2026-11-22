@@ -1,4 +1,5 @@
 """Monitor-owned requirements, immutable test baselines and verified progress."""
+import copy
 import fnmatch
 import json
 import shlex
@@ -95,10 +96,15 @@ def cited(paths, entries):
 class Quality:
     def __init__(self, config, baseline, saved=None):
         self.config = policy(config) if config else {}
-        self.state = saved or {'milestones': [], 'checks': {}, 'blocker_key': '', 'blocker_count': 0}
+        if saved is None or saved == {}:
+            self.state = {'milestones': [], 'checks': {}, 'blocker_key': '', 'blocker_count': 0}
+        elif isinstance(saved, dict):
+            self.state = copy.deepcopy(saved)
+        else:
+            raise ValueError('Invalid saved quality state')
         self.baseline = baseline
         self.command_assets = set()
-        if (not isinstance(self.state, dict) or set(self.state) != {'milestones', 'checks', 'blocker_key', 'blocker_count'}
+        if (set(self.state) != {'milestones', 'checks', 'blocker_key', 'blocker_count'}
                 or not isinstance(self.state['milestones'], list) or len(self.state['milestones']) > 1000
                 or any(not isinstance(k, str) for k in self.state['milestones'])
                 or not isinstance(self.state['checks'], dict) or len(self.state['checks']) > 1000
@@ -109,8 +115,15 @@ class Quality:
 
     def bind_checks(self, project, commands):
         for command in commands:
-            for token in shlex.split(command):
-                path = (project / token).resolve()
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                continue
+            for token in tokens:
+                try:
+                    path = (project / token).resolve()
+                except (OSError, ValueError):
+                    continue
                 if path.is_relative_to(project) and str(path) in self.baseline:
                     self.command_assets.add(str(path))
 

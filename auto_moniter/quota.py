@@ -13,16 +13,20 @@ def tree_bytes(root: Path) -> int:
         for name in files:
             try:
                 total += (Path(parent) / name).lstat().st_size
-            except FileNotFoundError:
+            except OSError:
                 pass
     return total
 
 
 def history_roots(cwd: Path) -> list[Path]:
     roots = [cwd / '.auto-moniter/history']
-    result = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--git-common-dir'],
-                            capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
+    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0'}
+    try:
+        result = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--git-common-dir'],
+                                capture_output=True, encoding='utf-8', errors='replace', env=env, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return roots
+    if result.returncode == 0 and result.stdout.strip():
         roots.append((cwd / result.stdout.strip()).resolve())
     return roots
 

@@ -65,3 +65,12 @@ test('regional formats follow browser preferences and schedules show their own z
   else delete globalThis.navigator;
  }
 });
+
+test('bytes rejects negative numbers and dateTimeLabel falls back on invalid timeZone', async () => {
+ const {bytes,dateTimeLabel}=await import('../console/static/ui.js');
+ assert.equal(bytes(-5),'—');
+ assert.equal(bytes(0),'0 B');
+ const formatted=dateTimeLabel('2026-11-22T12:00:00Z','Invalid/Timezone_Name');
+ assert.notEqual(formatted,'—');
+ assert.ok(formatted.includes('2026'));
+});

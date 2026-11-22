@@ -99,7 +99,7 @@ class FunctionModuleDeliveryTests(unittest.TestCase):
         ledger=FunctionTasks()
         ledger.current=self.first
         milestone={**self.final,'delivery_scope':'module'}
-        final={**self.final,'id':'FINAL','depends_on':['F2']}
+        final={**self.final,'id':'FINAL','kind':'verification','depends_on':['F2']}
         with self.assertRaisesRegex(ValueError,'prerequisite module acceptance'):
             monitor._validate_complete_function_plan([self.first,milestone,final],ledger,modules.items,BRIEF)
         implementation={**milestone,'delivery_scope':'function'}

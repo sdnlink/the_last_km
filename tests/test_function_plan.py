@@ -110,7 +110,8 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         first, final = tasks()
         occupied = 'test_browser.cjs'
         first['test_files'] = [occupied]
-        first['verification'] = ['At a narrow browser viewport, the card retains its width after reload']
+        first['check_ids'].append('auto:1')
+        first['verification'] = ['auto:1 checks that the card retains its width after reload at a narrow browser viewport']
         initial = ScriptedProvider('reviewer', [complete_plan(first, final)])
         monitor = self.monitor(ScriptedProvider('worker', []), initial)
         record_assignment = monitor._record_assignment
@@ -124,15 +125,18 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         self.assertFalse((self.run / 'function-baseline.json.gz').exists())
         (self.root / occupied).write_text('// existing test asset\n')
 
-        repaired = {**first, 'test_files': []}
-        reviewer = ScriptedProvider('reviewer', [complete_plan(repaired, final),
+        repaired = {**first, 'test_files': [], 'check_ids': ['check:1'],
+                    'verification': ['check:1 checks that the card retains its width after reload at a narrow browser viewport']}
+        wrong_scope = {**repaired, 'outputs': 'Unexpected expansion'}
+        reviewer = ScriptedProvider('reviewer', [complete_plan(wrong_scope, final), complete_plan(repaired, final),
             result('F1', 'accepted', file='a.py'), result('F2', 'accepted', file='b.py', status='done')])
         worker = self.worker()
         report = self.monitor(worker, reviewer, resume=True).run()
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual((self.root / occupied).read_text(), '// existing test asset\n')
-        self.assertIn('Correct test_files, review_test and check_ids only', reviewer.calls[0]['prompt'])
+        self.assertIn('Correct test_files, review_test and check_ids in the current assignment', reviewer.calls[0]['prompt'])
         self.assertIn('Verify the user-visible operation', reviewer.calls[0]['prompt'])
+        self.assertIn('Test path repair changed protected assignment fields: outputs', reviewer.calls[1]['prompt'])
         self.assertEqual(len(worker.calls), 2)
 
     def test_plan_validation_rejects_dependency_cycles_and_missing_criteria(self):

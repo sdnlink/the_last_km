@@ -606,7 +606,7 @@ class Supervisor:
                         records,
                         last_worker,
                     )
-                test_conflicts = self._unstarted_first_assignment_test_conflicts()
+                test_conflicts = self._unstarted_assignment_test_conflicts()
                 if test_conflicts:
                     self._planning_rejection = {'task_id': self.function_tasks.current['id'],
                         'reason': 'Existing project tests were declared as new files: ' + ', '.join(test_conflicts)}
@@ -1184,6 +1184,7 @@ class Supervisor:
                             raise ValueError('Verification repair must use a new implementation task ID')
                         staged.current = None
                         staged.assign(review.next_task, self.modules.items)
+                        self._validate_new_assignment_tests(staged.current)
                         problems = function_plan.assertion_problems(staged.current)
                         if problems:
                             raise ValueError(problems[0])
@@ -1384,7 +1385,8 @@ class Supervisor:
             self._retry_pause(stall + 1, "unfinished review")
 
         follow_up_stopped = self._stop_reason.startswith('Next requirement not ready')
-        return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(('Verified progress','Acceptance environment')) else 'stopped',
+        return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(
+                                ('Verified progress', 'Acceptance environment', 'Project dependencies cancelled')) else 'stopped',
                             self._stop_reason if follow_up_stopped else f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
 
     def _business_head_changed(self):
@@ -1460,8 +1462,17 @@ class Supervisor:
             return
         self.project.observe(force=True)
         while self.project.waiting() and not self._stop:
-            self._beat('waiting for project dependencies: '+', '.join(self.project.waiting()))
             self._process_control()
+            if self._stop:
+                return
+            cancelled = [peer['id'] for peer in self.project.current.get('peers', [])
+                         if peer['id'] in self.project.waiting() and peer.get('status') == 'cancelled']
+            if cancelled:
+                self._stop = True
+                self._stop_reason = 'Project dependencies cancelled; update the task dependencies before resuming: ' + ', '.join(cancelled)
+                self._event('project_dependencies_blocked', dependencies=cancelled)
+                return
+            self._beat('waiting for project dependencies: '+', '.join(self.project.waiting()))
             self._check_budget()
             self._stop_event.wait(.5)
             self.project.observe()
@@ -1715,14 +1726,20 @@ class Supervisor:
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
         if next_function and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
-            if self._unstarted_first_assignment_test_conflicts():
-                # Repair only the test declaration before any worker call or baseline exists.
+            if self._unstarted_assignment_test_conflicts():
+                # Repair the test declaration only before this assignment starts.
                 previous = dispatch.current
-                retained = {k for k in previous if k not in {'test_files', 'review_test', 'check_ids'}}
+                retained = {k for k in previous if k not in {'test_files', 'review_test', 'check_ids', 'verification'}}
                 approved = {key for key in previous['check_ids'] if not key.startswith('auto:')}
-                if (any(revised.get(k) != previous[k] for k in retained)
-                        or not approved <= set(revised['check_ids'])):
-                    raise ValueError('Test path repair must preserve the active assignment and its fixed checks')
+                changed = sorted(k for k in retained if revised.get(k) != previous[k])
+                if changed:
+                    raise ValueError('Test path repair changed protected assignment fields: ' + ', '.join(changed))
+                missing = sorted(approved - set(revised['check_ids']))
+                if missing:
+                    raise ValueError('Test path repair removed approved check IDs: ' + ', '.join(missing))
+                problems = function_plan.assertion_problems(revised)
+                if problems:
+                    raise ValueError(problems[0])
             elif function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
                 repairing_scope = bool((self._planning_rejection or {}).get('scope_repair'))
                 if (not repairing_scope or function_tasks.identity(revised)[:-1] != function_tasks.identity(dispatch.current)[:-1]
@@ -1738,7 +1755,7 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
-            if not self.function_tasks.current or self._unstarted_first_assignment_test_conflicts():
+            if not self.function_tasks.current or self._unstarted_assignment_test_conflicts():
                 self._validate_new_assignment_tests(dispatch.current)
         elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
             raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
@@ -1981,13 +1998,19 @@ class Supervisor:
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
                     if self.function_tasks.current:
-                        conflicts = self._unstarted_first_assignment_test_conflicts()
+                        conflicts = self._unstarted_assignment_test_conflicts()
                         if conflicts:
+                            fixed = [key for key in self.function_tasks.current['check_ids']
+                                     if not key.startswith('auto:')]
                             prompt += ('\nThe worker has not started. Preserve the existing project tests at '
                                        + ', '.join(conflicts)
-                                       + '. Correct test_files, review_test and check_ids only in the first assignment. '
-                                       'Use a new path for any new test and preserve fixed checks. If the existing '
-                                       'test is needed, reference an approved regression or fixed check that covers it. '
+                                       + '. Correct test_files, review_test and check_ids in the current assignment. '
+                                       'Update evidence references in verification while keeping its expected behaviors. '
+                                       'Retain these approved check IDs: ' + ', '.join(fixed)
+                                       + '. Use a new path for any new test. Cite a fixed check that actually runs an '
+                                       'existing test, or select a regression ID already listed in the catalog. '
+                                       'The presence of a test file does not create a regression ID. Keep all other '
+                                       'assignment fields and the rest of the plan unchanged. '
                                        'Keep next_task and the plan first entry equal.')
                         prompt += '\nExact unfinished assignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
             elif next_function:
@@ -3535,22 +3558,22 @@ class Supervisor:
             return self._function_baseline
         if snapshot is None:
             snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-        # Read-only verification can be reassigned under the same ID after a
-        # repair is accepted. Its earlier attempts used the pre-repair baseline.
-        after_round = 0
-        if self._verification_only():
-            after_round = max((item['round'] for item in self.function_tasks.accepted), default=0)
-        # A worker call after this boundary can have started without a result.
-        started = any(call.get('role') == 'worker' and call.get('task_id') == task['id']
-                      and call['round'] > after_round
-                      for call in (self._last_worker_invocation, self._last_invocation))
-        started |= any(record.role == 'worker' and record.verdict.task_id == task['id']
-                       and record.index > after_round
-                       for record in self._records)
         self._function_baseline = function_gate.baseline(
             self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,
-            missing_ok=not started, historical_source=self._historical_function_source)
+            missing_ok=not self._assignment_worker_started(task), historical_source=self._historical_function_source)
         return self._function_baseline
+
+    def _assignment_worker_started(self, task):
+        # Verification can be reassigned under the same ID after an accepted
+        # repair. Only calls after that repair belong to the new attempt.
+        after_round = 0
+        if task.get('kind') == 'verification':
+            after_round = max((item['round'] for item in self.function_tasks.accepted), default=0)
+        return any(call.get('role') == 'worker' and call.get('task_id') == task['id']
+                   and call['round'] > after_round
+                   for call in (self._last_worker_invocation, self._last_invocation)) or any(
+                       record.role == 'worker' and record.verdict.task_id == task['id']
+                       and record.index > after_round for record in self._records)
 
     def _existing_assignment_tests(self, task):
         return [name for name in task['test_files']
@@ -3562,11 +3585,18 @@ class Supervisor:
             raise ValueError(task['id'] + '.test_files already exist: ' + ', '.join(existing)
                              + '. Preserve those files and choose unique paths for new tests.')
 
-    def _unstarted_first_assignment_test_conflicts(self):
+    def _unstarted_assignment_test_conflicts(self):
         task = self.function_tasks.current
-        if (not self._function_gate or not task or self._next_round != 1 or self._last_worker_invocation
-                or (self.run_dir / 'function-baseline.json.gz').exists()):
+        if not self._function_gate or not task or self._assignment_worker_started(task):
             return []
+        path = self.run_dir / 'function-baseline.json.gz'
+        if path.exists():
+            try:
+                with gzip.open(path, 'rt', encoding='utf-8') as stream:
+                    if json.load(stream)['id'] == task['id']:
+                        return []  # Materialized reviewer tests belong to this baseline.
+            except (OSError, ValueError, KeyError, TypeError):
+                return []  # Damaged evidence must fail baseline recovery, not be reset.
         return self._existing_assignment_tests(task)
 
     def _historical_function_source(self, file, digest):
@@ -3906,6 +3936,7 @@ class Supervisor:
                             raise ValueError(problems[0])
                     self._validate_function_plan(staged, self.modules.items, self.requirements_review,
                                                  provisional=task)
+                    self._validate_new_assignment_tests(staged.current)
                 except ValueError as exc:
                     staged.current = None
                     rejected_id = candidate.get('id', '') if isinstance(candidate, dict) else ''

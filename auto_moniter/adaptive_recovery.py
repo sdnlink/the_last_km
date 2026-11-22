@@ -21,7 +21,7 @@ class RecoveryJournal:
         if self.path.is_symlink() or self.path.stat().st_size > 256*1024:
             raise ValueError('Unsafe adaptive recovery journal')
         try:
-            value = json.loads(self.path.read_text())
+            value = json.loads(self.path.read_text(encoding='utf-8'))
         except RecursionError as exc:
             raise ValueError('Adaptive recovery journal is too deeply nested') from exc
         if (not isinstance(value,dict) or value.get('version') != 1

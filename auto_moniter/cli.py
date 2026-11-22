@@ -392,7 +392,7 @@ def _run(args: argparse.Namespace) -> int:
         review_every=args.review_every,
         git_history=args.git_history,
         modules=definitions(json.loads(args.modules.expanduser().read_text(encoding="utf-8"))) if args.modules else [],
-        quality_policy=json.loads(args.quality_policy.expanduser().read_text()) if args.quality_policy else {},
+        quality_policy=json.loads(args.quality_policy.expanduser().read_text(encoding="utf-8")) if args.quality_policy else {},
         workflow=args.workflow or ('auto' if args.resume else 'legacy' if args.no_review else 'review-first'),
         task_type=args.task_type or ('auto' if args.resume else 'code'),
         full_function_plan=args.full_function_plan,

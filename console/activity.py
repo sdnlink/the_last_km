@@ -190,7 +190,8 @@ class ActivityReader:
                 continue
             text = EVENT_LABELS[name]
             if name == 'agent_start':
-                text = f"第 {event.get('round', '?')} 轮 · {'独立审查器' if event.get('role') == 'reviewer' else '执行器'}开始工作"
+                role_label = {'reviewer': '独立审查器', 'referee': '裁判'}.get(event.get('role'), '执行器')
+                text = f"第 {event.get('round', '?')} 轮 · {role_label}开始工作"
             elif name == 'module_accepted':
                 text += '：' + str(event.get('modules') or '')
             elif name == 'check_finished':

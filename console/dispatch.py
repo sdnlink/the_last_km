@@ -16,11 +16,12 @@ def page(state, number=1, size=10, status='all'):
     ledger = FunctionTasks(state.get('function_tasks'))
     plan = restore(state.get('function_plan'))
     enabled = bool(state.get('function_dispatch'))
-    ready = bool(plan and plan['cycle'] == len(state.get('requirement_cycles', [])) + 1)
+    cycles = state.get('requirement_cycles') or []
+    ready = bool(plan and plan['cycle'] == len(cycles) + 1)
     criteria = {}
-    for module in state.get('modules', []):
+    for module in state.get('modules') or []:
         criteria.update({f"{module['id']}:{index}":text for index, text in enumerate(module.get('acceptance', []), 1)})
-    for cycle in state.get('requirement_cycles', []):
+    for cycle in cycles:
         criteria.update(requirement_criteria(cycle['requirements_review']))
     criteria.update(requirement_criteria(state.get('requirements_review') or {}))
     rows = [{'task':item['task'], 'status':'accepted', 'accepted_round':item['round'],

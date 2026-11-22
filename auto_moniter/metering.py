@@ -5,11 +5,15 @@ import math
 
 class UsageMeter:
     def __init__(self, saved=None):
-        self.state = saved or {'tokens': 0, 'cost_usd': 0.0, 'reported_turns': 0, 'unreported_turns': 0}
-        if isinstance(self.state, dict):
-            self.state.setdefault('unknown_token_turns', self.state.get('unreported_turns', 0))
-            self.state.setdefault('unknown_cost_turns', self.state.get('unreported_turns', 0))
-        if (not isinstance(self.state, dict) or set(self.state) != {'tokens', 'cost_usd', 'reported_turns', 'unreported_turns', 'unknown_token_turns', 'unknown_cost_turns'}
+        if saved is None or saved == {}:
+            self.state = {'tokens': 0, 'cost_usd': 0.0, 'reported_turns': 0, 'unreported_turns': 0}
+        elif isinstance(saved, dict):
+            self.state = dict(saved)
+        else:
+            raise ValueError('Invalid saved provider usage')
+        self.state.setdefault('unknown_token_turns', self.state.get('unreported_turns', 0))
+        self.state.setdefault('unknown_cost_turns', self.state.get('unreported_turns', 0))
+        if (set(self.state) != {'tokens', 'cost_usd', 'reported_turns', 'unreported_turns', 'unknown_token_turns', 'unknown_cost_turns'}
                 or any(type(self.state[k]) is not int or self.state[k] < 0 for k in ('tokens', 'reported_turns', 'unreported_turns', 'unknown_token_turns', 'unknown_cost_turns'))
                 or type(self.state['cost_usd']) not in (int, float) or not math.isfinite(self.state['cost_usd']) or self.state['cost_usd'] < 0):
             raise ValueError('Invalid saved provider usage')
@@ -20,8 +24,11 @@ class UsageMeter:
         # Only terminal usage records. Assistant/tool text cannot report usage
         # to the watcher through the conclusion schema.
         for line in output.splitlines():
+            stripped = line.lstrip()
+            if not stripped.startswith('{'):
+                continue
             try:
-                event = json.loads(line)
+                event = json.loads(stripped)
             except (ValueError, TypeError):
                 continue
             if not isinstance(event, dict) or event.get('type') not in ('turn.completed', 'result', 'end'):

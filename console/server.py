@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import secrets
@@ -134,7 +133,7 @@ class Handler(BaseHTTPRequestHandler):
             self._check_host()
             if not secrets.compare_digest(self.headers.get('X-Console-Token', '').encode('utf-8'), self.server.csrf.encode('utf-8')):
                 raise TaskError('会话已更新，请刷新页面后重试', 403)
-            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+            if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
                 raise TaskError('请求必须使用 application/json', 415)
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -208,6 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if sys.platform != 'linux':
+        print('控制台仅支持 Linux 平台（需要 /proc、POSIX 进程组和文件锁）', file=sys.stderr)
+        return 2
+    import fcntl
     cwd = args.cwd.expanduser().resolve()
     if not cwd.is_dir() or not 0 <= args.port <= 65535:
         parser.error('项目目录必须存在，端口必须在 0 到 65535 之间')

@@ -118,11 +118,14 @@ def work_details(state: dict, health: dict, activity: dict, status: str, heartbe
     roles['reviewer'].update(review_wait(state, health, status, rounds, current_round))
     referee = state.get('referee') or {}
     if referee.get('enabled'):
+        decision_summary = (referee.get('decision') or {}).get('summary') or ''
+        default_wait = '仅在中断、连续失败或停滞时介入。'
         roles['referee'] = {'role': 'referee', 'provider': reviewer,
             'status': 'running' if active and phase == 'refereeing' else 'waiting' if active else 'stopped',
-            'current_work': '裁判正在诊断中断与停滞，安排剩余计划。' if phase == 'refereeing' else
-                            '仅在中断、连续失败或停滞时介入。',
-            'wait_reason': (referee.get('decision') or {}).get('summary') or '仅在中断、连续失败或停滞时介入。',
+            'current_work': '裁判正在诊断中断与停滞，安排剩余计划。' if phase == 'refereeing' else default_wait,
+            'current_work_generated': True,
+            'wait_reason': decision_summary or default_wait,
+            **({'wait_reason_parts': [default_wait]} if not decision_summary else {}),
             'model': referee.get('model', ''), 'decision': referee.get('decision'),
             'pid': heartbeat.get('child_pid') if active and phase == 'refereeing' else None,
             'events': [e for e in workflow if e.get('role') == 'referee'][-16:]}

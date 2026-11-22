@@ -16,7 +16,7 @@ def read_json(path):
     try:
         if path.stat().st_size > LIMIT:
             return {}
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -100,33 +100,35 @@ def discover(cwd, available, *, live=False, home=None):
                                          'available': row.get('status') == 'available', 'models': [], 'source': 'paseo_cli'})
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 pass
-        jobs = {}
-        with ThreadPoolExecutor(max_workers=12) as pool:
-            for backend in backends:
-                if backend['available']:
-                    jobs[pool.submit(query, [paseo, 'provider', 'models', backend['id'], '--json'], cwd)] = ('paseo', backend)
-            for name, command in [('grok', ['models']), ('cursor', ['models'])]:
-                binary = _which('grok' if name == 'grok' else 'cursor-agent')
-                if available.get(name) and binary:
-                    jobs[pool.submit(query, [binary, *command], cwd)] = (name, None)
-            for future in as_completed(jobs):
-                name, backend = jobs[future]
-                try:
-                    output = future.result()
-                    if name == 'paseo':
-                        rows = model_rows(json.loads(output), 'paseo_cli')
-                        backend['models'] = rows
-                        # Codex/Grok native catalogs have a more direct source.
-                        if backend['id'] in catalogs:
-                            current = catalogs[backend['id']]['models']
-                            merged = {row['id']:row for row in [*rows, *current]}
-                            catalogs[backend['id']] = {'models': list(merged.values()), 'note': '本机配置/缓存及 Paseo provider 目录，未发起模型调用'}
-                    else:
-                        rows = text_models(output, 'native_cli', grok=name == 'grok')
-                        catalogs[name] = {'models': rows, 'note': '通过本机 CLI 枚举，未发起模型调用'}
-                except (OSError, ValueError, subprocess.TimeoutExpired):
-                    if backend is not None:
-                        backend['note'] = '模型目录查询失败，可使用默认模型或自定义 ID'
+        pending = []
+        for backend in backends:
+            if backend['available']:
+                pending.append(([paseo, 'provider', 'models', backend['id'], '--json'], 'paseo', backend))
+        for name, command in [('grok', ['models']), ('cursor', ['models'])]:
+            binary = _which('grok' if name == 'grok' else 'cursor-agent')
+            if available.get(name) and binary:
+                pending.append(([binary, *command], name, None))
+        if pending:
+            with ThreadPoolExecutor(max_workers=min(12, len(pending))) as pool:
+                jobs = {pool.submit(query, argv, cwd): (name, backend) for argv, name, backend in pending}
+                for future in as_completed(jobs):
+                    name, backend = jobs[future]
+                    try:
+                        output = future.result()
+                        if name == 'paseo':
+                            rows = model_rows(json.loads(output), 'paseo_cli')
+                            backend['models'] = rows
+                            # Codex/Grok native catalogs have a more direct source.
+                            if backend['id'] in catalogs:
+                                current = catalogs[backend['id']]['models']
+                                merged = {row['id']:row for row in [*rows, *current]}
+                                catalogs[backend['id']] = {'models': list(merged.values()), 'note': '本机配置/缓存及 Paseo provider 目录，未发起模型调用'}
+                        else:
+                            rows = text_models(output, 'native_cli', grok=name == 'grok')
+                            catalogs[name] = {'models': rows, 'note': '通过本机 CLI 枚举，未发起模型调用'}
+                    except (OSError, ValueError, subprocess.TimeoutExpired):
+                        if backend is not None:
+                            backend['note'] = '模型目录查询失败，可使用默认模型或自定义 ID'
     return {'at': datetime.now(timezone.utc).isoformat(), 'live': live,
             'models': catalogs, 'paseo_backends': backends,
             'note': '执行器可用表示发现本机 CLI；模型目录不等同于账户鉴权或功能验收通过'}

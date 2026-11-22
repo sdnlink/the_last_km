@@ -1,14 +1,21 @@
 """Validate native provider/model overrides for a single stopped task."""
+import argparse
 from types import SimpleNamespace
 from auto_moniter.cli import build_parser
 from auto_moniter.providers import resolve_provider
 from auto_moniter.supervisor import RunConfig,Supervisor
 
-FLAGS={'--provider','--reviewer','--model','--reviewer-model','--mode','--reviewer-mode'}
+FLAGS={'-p','--provider','--reviewer','--model','--reviewer-model','--mode','--reviewer-mode'}
 
 def prepare(arguments,data,cwd,*,settings_path=None):
     if set(data)-{'provider','reviewer','model','reviewer_model'}:raise ValueError('只允许修改 worker/reviewer 执行器和模型')
-    args=build_parser().parse_args(arguments)
+    parser=build_parser()
+    def invalid(message):raise ValueError('原始启动参数无效：'+message)
+    parser.error=invalid
+    for action in parser._actions:
+        if isinstance(action,argparse._SubParsersAction):
+            for child in action.choices.values():child.error=invalid
+    args=parser.parse_args(arguments)
     if args.no_review:raise ValueError('本入口要求独立 reviewer')
     values={k:data.get(k,getattr(args,k) or '') for k in ('provider','reviewer','model','reviewer_model')}
     for k,v in values.items():

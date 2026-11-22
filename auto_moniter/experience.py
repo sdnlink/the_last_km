@@ -21,7 +21,7 @@ class Experience:
         if self.path.is_symlink() or self.path.stat().st_size > 256*1024:
             raise ValueError('Unsafe project experience')
         try:
-            value = json.loads(self.path.read_text())
+            value = json.loads(self.path.read_text(encoding='utf-8'))
         except RecursionError as exc:
             raise ValueError('Project experience is too deeply nested') from exc
         if (not isinstance(value,dict) or value.get('version') != 1

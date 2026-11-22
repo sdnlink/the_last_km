@@ -14,6 +14,9 @@ MAX_OPEN = 128
 KEEP_CLOSED = 20
 MAX_BYTES = 512 * 1024
 FINDING_KEY = re.compile(r'^([\w.-]+)\s*[/／:]\s*\[([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)\]')
+_MODULE_PREFIX_RE = re.compile(r'^([A-Za-z0-9_.-]+)\s*[／/:：]')
+_AUD_ID_RE = re.compile(r'AUD-[1-9][0-9]{0,11}')
+_FOREIGN_AUD_RE = re.compile(r'^(AUD-[1-9][0-9]{0,11})\s*[:：]\s*(.+)$', re.S)
 
 
 def finding_key(text):
@@ -26,7 +29,7 @@ def finding_key(text):
 
 def finding_modules(text: str, known_modules, default) -> list[str]:
     """Use only an explicit known module prefix, never incidental body mentions."""
-    prefix = re.match(r'^([A-Za-z0-9_.-]+)\s*[／/:：]', text)
+    prefix = _MODULE_PREFIX_RE.match(text)
     return [prefix[1]] if prefix and prefix[1] in known_modules else sorted(set(default))
 
 
@@ -49,7 +52,7 @@ def resolutions(value: object) -> list[dict]:
         if not isinstance(item, dict) or set(item) != {"id", "summary", "evidence"}:
             raise ValueError("Each issue resolution needs id, summary and evidence")
         ident = item["id"]
-        if not isinstance(ident, str) or not re.fullmatch(r"AUD-[1-9][0-9]{0,11}", ident) or ident in seen:
+        if not isinstance(ident, str) or not _AUD_ID_RE.fullmatch(ident) or ident in seen:
             raise ValueError("Issue resolution IDs must be unique monitor-assigned AUD numbers")
         _text(item["summary"])
         evidence = item["evidence"]
@@ -84,7 +87,7 @@ class AuditLedger:
             if isinstance(finding, str) and len(finding.encode('utf-8')) > 2000:
                 raise AuditCapacityError('Audit finding exceeds 2000 UTF-8 bytes; simplify the finding before continuing')
             text = _text(finding)
-            match = re.match(r'^(AUD-[1-9][0-9]{0,11})\s*[:：]\s*(.+)$', text, re.S)
+            match = _FOREIGN_AUD_RE.match(text)
             if match and match[1] not in known:
                 text = match[2] + f' [external audit reference: {match[1]}]'
                 if len(text.encode('utf-8')) > 2000:

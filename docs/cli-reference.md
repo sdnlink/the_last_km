@@ -22,7 +22,7 @@
 | `-h`, `--help` | — | 查看 Web 帮助 |
 
 ```bash
-./start.sh --port 8000 --cwd /home/skn/code/auto_moniter
+./start.sh --port 8000 --cwd /path/to/auto_moniter
 ```
 
 启动仅创建服务。服务启动时会枚举 CLI、Paseo 后端和模型目录；模型、执行器及独立后端在新建任务表单中选择。临时角色调整只对支持的原生任务开放，不改全局设置。
@@ -34,7 +34,7 @@
 ```bash
 .venv/bin/python -m auto_moniter run \
   '按条目检查本项目功能，由 reviewer 完善需求；worker 定向修复，审核及固定检查通过后由 watcher 本地提交。' \
-  --cwd /home/skn/code/auto_moniter \
+  --cwd /path/to/auto_moniter \
   --provider grok --model grok-4.7 \
   --reviewer codex --reviewer-model gpt-6.1-sol \
   --workflow review-first --review-isolation strict \
@@ -79,7 +79,7 @@
 
 | 参数 | 新任务默认 | 使用方法 |
 | --- | --- | --- |
-| `-p NAME`, `--provider NAME` | `paseo` | worker 执行器：`paseo/claude/codex/grok/gemini/cursor/antigravity/command` |
+| `-p NAME`, `--provider NAME` | `paseo` | worker 执行器：`paseo/claude/codex/grok/antigravity/gemini/cursor/codebuddy/copilot/hermes/kimi/glm/deepseek/command` |
 | `--model ID` | 对应 CLI 默认模型 | worker 的模型 ID，不是执行器名称 |
 | `--mode MODE` | 适配器的 worker 自动批准模式 | 指定 worker 权限模式，按真实后端转换，见后表 |
 | `--paseo-backend ID` | `paseo` | 仅 worker 为 Paseo 时使用的实际后端 ID；默认值不保证你的 daemon 注册了同名后端，通常应显式选择实际枚举出的 `grok/claude/codex` 等 |
@@ -103,6 +103,9 @@
 | 原生 Gemini | `yolo` | `plan` |
 | 原生 Cursor | `force` | `plan` |
 | 原生 Antigravity | `bypass` | `plan` |
+| 原生 CodeBuddy | `bypassPermissions` | `plan` |
+| GLM / DeepSeek（Claude 独立配置） | `bypassPermissions` | `plan` |
+| 原生 Copilot / Hermes / Kimi | 适配器默认（自动执行 / `yolo` / `auto`） | 仅支持 Worker |
 | Paseo → Claude | `bypass` | 仅 `plan`，必须新会话且不能 strict 包装 daemon |
 | Paseo → Codex | `full-access` | 不支持只读 reviewer，改用原生 Codex |
 | Paseo → Grok | daemon 默认，不指定模式 | 不支持本项目要求的只读 reviewer；其 ACP 没有权限切换，不能填写 bypass/plan |
@@ -237,7 +240,7 @@ worker strict + 保护测试目录的示例配置片段：
 
 ```bash
 .venv/bin/python -m auto_moniter run --resume \
-  --cwd /home/skn/code/auto_moniter \
+  --cwd /path/to/auto_moniter \
   --run-dir /tmp/auto-moniter-feature-run \
   --provider grok --model grok-4.7 \
   --reviewer codex --reviewer-model gpt-6.1-sol \

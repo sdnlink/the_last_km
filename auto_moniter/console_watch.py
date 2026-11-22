@@ -5,6 +5,9 @@ import re
 from http.client import HTTPConnection, HTTPException
 
 
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
 def snapshot(port: int, *, task_id: str | None = None) -> dict:
     if not 1 <= port <= 65535:
         raise ValueError("Console port must be between 1 and 65535")
@@ -19,7 +22,13 @@ def snapshot(port: int, *, task_id: str | None = None) -> dict:
         response = connection.getresponse()
         if response.status != 200:
             raise ValueError(f"Console task snapshot returned HTTP {response.status}")
-        data = json.load(response)
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("Console task snapshot exceeds size limit")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("Console returned invalid JSON") from exc
     except (OSError, HTTPException) as exc:
         raise ValueError(f"Cannot read the local console task list: {exc}") from exc
     finally:

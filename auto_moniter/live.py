@@ -10,6 +10,9 @@ from pathlib import Path
 
 from auto_moniter.redaction import redact
 
+_PATCH_FILE_RE = re.compile(r'\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+)')
+_CMD_ARG_RE = re.compile(r'(?:"cmd"|\bcmd)\s*:\s*("(?:\\.|[^"\\])*")')
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -110,8 +113,8 @@ def _public_events(value: dict, at: str = '') -> list[dict]:
         elif isinstance(args, dict) and isinstance(args.get('cmd') or args.get('command'), str):
             entry.update(kind='command', text=args.get('cmd') or args['command'])
         elif name in {'exec', 'apply_patch'}:
-            paths = re.findall(r'\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+)', arguments)
-            commands = re.findall(r'(?:"cmd"|\bcmd)\s*:\s*("(?:\\.|[^"\\])*")', arguments)
+            paths = _PATCH_FILE_RE.findall(arguments)
+            commands = _CMD_ARG_RE.findall(arguments)
             if paths:
                 entry.update(kind='file', text='修改文件：' + '、'.join(paths[:8]))
             elif commands:
@@ -161,7 +164,7 @@ class LiveOutput:
         entry = {'at': now(), **entry, 'role': self.role, 'round': self.index}
         try:
             line = json.dumps(entry, ensure_ascii=False) + '\n'
-            if self.path.exists() and self.path.stat().st_size + len(line.encode()) > 256 * 1024:
+            if self.path.exists() and self.path.stat().st_size + len(line.encode('utf-8')) > 256 * 1024:
                 self.path.replace(self.path.with_name('live.previous.jsonl'))
             with self.path.open('a', encoding='utf-8') as stream:
                 stream.write(line)
@@ -185,13 +188,15 @@ class LiveOutput:
             self.discarding[stream] = True
 
     def line(self, line: str, stream: int) -> None:
-        if not line.strip():
+        stripped = line.lstrip()
+        if not stripped:
+            return
+        if not stripped.startswith(('{', '[')):
+            self.emit({'kind': 'output' if stream == 0 else 'error', **text_preview(line)})
             return
         try:
-            value = json.loads(line)
+            value = json.loads(stripped)
         except ValueError:
-            if not line.lstrip().startswith(('{', '[')):
-                self.emit({'kind': 'output' if stream == 0 else 'error', **text_preview(line)})
             return
         if isinstance(value, dict):
             if (value.get('type') == 'text' and isinstance(value.get('data'), str)

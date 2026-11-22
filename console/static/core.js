@@ -3,7 +3,7 @@ import {$,$$,escape,pending,stateLabel} from './ui.js';
 let controller = new AbortController();
 let leaving = false, configPromise, refreshJob, timer, busy = false, toastTimer;
 export function toast(message, error = false) {
-  const el = $('#toast');el.textContent=message;el.classList.toggle('error',error);el.hidden=false;
+  const el = $('#toast');if(!el)return;el.textContent=message;el.classList.toggle('error',error);el.hidden=false;
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.hidden=true,5000);
 }
 export async function config(force=false) {
@@ -35,17 +35,23 @@ export async function api(path, body, {signal} = {}) {
     const response=await fetch(path,{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',signal:scope.signal});
     let value;
     try{value=await response.json();}catch(error){if(scope.signal.aborted)throw error;throw new Error(i18n`服务返回异常（${response.status}）`);}
-    if(!response.ok){const error=new Error(value.error||i18n`请求失败（${response.status}）`);error.status=response.status;throw error;}
+    if(!response.ok){if(body&&response.status===403)configPromise=null;const error=new Error(value.error||i18n`请求失败（${response.status}）`);error.status=response.status;throw error;}
     return value;
   }catch(error){
     if(scope.timedOut())throw new Error(i18n('请求超时，请稍后重试'));
     throw error;
   }finally{scope.dispose();}
 }
-export async function fragment(name){
-  const response=await fetch(`/fragments/${name}.html`,{cache:'no-store',signal:controller.signal});
-  if(!response.ok)throw new Error(i18n('无法加载操作窗口'));
-  return response.text();
+export async function fragment(name, {signal} = {}){
+  const scope=requestScope(signal);
+  try {
+    const response=await fetch(`/fragments/${name}.html`,{cache:'no-store',signal:scope.signal});
+    if(!response.ok)throw new Error(i18n('无法加载操作窗口'));
+    return await response.text();
+  }catch(error){
+    if(scope.timedOut())throw new Error(i18n('请求超时，请稍后重试'));
+    throw error;
+  }finally{scope.dispose();}
 }
 export async function refresh() {
   clearTimeout(timer);

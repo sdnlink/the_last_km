@@ -29,7 +29,7 @@ def read_settings(path: Path | None = None) -> dict:
     try:
         if path.is_symlink() or path.stat().st_size > 256 * 1024:
             raise ValueError('Agent 配置文件无效')
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         if (not isinstance(value, dict) or not isinstance(value.get('agents', {}), dict)
                 or any(not isinstance(profile,dict) for profile in value.get('agents',{}).values())):
             raise ValueError('Agent 配置文件格式无效')

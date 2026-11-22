@@ -184,8 +184,10 @@ def run_health(run_dir: Path, stale_after: float = 60, *, snapshot: dict | None 
             usage["elapsed_s"] = round(float(usage["elapsed_s"]) + max(0, (datetime.now(timezone.utc) - recorded).total_seconds()), 3)
         except (KeyError, TypeError, ValueError):
             pass
-    modules = state.get("modules") or []
-    rounds = state.get("rounds") if isinstance(state.get("rounds"), list) else state.get("records", [])
+    raw_modules = state.get("modules")
+    modules = [item for item in (raw_modules if isinstance(raw_modules, list) else []) if isinstance(item, dict) and "id" in item]
+    raw_rounds = state.get("rounds") if isinstance(state.get("rounds"), list) else state.get("records")
+    rounds = [item for item in (raw_rounds if isinstance(raw_rounds, list) else []) if isinstance(item, dict)]
     guardian = {}
     try:
         guardian = json.loads((run_dir / "guardian.json").read_text(encoding="utf-8"))

@@ -64,9 +64,11 @@ def read_git_record(project: Path, history: dict, checkpoint: dict) -> dict:
             raise ValueError('record mismatch')
     except (ValueError, KeyError, TypeError) as exc:
         raise GitRecordError('Git 结论记录格式无效') from exc
-    metadata = git('show', '-s', '--format=%H%n%ci%n%s', commit).decode(errors='replace').splitlines()
+    metadata = git('show', '-s', '--format=%H%n%ci%n%s', commit).decode('utf-8', errors='replace').splitlines()
+    if len(metadata) < 2:
+        raise GitRecordError('无法读取本地 Git 提交元数据')
     return safe({'commit': commit, 'ref': ref, 'project': str(project), 'record': record,
-                 'current_branch': git('symbolic-ref', '--quiet', '--short', 'HEAD', check=False).decode().strip(),
+                 'current_branch': git('symbolic-ref', '--quiet', '--short', 'HEAD', check=False).decode('utf-8', errors='replace').strip(),
                  'committed_at': metadata[1], 'subject': metadata[2] if len(metadata) > 2 else '',
                  'conclusion': present_conclusion({**result, 'role': payload['role'], 'index': payload.get('round')}), 'content': payload,
                  'show_command': shlex.join(['git', '-C', str(project), 'show', object_name]),

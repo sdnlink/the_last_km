@@ -1,4 +1,4 @@
-# auto-moniter 0.4.1 运维说明
+# auto-moniter 0.4.2 运维说明
 
 本版本提供单机 Linux CLI 和 Web 控制台：对一份原始需求持续推动 worker 实现、reviewer 只读验收，完成全部模块后收尾退出。目标是保留现有代码和进度、明确记录失败、不凭 AI 自述直接交付。Web 启动与管理见 `console/README.md`。
 
@@ -6,7 +6,7 @@
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install /path/to/auto_moniter-0.4.1-py3-none-any.whl
+.venv/bin/python -m pip install /path/to/auto_moniter-0.4.2-py3-none-any.whl
 .venv/bin/auto-moniter --version
 .venv/bin/auto-moniter doctor --cwd /path/to/project
 .venv/bin/auto-moniter selftest

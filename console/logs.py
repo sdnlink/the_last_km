@@ -4,9 +4,9 @@ from array import array
 from collections import OrderedDict
 from pathlib import Path
 import os
-import re
+import threading
 
-from auto_moniter.redaction import redact
+from auto_moniter.redaction import redactor
 
 
 class LogReader:
@@ -14,12 +14,14 @@ class LogReader:
     limit_bytes = 65536
 
     def __init__(self):
+        self._lock = threading.Lock()
         self.indexes = OrderedDict()
 
     def forget(self, run: Path) -> None:
-        for path in list(self.indexes):
-            if Path(path).parent == run:
-                self.indexes.pop(path, None)
+        with self._lock:
+            for path in list(self.indexes):
+                if Path(path).parent == run:
+                    self.indexes.pop(path, None)
 
     def read(self, path: Path | None, page: int, page_size: int) -> dict:
         if path is None:
@@ -27,7 +29,8 @@ class LogReader:
         with path.open('rb') as stream:
             stat = os.fstat(stream.fileno())
             identity = (stat.st_dev, stat.st_ino)
-            previous = self.indexes.pop(str(path), None)
+            with self._lock:
+                previous = self.indexes.pop(str(path), None)
             if (previous and previous['identity'] == identity and stat.st_size >= previous['size']
                     and (stat.st_size != previous['size'] or stat.st_mtime_ns == previous['mtime'])):
                 index = previous
@@ -40,16 +43,22 @@ class LogReader:
                 block = stream.read(min(65536, stat.st_size - offset))
                 if not block:
                     break
-                for match in re.finditer(b'\n', block):
+                pos = 0
+                while True:
+                    found = block.find(b'\n', pos)
+                    if found == -1:
+                        break
                     index['breaks'] += 1
                     if index['breaks'] % self.stride == 0:
-                        index['anchors'].append(offset + match.end())
+                        index['anchors'].append(offset + found + 1)
+                    pos = found + 1
                 index['newline'] = block.endswith(b'\n')
                 offset += len(block)
             index.update(size=offset, mtime=stat.st_mtime_ns)
-            self.indexes[str(path)] = index
-            while len(self.indexes) > 8:
-                self.indexes.popitem(last=False)
+            with self._lock:
+                self.indexes[str(path)] = index
+                while len(self.indexes) > 8:
+                    self.indexes.popitem(last=False)
             total = index['breaks'] + int(bool(offset) and not index['newline'])
             pages = max(1, (total + page_size - 1) // page_size)
             page = pages if page == 0 else max(1, min(page, pages))
@@ -61,9 +70,10 @@ class LogReader:
             lines = []
             # A single enormous line must not crowd out all other requested lines.
             line_limit = max(128, self.limit_bytes // page_size - 64)
+            redact_line = redactor()
             for number in range(start, min(total, start + page_size)):
                 raw, truncated = self._line(stream, line_limit, offset)
-                text = redact(raw.decode('utf-8', errors='replace').rstrip('\r\n'))
+                text = redact_line(raw.decode('utf-8', errors='replace').rstrip('\r\n'))
                 text = text.encode('utf-8')[:line_limit].decode('utf-8', errors='ignore')
                 if truncated:
                     text += ' …（本行过长，已截断）'

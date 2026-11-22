@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,9 +46,10 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
     history = state.get('git_history') or {}
     if history.get('approval_only') and history.get('business_head'):
         def git_value(*options):
+            env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat'}
             try:
                 result = subprocess.run(['git', '-C', str(args.cwd), *options], capture_output=True,
-                                        text=True, timeout=5, check=False)
+                                        encoding='utf-8', errors='replace', env=env, timeout=5, check=False)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise ValueError('无法核对原任务业务 HEAD，请检查 Git 环境') from exc
             if result.returncode not in (0, 1, 128):
@@ -102,7 +104,9 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
         result.append('--function-dispatch')
     if state.get('full_function_plan'):
         result.append('--full-function-plan')
-    saved_referee = state.get('referee', {})
+    saved_referee = state.get('referee') or {}
+    if not isinstance(saved_referee, dict):
+        saved_referee = {}
     enabled_referee = args.referee if args.referee is not None else saved_referee.get('enabled', False)
     result.append('--referee' if enabled_referee else '--no-referee')
     referee_model = args.referee_model or saved_referee.get('model', '')

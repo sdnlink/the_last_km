@@ -11,7 +11,7 @@ LIMIT = 4 * 1024 * 1024
 def read(path):
     if path.is_symlink() or path.stat().st_size > LIMIT:
         raise GitHistoryError('Invalid task work checkpoint')
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(value, dict):
         raise GitHistoryError('Invalid task work checkpoint')
     return value

@@ -1,6 +1,5 @@
 """Delete task logs under run locks while preserving project files and metadata."""
 from contextlib import ExitStack, contextmanager
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -14,6 +13,7 @@ def run_key(run):
 
 @contextmanager
 def inactive_run(run):
+    import fcntl
     run = Path(run)
     if any(path.is_symlink() for path in (run, *run.parents)):
         raise ValueError('任务运行目录不能包含符号链接')

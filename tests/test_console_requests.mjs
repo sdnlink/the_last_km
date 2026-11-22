@@ -112,3 +112,27 @@ test('malformed JSON keeps the HTTP diagnostic', async () => {
   await assert.rejects(api('/api/tasks'),/服务返回异常（200）/);
   assert.equal(timers.size,0);
 });
+
+test('POST 403 clears the cached CSRF token so the next retry fetches a fresh token', async () => {
+  let tokenCount=0;
+  const seenTokens=[];
+  globalThis.fetch=async (path,options)=>{
+    if(path==='/api/config')return response({csrf_token:`token-${++tokenCount}`});
+    seenTokens.push(options.headers['X-Console-Token']);
+    if(seenTokens.length===1)return {ok:false,status:403,json:async()=>({error:'stale token'})};
+    return response({status:'paused'});
+  };
+  const {api}=await load();
+  await assert.rejects(api('/api/tasks/example/pause',{}),/stale token/);
+  assert.equal((await api('/api/tasks/example/pause',{})).status,'paused');
+  assert.deepEqual(seenTokens,['token-1','token-2']);
+  assert.equal(timers.size,0);
+});
+
+test('fragment enforces the 15 second timeout and releases its timer', async () => {
+  globalThis.fetch=pendingFetch;
+  const {fragment}=await load();
+  const request=fragment('create');expire();
+  await assert.rejects(request,/请求超时/);
+  assert.equal(timers.size,0);
+});

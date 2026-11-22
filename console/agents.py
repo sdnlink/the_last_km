@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from auto_moniter.agent_settings import AGENTS, executable, read_settings
 from auto_moniter.storage import write_json
-from auto_moniter.redaction import redact, register_secrets
+from auto_moniter.redaction import redact, redactor, register_secrets
 
 
 class AgentManager:
@@ -92,8 +92,7 @@ class AgentManager:
                     raise ValueError('Kimi 的 API Key 模式需要填写模型 ID')
                 if 'enabled' in row:current['enabled']=row['enabled']
                 profiles[name]=current
-            write_json(self.path, {'version':1,'initialized':data.get('initialized',False) or payload.get('complete',False),'agents':profiles}, durable=True)
-            os.chmod(self.path,0o600)
+            write_json(self.path, {'version':1,'initialized':data.get('initialized',False) or payload.get('complete',False),'agents':profiles}, durable=True, mode=0o600)
             for profile in profiles.values():register_secrets([profile.get('api_key','')])
             return self.snapshot()
 
@@ -138,14 +137,19 @@ class AgentManager:
             threading.Thread(target=self._install,args=(job,),daemon=True).start()
             return self._job_view(job)
 
+    def _update_job(self, job, **fields):
+        with self.lock:
+            job.update(fields)
+
     def _install(self, job):
         from auto_moniter.providers import PreparedCommand
         from auto_moniter.supervisor import run_command
-        name=job['agent'];spec=AGENTS[name];job.update(status='running',message='正在安装 '+spec['label'])
+        name=job['agent'];spec=AGENTS[name]
+        self._update_job(job, status='running', message='正在安装 '+spec['label'])
         try:
             profile=read_settings(self.path).get('agents',{}).get(name,{})
             if executable(name,profile,self.tools):
-                job.update(status='succeeded',message='已检测到可用 CLI，保留现有安装与登录配置。')
+                self._update_job(job, status='succeeded', message='已检测到可用 CLI，保留现有安装与登录配置。')
                 return
             self.tools.mkdir(parents=True,exist_ok=True)
             if spec.get('package'):
@@ -158,19 +162,27 @@ class AgentManager:
                 with urlopen(Request(url,headers={'User-Agent':'AutoMonitor/1.0'}),timeout=30) as response:
                     content=response.read(2*1024*1024+1)
                 if len(content)>2*1024*1024:raise ValueError('官方安装脚本超过大小限制')
-                script=self.tools/(name+'-install.sh');script.write_bytes(content);os.chmod(script,0o700)
+                script=self.tools/(name+'-install.sh')
+                fd=os.open(script,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o700)
+                with os.fdopen(fd,'wb') as stream:
+                    if hasattr(os,'fchmod'):os.fchmod(stream.fileno(),0o700)
+                    stream.write(content)
                 command=['bash',str(script)]
                 if name=='hermes':command.append('--non-interactive')
-            job['message']='正在运行官方安装程序：'+shlex.join(command)
-            def output(_channel,block):job['output']=redact((job['output']+block.decode('utf-8',errors='replace'))[-16000:])
+            self._update_job(job, message='正在运行官方安装程序：'+shlex.join(command))
+            redact_output=redactor()
+            def output(_channel,block):
+                chunk=block.decode('utf-8',errors='replace')
+                with self.lock:
+                    job['output']=redact_output((job['output']+chunk)[-16000:])
             result=run_command(PreparedCommand(command),self.cwd,timeout_s=600,max_output_bytes=2*1024*1024,on_output=output,detect_input_requests=False)
-            job['output']=redact((result.stdout+'\n'+result.stderr)[-16000:])
+            self._update_job(job, output=redact_output((result.stdout+'\n'+result.stderr)[-16000:]))
             if result.exit_code or result.timed_out or result.interruption:raise ValueError('安装未完成，请查看输出并修复环境后重试。')
             binary=executable(name,profile,self.tools)
             if not binary:raise ValueError('安装程序已结束，但未发现 CLI；请填写其可执行文件位置并检测。')
             self.save({'agents':[{'id':name,'enabled':True,'executable':binary}]})
-            job.update(status='succeeded',message='安装完成，可以配置模型与认证。')
+            self._update_job(job, status='succeeded', message='安装完成，可以配置模型与认证。')
         except Exception as error:
-            job.update(status='failed',message=redact(str(error)))
+            self._update_job(job, status='failed', message=redact(str(error)))
         finally:
-            job['finished_at']=datetime.now(timezone.utc).isoformat()
+            self._update_job(job, finished_at=datetime.now(timezone.utc).isoformat())

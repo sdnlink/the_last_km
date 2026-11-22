@@ -177,8 +177,8 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         actions=['核对原始原因及对应日志，修复指定问题后再安排恢复或后续任务。']
     if 'requirement reviewer' in text or (not records and isinstance(brief,dict) and brief.get('status') in {'reviewing','failed','needs_input'}):
         role='reviewer';phase='需求完善'
-    elif role in {'worker','reviewer'} and phase=='监督器结束任务':
-        phase='worker 实现' if role=='worker' else '独立审核'
+    elif role in {'worker', 'reviewer', 'referee'} and phase == '监督器结束任务':
+        phase = {'worker': 'worker 实现', 'reviewer': '独立审核', 'referee': '裁判诊断'}[role]
     result={'code':code,'title':title,'reason':reason,'role':role,'phase':phase,'round':last.get('index'),
             'actions':actions,'raw_summary':redact(raw[:4000]) or '没有保存可确认的具体退出原因。',
             'raw_summary_generated': not bool(raw),

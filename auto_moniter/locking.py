@@ -1,6 +1,5 @@
 """Hierarchical leases: ancestors shared, selected workspace exclusive."""
 from contextlib import ExitStack, contextmanager
-import fcntl
 import hashlib
 import os
 import subprocess
@@ -29,6 +28,7 @@ def workspaces_overlap(left: Path, right: Path) -> bool:
 
 @contextmanager
 def workspace_lease(cwd: Path, *, read_only=False):
+    import fcntl
     root = workspace_root(cwd)
     # State directories can differ between consoles. A per-user rendezvous in
     # /tmp keeps those instances mutually exclusive too; never unlink lock files.

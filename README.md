@@ -1,10 +1,10 @@
 # Auto Monitor
 
-An optional **Referee** intervenes only when work stalls, repeated calls fail, or recovery is blocked. Enable it when creating or resuming a task and select a separate model from the review provider's catalog. Its read-only scheduling decisions can direct retries, resume review of a saved candidate, or replan remaining work. Original requirements, accepted work, checks, controls and cumulative budgets remain enforced. See [Referee recovery](docs/referee-recovery.md).
-
 **English** | [简体中文](README.zh-CN.md)
 
 Auto Monitor runs coding tasks through a worker, an independent reviewer, and the acceptance checks you configure. Use it from the command line or the local web console.
+
+An optional **Referee** intervenes only when work stalls, repeated calls fail, or recovery is blocked. Enable it when creating or resuming a task and select a separate model from the review provider's catalog. Its read-only scheduling decisions can direct retries, resume review of a saved candidate, or replan remaining work. Original requirements, accepted work, checks, controls and cumulative budgets remain enforced. See [Referee recovery](docs/referee-recovery.md).
 
 ## License
 
@@ -97,7 +97,7 @@ Copilot, Hermes, Kimi, and CodeBuddy start a new CLI session for each turn; the 
 
 ## Configure agents
 
-Open **Agent 管理** in the web console and click an agent's name to configure its model, endpoint, authentication, and executable path. You can use an existing CLI installation or install one from that page. Installation progress appears above the agent list.
+Open **Agents** in the web console and click an agent's name to configure its model, endpoint, authentication, and executable path. You can use an existing CLI installation or install one from that page. Installation progress appears above the agent list.
 
 Complete any required CLI login in a terminal under the same user account that runs Auto Monitor. The reviewer must support a read-only or planning mode. See [agent configuration](console/AGENT_SETUP.md) for the available roles and settings.
 
@@ -132,19 +132,19 @@ Open `http://127.0.0.1:8765`. You can also run `python3 -m console`, or `auto-mo
 
 Run `./restart.sh` to restart the console in the background, or start it if it is stopped. For a custom instance, pass the same `--cwd` / `--data-dir`. Existing port and extra scan directories are retained unless overridden. Running tasks continue and task records and queue order are preserved. The script prints the service URL and log path; refresh the browser after it finishes. See the [console guide](console/README.md).
 
-1. Configure the worker and reviewer in **Agent 管理**.
+1. Configure the worker and reviewer in **Agents**.
 2. Create a task with the project path, requirements, and completion criteria.
 3. Scan the project's checks, select the relevant ones, and check their prerequisites. Add custom acceptance commands when needed.
 4. Set models, runtime and call budgets, review frequency, and isolation settings, then start the task.
-5. Follow execution in **实时协作**. Open task details for requirements, conclusions, Git records, and logs.
+5. Follow execution in **Live progress**. Open task details for requirements, conclusions, Git records, and logs.
 
 The default flow reviews requirements before implementation. Select executable acceptance to run checks, semantic review for review without test execution, or planning to prepare an acceptance plan as a separate task. Function dispatch requires a runnable test plan, which the reviewer can supply without user-written commands.
 
-Use **补充要求 / 调整方向** to update a task. For a resumable stopped task, sending the amendment also attempts to resume execution. Previously saved amendments can be sent with an empty input field. If a budget is exhausted, use the recovery window to increase it explicitly.
+Use **Additional instructions** to update a task. For a resumable stopped task, sending the amendment also attempts to resume execution. Previously saved amendments can be sent with an empty input field. If a budget is exhausted, use the recovery window to increase it explicitly.
 
 The requirements page shows the current input version and amendment history. Later explicit user changes supersede earlier conflicting product or technology decisions; other requirements and approved checks remain in force, and historical requirements and reviews are retained. Immutable module conflicts receive field-level feedback and one read-only reviewer correction of the same candidate within the existing budget. See [report recovery and requirement versions](docs/module-report-recovery.md).
 
-Use **追加排队需求** in task details to queue follow-up requirements within the same run. Insert at the tail, head, or before another waiting requirement. The next requirement is reviewed and executed only after the current one passes independent review and watcher acceptance. Pending requests do not enter the current worker prompt. Pause controls, cumulative budgets and recovery remain in effect. Global pages live in the sidebar; task sections use one local tab bar. See the [console guide](console/README.md).
+Use **Queue a requirement** in task details to queue follow-up requirements within the same run. Insert at the tail, head, or before another waiting requirement. The next requirement is reviewed and executed only after the current one passes independent review and watcher acceptance. Pending requests do not enter the current worker prompt. Pause controls, cumulative budgets and recovery remain in effect. Global pages live in the sidebar; task sections use one local tab bar. See the [console guide](console/README.md).
 
 The console listens on loopback. To access a remote instance, open an SSH tunnel:
 
@@ -282,7 +282,7 @@ auto-moniter run --cwd /path/to/project \
 
 Supply the actual behavioral checks needed by the task. Environment descriptions, server addresses, and written instructions belong in requirements or configuration; enter runnable commands in the check fields. A formatting check alone does not establish that a feature works.
 
-The web console can scan existing test entry points and check their prerequisites. Scanning does not run the tests. To add checks to an existing task, stop it and use **恢复执行 → 追加验收命令**. Existing commands and check IDs are retained.
+The web console can scan existing test entry points and check their prerequisites. Scanning does not run the tests. To add checks to an existing task, stop it and use **Resume → Additional acceptance commands**. Existing commands and check IDs are retained.
 
 ### Fixed modules
 
@@ -340,7 +340,7 @@ Token and cost limits require usage reported by the selected backend. Time value
 
 ## Develop one project in parallel
 
-In the console's task form, enable **同工程并行开发**. Each task automatically gets a new development branch and isolated working copy; no file or directory ownership list is required. Develop according to the task requirement. Optionally declare an earlier task's full ID as a prerequisite when its accepted changes are needed.
+In the console's task form, enable **Parallel development in this project**. Each task automatically gets a new development branch and isolated working copy; no file or directory ownership list is required. Develop according to the task requirement. Optionally declare an earlier task's full ID as a prerequisite when its accepted changes are needed.
 
 Each task starts from committed code in a separate Git worktree on an `auto-moniter-task/<task-id>` branch. Prepare the dependencies that worktree needs and use project-relative acceptance commands.
 
@@ -379,7 +379,7 @@ If checks reveal an implementation defect, the reviewer returns a concrete, boun
 
 Module delivery advances only the modules jointly accepted by the worker and reviewer. A module acceptance uses the module gate even when the worker claimed full completion. If approval lacks required evidence citations, it is invalidated; resuming requests a corrected review while preserving successful checks and the submitted candidate.
 
-In the console, stop the task before using **临时调整角色** to change a supported native worker, reviewer, or model, then resume it. The original requirement and cumulative usage remain attached to the task. Paseo, custom commands, and configurations with incompatible extra arguments require a separate follow-up task.
+In the console, stop the task before using **Change roles for this task** to change a supported native worker, reviewer, or model, then resume it. The original requirement and cumulative usage remain attached to the task. Paseo, custom commands, and configurations with incompatible extra arguments require a separate follow-up task.
 
 For authentication errors, repair the selected CLI login or profile before resuming. For missing build or test dependencies, prepare them in the task environment. A `needs_input` requirement needs the reported decision or evidence before implementation can start. Check `report.json`, role logs, and acceptance results for the specific reason.
 

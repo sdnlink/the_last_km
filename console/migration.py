@@ -53,7 +53,12 @@ def build(meta, state, run, requirement):
     calls = remaining(usage.get('max_agent_calls', meta.get('max_agent_calls', 100)), usage.get('agent_calls', 0))
     if type(calls) is not int:
         raise ValueError('原任务的预算记录无效')
-    rounds = int(remaining(meta.get('max_rounds', 0), max(0, state.get('next_round', 1) - 1)))
+    next_round = state.get('next_round')
+    if next_round is None:
+        next_round = 1
+    elif type(next_round) is not int or next_round < 1:
+        raise ValueError('原任务的轮次记录无效')
+    rounds = int(remaining(meta.get('max_rounds', 0), next_round - 1))
     quality = dict(state.get('quality_policy') or meta.get('quality_policy') or {})
     reported = usage.get('provider_reported') or {}
     for limit, spent, missing in [('max_tokens', 'tokens', 'unknown_token_turns'),

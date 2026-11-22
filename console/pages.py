@@ -2,6 +2,7 @@
 
 import html
 import re
+from functools import lru_cache
 from pathlib import Path
 from console.localization import translate, translate_html
 
@@ -48,16 +49,17 @@ def page_route(path: str) -> tuple[str, str, str] | None:
     return ('detail', match[1], match[2] or 'home') if match else None
 
 
-def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup=False, language='zh-CN') -> bytes:
-    shell = (STATIC / 'index.html').read_text()
-    content = (STATIC / 'pages' / (page + '.html')).read_text()
+@lru_cache(maxsize=64)
+def _page_template(static_dir: Path, page: str, section: str, language: str) -> tuple[str, str, str]:
+    shell = (static_dir / 'index.html').read_text(encoding='utf-8')
+    content = (static_dir / 'pages' / (page + '.html')).read_text(encoding='utf-8')
     title, subtitle = PAGES[page]
     if page == 'detail':
-        section_content = (STATIC / 'pages' / f'detail-{section}.html').read_text()
+        section_content = (static_dir / 'pages' / f'detail-{section}.html').read_text(encoding='utf-8')
         if section != 'home':
             title, subtitle = DETAIL_SECTIONS[section]
         tabs = '<nav id="detail-menu" class="task-tabs" aria-label="当前任务内容">' + ''.join(
-            f'<a href="/tasks/{task_id}{suffix}"' + (' class="active" aria-current="page"' if key == section else '')
+            f'<a href="/tasks/__TASK_ID__{suffix}"' + (' class="active" aria-current="page"' if key == section else '')
             + f'>{label}</a>' for key, suffix, label in [
                 ('home', '', '概览'), ('queue', '/queue', '需求队列'), ('conclusions', '/conclusions', '交互结论'),
                 ('git', '/git', 'Git 记录'), ('requirements', '/requirements', '需求与验收'),
@@ -65,21 +67,27 @@ def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup
         content = (content.replace('<!-- DETAIL_BACK -->', '<a class="detail-back" href="/tasks">← 返回开发任务</a>')
                    .replace('<!-- DETAIL_TABS -->', tabs).replace('<!-- DETAIL_CONTENT -->', section_content))
     if '<!-- SUPERVISION_FORM -->' in content:
-        content = content.replace('<!-- SUPERVISION_FORM -->', (STATIC / 'fragments/supervision.html').read_text())
+        content = content.replace('<!-- SUPERVISION_FORM -->', (static_dir / 'fragments/supervision.html').read_text(encoding='utf-8'))
     styles = [page]
     if page in {'detail', 'progress'}:
         styles.insert(0, 'work')
-    shell = shell.replace('<!-- PAGE_CONTENT -->', content).replace('<!-- SIDE_NAVIGATION -->',navigation(page,task_id,section))
-    shell = translate_html(shell,language)
+    shell = shell.replace('<!-- PAGE_CONTENT -->', content).replace('<!-- SIDE_NAVIGATION -->', navigation(page, '', section))
+    shell = translate_html(shell, language)
+    shell = shell.replace('<!-- PAGE_STYLES -->', '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles))
+    return shell, translate(title, language), translate(subtitle, language)
+
+
+def render_page(page: str, task_id: str, section: str, cwd: Path, *, needs_setup=False, language='zh-CN') -> bytes:
+    shell, title, subtitle = _page_template(STATIC, page, section, language)
     replacements = {
-                    '<!-- PAGE_STYLES -->': '\n'.join(f'<link rel="stylesheet" href="/pages/{name}.css" />' for name in styles),
-                    '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,
-                    '__NEEDS_SETUP__': 'true' if needs_setup else 'false',
-                    '__WORKSPACE__': str(cwd), '__PAGE_TITLE__': translate(title,language),
-                    '__PAGE_SUBTITLE__': translate(subtitle,language), '__LANGUAGE__':language}
+        '__PAGE__': page, '__TASK_ID__': task_id, '__DETAIL_SECTION__': section,
+        '__NEEDS_SETUP__': 'true' if needs_setup else 'false',
+        '__WORKSPACE__': str(cwd), '__PAGE_TITLE__': title,
+        '__PAGE_SUBTITLE__': subtitle, '__LANGUAGE__': language,
+    }
     for key, value in replacements.items():
-        shell = shell.replace(key, value if key.startswith('<!--') else html.escape(value, quote=True))
-    return shell.encode()
+        shell = shell.replace(key, html.escape(value, quote=True))
+    return shell.encode('utf-8')
 
 
 def asset(path: str) -> tuple[Path, str] | None:

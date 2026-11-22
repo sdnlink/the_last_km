@@ -17,7 +17,7 @@ def authorized_change(run, saved, requested):
     path = run / 'role-change.json'
     if not path.is_file() or path.is_symlink() or path.stat().st_size > 128 * 1024:
         return None
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(value, dict) or not isinstance(value.get('id'), str):
         return None
     saved = normalize_provider_config(saved)

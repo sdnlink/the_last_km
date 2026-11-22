@@ -1494,5 +1494,10 @@ export default {
   "按当前速度预计超出剩余运行预算 {0}。": "At the current pace, the estimate exceeds the remaining runtime budget by {0}.",
   "完整派单计划就绪后可估算耗时。": "An estimate will be available when the full assignment plan is ready.",
   "累计至少验收 3 项派单后可按实际速度估算耗时。": "A pace-based estimate will be available after at least 3 assignments have been accepted.",
-  "{0} 轮未上报": "{0} turns without a report"
+  "{0} 轮未上报": "{0} turns without a report",
+  "无法读取 package.json": "Could not read package.json",
+  "package.json 格式无效": "Invalid package.json format",
+  "无法读取本地 Git 提交元数据": "Could not read local Git commit metadata",
+  "裁判诊断": "Referee diagnosis",
+  "原任务的轮次记录无效": "The original task's round record is invalid"
 };

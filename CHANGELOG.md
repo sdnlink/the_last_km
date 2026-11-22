@@ -1,5 +1,11 @@
-# Unreleased
+# 0.4.2
 
+- Add optional read-only Referee role (`--referee`, `--referee-model`) to diagnose interrupted, failing, or stalled runs and direct bounded retries, review resumption, or remaining-plan replanning without overriding requirements, checks, or budgets.
+- Add review-first function dispatch with complete upfront `function_plan`, optional multilingual `tree-sitter` function parsers (`--languages`), and automatic Python/Node 22/Cargo/Swift regression check derivation.
+- Add requirement queueing within a task, in-flight direction amendments, task migration for remaining work, parallel project development via isolated Git worktrees, and dedicated `documentation` and `deployment` task types with verified evidence gates.
+- Add adaptive plan-error recovery, reviewer re-evaluation on failed checks, verified project repair experience (`auto-moniter experience`), and isolated self-evolution (`auto-moniter evolve`) with clean-copy regression and automatic rollback.
+- Add first-run installer (`install.sh`), bilingual (Simplified Chinese / English) console localization, agent setup/management UI for additional CLIs (Grok, Antigravity, Gemini, Copilot, Hermes, Kimi, CodeBuddy, GLM, DeepSeek, Cursor), Paseo scheduled supervision, built-in decomposition/evidence/browser skills, and task duration/budget estimates.
+- Clarify personal non-commercial free license and commercial authorization terms.
 - Add guided acceptance setup with natural-language completion criteria, read-only project check discovery, explicit selection, environment preflight and a separate verification-planning task mode. Preserve advanced commands and legacy API configuration.
 - Persist versioned check snapshots and distinguish missing prerequisites, failed checks, timeouts and interruptions; expose acceptance output logs in task detail.
 

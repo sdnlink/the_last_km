@@ -6,7 +6,6 @@ termination from a stale heartbeat; interrupted checkpoints remain recoverable.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -22,7 +21,7 @@ from auto_moniter.health import valid_report
 
 
 _FINAL = {"done", "failed", "stalled", "max_rounds"}
-_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 
 def _json_at(directory: int, name: str) -> dict:
@@ -39,6 +38,7 @@ def _json_at(directory: int, name: str) -> dict:
 
 @contextmanager
 def _locks(directory: int):
+    import fcntl
     with ExitStack() as stack:
         for name in ("guardian.lock", "supervisor.lock"):
             try:

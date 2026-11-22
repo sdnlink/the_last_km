@@ -220,9 +220,15 @@ def preflight(plan):
                     if missing:errors.append('缺少依赖：'+', '.join(missing))
                 except (OSError,ValueError,subprocess.TimeoutExpired):errors.append('解释器检查超时或输出无效')
         if check['id'].startswith('npm-'):
-            package=json.loads((Path(plan['cwd'])/'package.json').read_text())
-            if (package.get('dependencies') or package.get('devDependencies')) and not (Path(plan['cwd'])/'node_modules').is_dir():
-                errors.append('项目声明了依赖但没有 node_modules；请先准备环境，不会自动安装')
+            try:
+                package=json.loads((Path(plan['cwd'])/'package.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                errors.append('无法读取 package.json')
+            else:
+                if not isinstance(package, dict):
+                    errors.append('package.json 格式无效')
+                elif (package.get('dependencies') or package.get('devDependencies')) and not (Path(plan['cwd'])/'node_modules').is_dir():
+                    errors.append('项目声明了依赖但没有 node_modules；请先准备环境，不会自动安装')
         results.append({'id':check['id'],'title':check['title'],'status':'environment_unavailable' if errors else 'ready',
                         'errors':errors,'note':'仅检查运行前提，尚未执行功能检查。'})
     return {'ready':all(r['status']=='ready' for r in results),'checks':results,'executed':False,

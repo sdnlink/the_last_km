@@ -47,7 +47,7 @@ class Journal:
             return {'version': 1, 'decisions': []}
         if self.path.is_symlink() or self.path.stat().st_size > 512 * 1024:
             raise ValueError('Unsafe referee journal')
-        value = json.loads(self.path.read_text())
+        value = json.loads(self.path.read_text(encoding='utf-8'))
         if (not isinstance(value, dict) or set(value) != {'version', 'decisions'} or value['version'] != 1
                 or not isinstance(value['decisions'], list) or len(value['decisions']) > MAX_DECISIONS):
             raise ValueError('Invalid referee journal')

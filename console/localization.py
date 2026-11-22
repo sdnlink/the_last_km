@@ -8,10 +8,28 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
 
+_WS_RE = re.compile(r'\s+')
+_TRIM_RE = re.compile(r'(\s*)([\s\S]*?)(\s*)')
+_SLOT_RE = re.compile(r'\{(\d+)\}')
+_HTML_ATTR_RE = re.compile(r'(\b(?:title|placeholder|aria-label|alt|label)\s*=\s*)(["\'])([\s\S]*?)\2')
+_HTML_PART_RE = re.compile(r'<!--[\s\S]*?-->|<[^>]*>|[^<]+')
+
+
 @lru_cache(maxsize=1)
 def messages():
     source = (Path(__file__).with_name('static') / 'translations.js').read_text(encoding='utf-8')
     return json.loads(source.removeprefix('export default ').rstrip().removesuffix(';'))
+
+
+@lru_cache(maxsize=1)
+def _has_ascii_keys():
+    return any(key.isascii() for key in messages())
+
+
+@lru_cache(maxsize=1)
+def prefixes():
+    items = [(prefix, target) for prefix, target in messages().items() if prefix.endswith(('：', ':'))]
+    return sorted(items, key=lambda pair: len(pair[0]), reverse=True)
 
 
 def select_language(cookie='', accept_language=''):
@@ -36,18 +54,19 @@ def select_language(cookie='', accept_language=''):
 
 
 def translate(text, language='zh-CN'):
-    if language!='en' or not isinstance(text,str):return text
-    key=re.sub(r'\s+',' ',text).strip()
+    if language!='en' or not isinstance(text,str) or not text:return text
+    if not _has_ascii_keys() and text.isascii():return text
+    key=_WS_RE.sub(' ',text).strip()
     translated=messages().get(key)
     if translated is not None:
-        match=re.fullmatch(r'(\s*)([\s\S]*?)(\s*)',text)
+        match=_TRIM_RE.fullmatch(text)
         return match[1]+translated+match[3]
     for pattern, target in patterns():
         match=pattern.fullmatch(text)
         if match:
-            return re.sub(r'\{(\d+)\}',lambda item:match.group('v'+item[1]),target)
-    for prefix,target in messages().items():
-        if prefix.endswith(('：',':')) and text.startswith(prefix):
+            return _SLOT_RE.sub(lambda item:match.group('v'+item[1]),target)
+    for prefix,target in prefixes():
+        if text.startswith(prefix):
             return target+(' ' if target.endswith(':') else '')+translate(text[len(prefix):],language)
     return text
 
@@ -56,11 +75,11 @@ def translate(text, language='zh-CN'):
 def patterns():
     result=[]
     # Prefer specific messages over short count templates such as “{0} 轮{1}”.
-    ordered = sorted(messages().items(), key=lambda pair: len(re.sub(r'\{\d+\}', '', pair[0])), reverse=True)
+    ordered = sorted(messages().items(), key=lambda pair: len(_SLOT_RE.sub('', pair[0])), reverse=True)
     for source,target in ordered:
-        if not re.search(r'\{\d+\}',source):continue
+        if not _SLOT_RE.search(source):continue
         expression='';end=0;seen=set()
-        for slot in re.finditer(r'\{(\d+)\}',source):
+        for slot in _SLOT_RE.finditer(source):
             expression+=re.escape(source[end:slot.start()])
             index=slot[1]
             expression+=f'(?P<v{index}>.*?)' if index not in seen else f'(?P=v{index})'
@@ -79,10 +98,10 @@ def translate_html(source,language='zh-CN'):
             def attribute(item):
                 result=translate(item[3],language)
                 return item[0] if result==item[3] else item[1]+item[2]+html.escape(result,quote=True)+item[2]
-            return re.sub(r'(\b(?:title|placeholder|aria-label|alt|label)\s*=\s*)(["\'])([\s\S]*?)\2',attribute,value)
+            return _HTML_ATTR_RE.sub(attribute,value)
         result=translate(value,language)
         return value if result==value else html.escape(result,quote=False)
-    return re.sub(r'<!--[\s\S]*?-->|<[^>]*>|[^<]+',part,source)
+    return _HTML_PART_RE.sub(part,source)
 
 
 def localize_response(value,language,path):
@@ -128,7 +147,7 @@ def localize_response(value,language,path):
             original = event.get('text','')
             label = EVENT_LABELS[name]
             if name == 'agent_start':
-                role = 'Reviewer' if event.get('role')=='reviewer' else 'Worker'
+                role = {'reviewer': 'Reviewer', 'referee': 'Referee'}.get(event.get('role'), 'Worker')
                 event['display_text'] = f"Round {event.get('round','?')} · {role} started"
             elif name == 'git_checkpoint':
                 tail = original.split('\n',1)

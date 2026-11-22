@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import uuid
-import fcntl
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +80,7 @@ class Directions:
 
     @contextmanager
     def lock(self):
+        import fcntl
         self.run.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (self.run / 'directions.lock').open('a') as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

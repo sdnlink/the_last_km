@@ -7,6 +7,8 @@ import re
 
 from auto_moniter.providers import _iter_json_values
 
+_ERROR_LINE_RE = re.compile(r"\b(error|fatal|exception)\b|错误|失败", re.I)
+
 
 def clipped(text: str, limit: int = 16000) -> str:
     data = text.encode("utf-8", errors="replace")
@@ -18,8 +20,11 @@ def clipped(text: str, limit: int = 16000) -> str:
 def diagnostic_summary(stdout: str, stderr: str, *, failed: bool) -> str:
     errors: list[str] = []
     checks: list[str] = []
-    for blob in (stdout, stderr):
+    stderr_has_json = False
+    for index, blob in enumerate((stdout, stderr)):
         for value in _iter_json_values(blob):
+            if index == 1:
+                stderr_has_json = True
             events = value if isinstance(value, list) else [value]
             for event in events:
                 if not isinstance(event, dict):
@@ -41,10 +46,10 @@ def diagnostic_summary(stdout: str, stderr: str, *, failed: bool) -> str:
                     checks.append(f"exit={item['exit_code']} {command}\n" + clipped(output[-2000:], 2000))
                 elif item.get("type") == "tool_result" and item.get("is_error"):
                     checks.append(clipped(str(item.get("content") or item.get("result") or "tool failed"), 2000))
-    if stderr.strip() and not _iter_json_values(stderr):
+    if stderr.strip() and not stderr_has_json:
         lines = stderr.splitlines()
         if not failed:
-            lines = [line for line in lines if re.search(r"\b(error|fatal|exception)\b|错误|失败", line, re.I)]
+            lines = [line for line in lines if _ERROR_LINE_RE.search(line)]
         if lines:
             errors.append(clipped("\n".join(lines[-12:]), 2000))
     useful = []

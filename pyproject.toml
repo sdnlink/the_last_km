@@ -1,6 +1,6 @@
 [project]
 name = "auto-moniter"
-version = "0.4.1"
+version = "0.4.2"
 description = "Supervise coding agents until an independent review accepts the work."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -10,6 +10,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = []
@@ -38,4 +39,5 @@ console = ["static/*", "static/pages/*", "static/fragments/*"]
 [tool.setuptools.data-files]
 "share/doc/auto-moniter" = ["README.md", "README.zh-CN.md", "OPERATIONS.md", "CHANGELOG.md", "QUALITY_POLICY.md", "ACCEPTANCE_GUIDE.md", "WORKFLOW.md"]
 "share/doc/auto-moniter/deploy" = ["deploy/auto-moniter@.service", "deploy/task.example.json"]
+"share/doc/auto-moniter/skills/paseo-watch" = ["skills/paseo-watch/SKILL.md"]
 "share/doc/auto-moniter/tools" = ["tools/soak.py", "tools/certify_backend.py", "tools/check_documentation.py"]

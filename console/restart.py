@@ -1,6 +1,5 @@
 """Restart the console owning a specific catalog, without stopping its tasks."""
 
-import fcntl
 import json
 import os
 import signal
@@ -52,7 +51,7 @@ def running_options(pid: int, data_dir: Path):
         raise ValueError('持锁控制台的数据目录不匹配，未停止该进程')
     args.runs_dir = [resolve(path) for path in args.runs_dir]
     try:
-        saved = json.loads((data_dir / 'console-process.json').read_text())
+        saved = json.loads((data_dir / 'console-process.json').read_text(encoding='utf-8'))
     except (FileNotFoundError, ValueError):
         saved = {}
     if isinstance(saved, dict) and saved.get('identity') == process_identity(pid):
@@ -61,6 +60,9 @@ def running_options(pid: int, data_dir: Path):
 
 
 def restart(options, *, stop_timeout=15, start_timeout=60, supervised=False) -> int:
+    if sys.platform != 'linux':
+        raise ValueError('控制台重启仅支持 Linux 平台（需要 /proc 和文件锁）')
+    import fcntl
     cwd = (options.cwd or Path.cwd()).expanduser().resolve()
     data_dir = (options.data_dir or cwd / '.auto-moniter/console').expanduser().resolve()
     if not cwd.is_dir() or options.port is not None and not 0 <= options.port <= 65535:
@@ -132,7 +134,7 @@ def restart(options, *, stop_timeout=15, start_timeout=60, supervised=False) -> 
             if child.poll() is not None:
                 raise ValueError(f'控制台启动失败（退出码 {child.returncode}），请查看日志：{log_path}')
             try:
-                saved = json.loads(process_file.read_text())
+                saved = json.loads(process_file.read_text(encoding='utf-8'))
                 if isinstance(saved, dict) and saved.get('identity') == process_identity(child.pid):
                     connection = HTTPConnection('127.0.0.1', saved['port'], timeout=1)
                     try:

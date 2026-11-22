@@ -38,8 +38,8 @@ class SupervisionSchedule:
         try:
             result = subprocess.run([binary, 'schedule', *args, '--json'],
                                     cwd=self.store.cwd, stdin=subprocess.DEVNULL,
-                                    capture_output=True, encoding='utf-8', timeout=6)
-        except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                                    capture_output=True, encoding='utf-8', errors='replace', timeout=6)
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise TaskError('无法连接 Paseo，请检查本机服务后重试。', 503) from exc
         if result.returncode:
             output = result.stderr.strip() or result.stdout.strip()

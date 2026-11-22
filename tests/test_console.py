@@ -140,6 +140,34 @@ class ConsoleTests(unittest.TestCase):
         self.assertNotIn('新建任务', view['resume_unavailable'])
         self.assertNotIn('delete', view['actions'])
 
+    def test_detail_estimates_runtime_from_the_current_plan_and_cumulative_usage(self):
+        from tests.test_function_dispatch import task as assignment
+
+        task = self.create()
+        run = Path(task['run_dir'])
+        run.mkdir()
+        completed = [assignment(f'F{index}', 'app.py') for index in range(1, 4)]
+        current = assignment('F4', 'app.py')
+        final = assignment('F5', 'app.py', depends=['F4'], scope='requirement')
+        state = {
+            'status': 'stopped', 'cwd': str(self.project), 'rounds': [],
+            'requirements_review': {'status': 'ready'},
+            'function_plan': {'version': 1, 'cycle': 1, 'tasks': [*completed, current, final]},
+            'function_tasks': {'current': current, 'accepted': [
+                {'task': item, 'round': index, 'tree': 'a' * 64, 'evidence': []}
+                for index, item in enumerate(completed, 1)
+            ]},
+            'usage': {'elapsed_s': 900, 'max_runtime_s': 1200},
+        }
+        write_json(run/'state.json', state)
+        (run/'supervisor.lock').touch()
+        estimate = self.store.detail(task['id'])['time_estimate']
+        self.assertEqual(estimate, {'status': 'estimated', 'accepted_assignments': 3,
+                                    'remaining_assignments': 2, 'remaining_s': 600, 'total_s': 1500})
+        state['planning_rejection'] = {'reason': 'Replan the remaining assignments'}
+        write_json(run/'state.json', state)
+        self.assertEqual(self.store.detail(task['id'])['time_estimate'], {'status': 'plan_pending'})
+
     def test_append_checks_preserves_ids_budget_and_checkpoint_and_is_idempotent(self):
         task = self.create(checks=['git diff --check'])
         run = Path(task['run_dir']);run.mkdir()

@@ -36,7 +36,7 @@ function render(t){
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
  stableHTML($('#detail-current-state'),taskNarrativeHTML(t));
  if(section==='home'){
-  renderUsage(t.health.usage||{});
+  renderUsage(t.health.usage||{},t.time_estimate||{});
   renderWorkflow(t,{role});
  }
  if(section==='conclusions')renderConclusions(t,{groupByRound:true});
@@ -47,13 +47,30 @@ function render(t){
  if(t.status==='interrupted')alerts.push(i18n('任务执行已中断，可查看工作记录后从检查点恢复。'));
  if($('#detail-alerts'))$('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
 }
-function renderUsage(usage){
+function renderUsage(usage,estimate){
  const stages=usage.stage_elapsed_s||{};
  const meter=usage.provider_reported||{};
  const count=new Intl.NumberFormat(locale());
  const usd=new Intl.NumberFormat(locale(),{style:'currency',currency:'USD',maximumFractionDigits:6});
  const fact=(label,value)=>`<div><dt>${escape(i18n(label))}</dt><dd>${escape(value)}</dd></div>`;
- const elapsed=(value,limit)=>duration(value)+(limit?' / '+duration(limit):'');
+ const hasRuntime=Number.isFinite(usage.elapsed_s);
+ const budgetLeft=hasRuntime&&usage.max_runtime_s>0?Math.max(0,usage.max_runtime_s-usage.elapsed_s):null;
+ const estimated=estimate.status==='estimated';
+ const approximate=seconds=>i18n`约 ${duration(Math.ceil(seconds/60)*60)}`;
+ let timingNote='';
+ if(estimated){
+  timingNote=i18n`按累计运行耗时和已验收的 ${count.format(estimate.accepted_assignments)} 项派单估算，当前计划剩余 ${count.format(estimate.remaining_assignments)} 项。计划变更或外部阻塞会影响实际用时。`;
+  if(budgetLeft!==null&&estimate.remaining_s>budgetLeft){
+   timingNote+=' '+i18n`按当前速度预计超出剩余运行预算 ${approximate(estimate.remaining_s-budgetLeft)}。`;
+  }
+ }else if(estimate.status==='plan_pending'){
+  timingNote=i18n('完整派单计划就绪后可估算耗时。');
+ }else if(estimate.status==='insufficient_history'){
+  timingNote=i18n('累计至少验收 3 项派单后可按实际速度估算耗时。');
+ }
+ const note=$('#detail-timing-note');
+ note.textContent=timingNote;
+ note.hidden=!timingNote;
  const reported=(value,missing,format)=>{
   const unknown=missing??meter.unreported_turns;
   if(!Number.isFinite(value))return '—';
@@ -64,7 +81,13 @@ function renderUsage(usage){
   return partial?amount+' · '+partial:amount;
  };
  stableHTML($('#detail-usage'),[
-  fact('累计运行耗时',elapsed(usage.elapsed_s,usage.max_runtime_s)),
+  fact('累计运行耗时',duration(usage.elapsed_s)),
+  ...(estimate.status==='complete'?[]:[
+   fact('当前计划预计总耗时',estimated?approximate(estimate.total_s):'—'),
+   fact('当前计划预计剩余耗时',estimated?approximate(estimate.remaining_s):'—'),
+  ]),
+  fact('剩余运行预算',budgetLeft!==null?duration(budgetLeft)+' / '+duration(usage.max_runtime_s):
+   usage.max_runtime_s===0?i18n('不限'):'—'),
   fact('Worker 耗时',duration(stages.worker)),
   fact('Reviewer 耗时',duration(stages.reviewer)),
   fact('验收命令耗时',duration(stages.checks)),

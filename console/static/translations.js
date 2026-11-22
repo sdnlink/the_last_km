@@ -1456,5 +1456,13 @@ export default {
   "Worker 耗时": "Worker time",
   "Reviewer 耗时": "Reviewer time",
   "验收命令耗时": "Check execution time",
+  "当前计划预计总耗时": "Estimated total runtime for current plan",
+  "当前计划预计剩余耗时": "Estimated remaining runtime for current plan",
+  "剩余运行预算": "Remaining runtime budget",
+  "约 {0}": "About {0}",
+  "按累计运行耗时和已验收的 {0} 项派单估算，当前计划剩余 {1} 项。计划变更或外部阻塞会影响实际用时。": "Based on cumulative runtime and {0} accepted assignments. {1} assignments remain in the current plan. Changes to the plan or external blockers may affect runtime.",
+  "按当前速度预计超出剩余运行预算 {0}。": "At the current pace, the estimate exceeds the remaining runtime budget by {0}.",
+  "完整派单计划就绪后可估算耗时。": "An estimate will be available when the full assignment plan is ready.",
+  "累计至少验收 3 项派单后可按实际速度估算耗时。": "A pace-based estimate will be available after at least 3 assignments have been accepted.",
   "{0} 轮未上报": "{0} turns without a report"
 };

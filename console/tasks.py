@@ -38,6 +38,7 @@ from console.workflow import work_details
 from console.git_records import read_git_record, GitRecordError
 from console.conclusions import present_conclusion
 from console.logs import LogReader
+from console.task_timing import estimate as estimate_task_time
 from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
 from console.diagnostics import diagnose, console_result
@@ -370,6 +371,8 @@ class TaskStore:
                      'task_scope':meta.get('task_scope',[]), 'task_dependencies':meta.get('task_dependencies',[]),
                      'task_branch':meta.get('task_branch',''),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
+                     'time_estimate': estimate_task_time(state, status, health['usage'].get('elapsed_s'))
+                                      if include_details else {},
                      'provider': meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                      'reviewer': meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'),
                      'model': meta.get('model', ''), 'reviewer_model': meta.get('reviewer_model', ''),

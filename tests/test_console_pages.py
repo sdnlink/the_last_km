@@ -207,6 +207,7 @@ class ConsolePageTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('detail-menu', IdParser(home).ids)
         self.assertIn('detail-usage', IdParser(home).ids)
+        self.assertIn('detail-timing-note', IdParser(home).ids)
         self.assertFalse(set(markers.values()) & IdParser(home).ids)
         self.assertIn('data-section="home"', home)
         for section in markers:

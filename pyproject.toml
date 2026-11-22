@@ -32,6 +32,7 @@ build-backend = "setuptools.build_meta"
 include = ["auto_moniter*", "console*"]
 
 [tool.setuptools.package-data]
+auto_moniter = ["skills/*/SKILL.md"]
 console = ["static/*", "static/pages/*", "static/fragments/*"]
 
 [tool.setuptools.data-files]

@@ -94,6 +94,9 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status, 'max_rounds', report.summary)
             self.assertEqual((root / test_file).read_text(), test_code)
             self.assertIn(defect, worker.calls[1]['prompt'])
+            self.assertIn('using the filename from this receipt', reviewer.calls[2]['prompt'])
+            self.assertIn('002-check-02.log', reviewer.calls[2]['prompt'])
+            self.assertNotIn('Review evidence from the current candidate', worker.calls[1]['prompt'])
             receipts = [record.watcher_result['candidate_checks'] for record in report.records if record.role == 'worker']
             self.assertEqual([receipt['checks'][1]['status'] for receipt in receipts], ['check_failed', 'passed'])
             state = json.loads((root / 'run/state.json').read_text())

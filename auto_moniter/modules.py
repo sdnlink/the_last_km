@@ -132,16 +132,21 @@ class ModuleLedger:
             self.items[key].update(status="accepted", evidence=evidence, round=index, tree=tree, invalidated_reason="")
         return accepted
 
-    def affected(self, changed_files: list[str] | None = None) -> set[str]:
-        """Missing scopes and shared files conservatively require revalidation."""
+    def affected(self, changed_files: list[str] | None = None, *, conservative=True, changed_modules=()) -> set[str]:
+        """Find affected scopes and their dependents, including unknown paths at runtime."""
         affected = set(self.items)
         if changed_files is not None:
-            affected = {key for key, m in self.items.items() if not self.impact_files(key) or any(
-                fnmatch.fnmatchcase(path, pattern) for path in changed_files for pattern in self.impact_files(key))}
+            matches = {
+                key: {path for path in changed_files if any(fnmatch.fnmatchcase(path, pattern)
+                                                           for pattern in self.impact_files(key))}
+                for key in self.items
+            }
+            affected = set(changed_modules) | {key for key, paths in matches.items() if paths}
             # Undeclared files may be shared configuration; fail conservatively.
-            if any(not any(fnmatch.fnmatchcase(path, pattern) for key in self.items for pattern in self.impact_files(key))
-                   for path in changed_files):
-                affected = set(self.items)
+            if conservative:
+                affected.update(key for key in self.items if not self.impact_files(key))
+                if set(changed_files).difference(*matches.values()):
+                    return set(self.items)
             while True:
                 more = {key for key, m in self.items.items() if set(m.get('depends_on', [])) & affected}
                 if more <= affected:

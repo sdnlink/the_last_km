@@ -2,14 +2,86 @@
 
 import copy
 import json
+import re
+import unicodedata
 
 from auto_moniter import function_tasks
 from auto_moniter.function_gate import criteria, requirement_criteria, known_criteria
+from auto_moniter.skills import guidance
 
 MAX_TASKS = 200
+GENERIC_ASSERTIONS = {
+    'all tests pass', 'tests pass', 'run tests', 'verify functionality', 'verify the changes',
+    'works correctly', 'works as expected', 'expected behavior', 'passes', '正常工作',
+    '功能正常', '验证功能', '运行测试', '测试通过', '全部测试通过', '符合预期', '按预期工作',
+}
 
 
-def validate(value, ledger, modules, brief, *, head=None):
+def _normalized(text):
+    return ' '.join(unicodedata.normalize('NFKC', text).casefold().split()).strip(' .。!！')
+
+
+def assertion_problems(task):
+    assertions = {_normalized(text) for text in task['verification']}
+    if not assertions - GENERIC_ASSERTIONS - {''}:
+        return [task['id'] + '.verification: describe an input or operation and its observable expected result']
+    for text in assertions:
+        if '|' not in text or not text.startswith(('given ', 'given|', '给定')):
+            continue
+        parts = re.fullmatch(r'given\s+(.+?)\s*\|\s*when\s+(.+?)\s*\|\s*then\s+(.+)', text)
+        if parts is None:
+            parts = re.fullmatch(r'给定\s*(.+?)\s*\|\s*当\s*(.+?)\s*\|\s*应当\s*(.+)', text)
+        if parts is None or any(part in GENERIC_ASSERTIONS or not part.strip() for part in parts.groups()):
+            return [task['id'] + '.verification: fill in the setup, operation and observable expected result']
+    return []
+
+
+def _quality_problems(tasks, ledger, impact, preserved_id):
+    assertions_seen = {}
+    test_owners = {path: item['task']['id'] for item in ledger.accepted
+                   for path in item['task'].get('test_files', [])}
+    milestones = {}
+    invalidated = {}
+    problems = []
+    for task in tasks:
+        ident = task['id']
+        module = task['module_id']
+        if ident != preserved_id:
+            problems.extend(assertion_problems(task))
+        if task.get('kind') != 'verification':
+            assertions = frozenset(_normalized(text) for text in task['verification']) - GENERIC_ASSERTIONS - {''}
+            if assertions:
+                target = tuple(sorted(function_tasks.targets(task)))
+                previous_tasks = assertions_seen.setdefault(target, [])
+                previous = next((previous_id for previous_id, covered in previous_tasks
+                                 if assertions <= covered), None)
+                if previous:
+                    problems.append(f'{ident}.verification duplicates {previous} on the same target. '
+                                    'Keep one assignment or give the distinct behavior its own assertion.')
+                previous_tasks.append((ident, assertions))
+            for path in task.get('test_files', []):
+                owner = test_owners.setdefault(path, ident)
+                if owner != ident:
+                    problems.append(f'{ident}.test_files: {path} already belongs to {owner}. '
+                                    'Reference its regression check or choose a distinct path for a new test.')
+            if impact and milestones:
+                changed_files = function_tasks.writable_files(task)
+                affected = impact.affected(changed_files, conservative=False, changed_modules=(module,))
+                for key in milestones.keys() & affected:
+                    invalidated[key] = ident
+        if task['delivery_scope'] == 'module':
+            milestones[module] = ident
+            invalidated.pop(module, None)
+    for module, ident in sorted(invalidated.items()):
+        milestone = milestones[module]
+        action = ('Schedule targeted module verification after that change.'
+                  if milestone == preserved_id else
+                  'Move the milestone after the change or schedule targeted module verification after it.')
+        problems.append(f'{milestone}.delivery_scope: {ident} affects module {module} after its planned verification. {action}')
+    return problems
+
+
+def validate(value, ledger, modules, brief, *, head=None, impact=None, preserved_id=None):
     if not isinstance(value, list) or not value or len(value) + len(ledger.accepted) > MAX_TASKS:
         raise ValueError('Complete function plan must contain 1–200 remaining assignments within the run limit')
     if len(json.dumps(value, ensure_ascii=False).encode()) > 2 * 1024 * 1024:
@@ -40,6 +112,7 @@ def validate(value, ledger, modules, brief, *, head=None):
     required = set(requirement_criteria(brief)) | {key for module in modules for key in criteria(modules, module)}
     if required - covered:
         problems.append('Complete function plan leaves acceptance criteria unplanned: ' + ', '.join(sorted(required - covered)))
+    problems.extend(_quality_problems(tasks, ledger, impact, preserved_id))
     if problems:
         raise ValueError('; '.join(problems)[:12000])
     return {'version': 1, 'cycle': brief.get('cycle', 1), 'tasks': tasks}
@@ -82,4 +155,4 @@ def planning_contract():
             'when its behavior integrates them; these references grant no additional edit scope or check commands. '
             'Preserve accepted work and the current assignment identity. Do not execute the backlog or bundle it into one worker turn. '
             'Future entries are a plan, not acceptance; the watcher revalidates each entry before dispatch. '
-            'For needs_input return next_task=null and function_plan=[].\n')
+            'For needs_input return next_task=null and function_plan=[].\n\n' + guidance('task-decomposition'))

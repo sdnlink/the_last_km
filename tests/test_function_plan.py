@@ -4,9 +4,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from auto_moniter import function_plan
 from auto_moniter.function_tasks import FunctionTasks
+from auto_moniter.modules import ModuleLedger
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_dispatch import FunctionWorker, task, plan, result, CHECK
 from tests.test_review_first import BRIEF
@@ -61,6 +63,7 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual(len(reviewer.calls), 3)
         self.assertIn('COMPLETE ordered list', reviewer.calls[0]['prompt'])
+        self.assertIn('Given setup | When operation | Then expected observation', reviewer.calls[0]['prompt'])
         self.assertNotIn('"id": "F2"', worker.calls[0]['prompt'])
         saved = json.loads((self.run / 'state.json').read_text())
         self.assertEqual([item['task']['id'] for item in saved['function_tasks']['accepted']], ['F1', 'F2'])
@@ -103,6 +106,35 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         self.assertEqual(len(worker.calls),1)
         self.assertNotIn('COMPLETE ordered list', reviewer.calls[0]['prompt'])
 
+    def test_resume_repairs_an_unstarted_assignment_that_claims_an_existing_test(self):
+        first, final = tasks()
+        occupied = 'test_browser.cjs'
+        first['test_files'] = [occupied]
+        first['verification'] = ['At a narrow browser viewport, the card retains its width after reload']
+        initial = ScriptedProvider('reviewer', [complete_plan(first, final)])
+        monitor = self.monitor(ScriptedProvider('worker', []), initial)
+        record_assignment = monitor._record_assignment
+
+        def stop_after_assignment(assignment):
+            record_assignment(assignment)
+            monitor.request_stop()
+
+        with patch.object(monitor, '_record_assignment', side_effect=stop_after_assignment):
+            self.assertEqual(monitor.run().status, 'stopped')
+        self.assertFalse((self.run / 'function-baseline.json.gz').exists())
+        (self.root / occupied).write_text('// existing test asset\n')
+
+        repaired = {**first, 'test_files': []}
+        reviewer = ScriptedProvider('reviewer', [complete_plan(repaired, final),
+            result('F1', 'accepted', file='a.py'), result('F2', 'accepted', file='b.py', status='done')])
+        worker = self.worker()
+        report = self.monitor(worker, reviewer, resume=True).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual((self.root / occupied).read_text(), '// existing test asset\n')
+        self.assertIn('Correct test_files, review_test and check_ids only', reviewer.calls[0]['prompt'])
+        self.assertIn('Verify the user-visible operation', reviewer.calls[0]['prompt'])
+        self.assertEqual(len(worker.calls), 2)
+
     def test_plan_validation_rejects_dependency_cycles_and_missing_criteria(self):
         first, final = tasks()
         modules = {item['id']:item for item in _verdict('continue')['modules']}
@@ -113,6 +145,61 @@ class CompleteFunctionPlanTests(unittest.TestCase):
         bad = copy.deepcopy(final);bad['criterion_ids']=['main:1']
         with self.assertRaisesRegex(ValueError, 'unplanned'):
             function_plan.validate([first,bad],ledger,modules,BRIEF)
+
+    def test_layout_behaviors_share_a_target_but_have_distinct_assertions_and_followup_verification(self):
+        impact = ModuleLedger([
+            {'id': 'main', 'title': 'Layout', 'acceptance': ['Retain the visible layout'],
+             'files': ['v3/assets/canvas.js', 'v3/assets/styles.css']},
+        ])
+        source = 'v3/assets/canvas.js'
+        switch = {**task('switch', source), 'symbol': 'renderCanvasStage',
+                  'edit_files': ['v3/assets/styles.css'],
+                  'verification': ['Given a 1000px viewport | When switching to custom and reloading | '
+                                   'Then card rectangles match the preset']}
+        resize = {**switch, 'id': 'resize',
+                  'verification': ['Given a 1000px viewport | When dragging a resize handle | '
+                                   'Then card width changes while the pointer is down']}
+        verify = {**switch, 'id': 'verify-layouts', 'kind': 'verification', 'edit_files': [],
+                  'delivery_scope': 'module', 'verification': ['Check saved and visible card rectangles match']}
+        final = {**verify, 'id': 'verify-delivery', 'delivery_scope': 'requirement',
+                 'criterion_ids': ['main:1', 'req:1:1', 'req:1:2']}
+
+        def validate(backlog, **kwargs):
+            return function_plan.validate(backlog, FunctionTasks(), impact.items, BRIEF, impact=impact, **kwargs)
+
+        self.assertEqual(validate([switch, resize, verify, final])['tasks'], [switch, resize, verify, final])
+        duplicate = {**resize, 'verification': [switch['verification'][0].upper() + '.']}
+        with self.assertRaisesRegex(ValueError, r'resize\.verification duplicates switch'):
+            validate([{**switch, 'verification': [*switch['verification'], 'Card IDs stay unchanged']},
+                      duplicate, verify, final])
+        self.assertTrue(validate([switch, {**resize, 'verification': [
+            *switch['verification'], *resize['verification'],
+        ]}, verify, final]))
+        with self.assertRaisesRegex(ValueError, r'verify-layouts\.delivery_scope: resize affects module main'):
+            validate([switch, verify, resize, final])
+        self.assertTrue(validate([switch, verify, resize, {**verify, 'id': 'reverify-layouts'}, final]))
+        for assertion in ('全部测试通过', 'Given page | When resizing | Then works correctly'):
+            under_specified = {**resize, 'verification': [assertion]}
+            with self.assertRaisesRegex(ValueError, r'resize\.verification'):
+                validate([switch, under_specified, verify, final])
+            self.assertTrue(validate([under_specified, switch, verify, final], preserved_id='resize'))
+
+    def test_new_test_file_has_one_owner_across_accepted_and_planned_assignments(self):
+        first, final = tasks()
+        modules = {item['id']: item for item in _verdict('continue')['modules']}
+        path = 'tests/test_behavior.py'
+        first['test_files'] = final['test_files'] = [path]
+        with self.assertRaisesRegex(ValueError, r'F2\.test_files: .* already belongs to F1'):
+            function_plan.validate([first, final], FunctionTasks(), modules, BRIEF)
+
+        final['criterion_ids'].append('req:1:1')
+        ledger = FunctionTasks({'current': None, 'accepted': [
+            {'task': first, 'round': 1, 'tree': 'a' * 64, 'evidence': []},
+        ]})
+        with self.assertRaisesRegex(ValueError, r'F2\.test_files: .* already belongs to F1'):
+            function_plan.validate([final], ledger, modules, BRIEF)
+        final['test_files'] = ['tests/test_other_behavior.py']
+        self.assertEqual(function_plan.validate([final], ledger, modules, BRIEF)['tasks'], [final])
 
     def test_existing_incremental_task_gains_full_plan_without_replacing_its_current_assignment(self):
         first, final = tasks()
@@ -181,14 +268,15 @@ class CompleteFunctionPlanTests(unittest.TestCase):
     def test_invalid_future_plan_is_repaired_readonly_before_worker_dispatch(self):
         first,final=tasks()
         invalid=complete_plan(first,final)
-        value=json.loads(invalid['text']);value['function_plan'][1]['criterion_ids'].append('missing:1')
+        value=json.loads(invalid['text'])
+        value['function_plan'][1]['verification']=['All tests pass.']
         invalid['text']=json.dumps(value)
         reviewer=ScriptedProvider('reviewer',[invalid,complete_plan(first,final),
             result('F1','accepted',file='a.py'),result('F2','accepted',file='b.py',status='done')])
         worker=self.worker()
         report=self.monitor(worker,reviewer).run()
         self.assertEqual(report.status,'done',report.summary)
-        self.assertIn('missing:1',reviewer.calls[1]['prompt'])
+        self.assertIn('F2.verification',reviewer.calls[1]['prompt'])
         self.assertIn('plan validation errors',reviewer.calls[1]['prompt'])
         self.assertTrue(all(call['read_only'] for call in reviewer.calls))
         self.assertEqual(len(worker.calls),2)

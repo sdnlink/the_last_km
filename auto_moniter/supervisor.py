@@ -70,6 +70,7 @@ from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
 from auto_moniter import function_plan, deployment, documentation_tasks
+from auto_moniter.skills import browser_guidance, guidance
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 from auto_moniter import migration
 
@@ -605,7 +606,11 @@ class Supervisor:
                         records,
                         last_worker,
                     )
-                if self.config.function_dispatch and (not self.function_tasks.current or
+                test_conflicts = self._unstarted_first_assignment_test_conflicts()
+                if test_conflicts:
+                    self._planning_rejection = {'task_id': self.function_tasks.current['id'],
+                        'reason': 'Existing project tests were declared as new files: ' + ', '.join(test_conflicts)}
+                if self.config.function_dispatch and (not self.function_tasks.current or test_conflicts or
                         self.config.full_function_plan and not self._complete_function_plan_ready() or
                         any(m['id'] not in self._dispatch_directions for m in self.directions.messages())):
                     if not self._elaborate_requirement(records, next_function=True):
@@ -1179,6 +1184,9 @@ class Supervisor:
                             raise ValueError('Verification repair must use a new implementation task ID')
                         staged.current = None
                         staged.assign(review.next_task, self.modules.items)
+                        problems = function_plan.assertion_problems(staged.current)
+                        if problems:
+                            raise ValueError(problems[0])
                         self._validate_function_plan(staged, self.modules.items, self.requirements_review)
                         if self.config.full_function_plan and self._complete_function_plan_ready():
                             remaining = function_plan.waiting(self.function_plan, staged)
@@ -1707,7 +1715,15 @@ class Supervisor:
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
         if next_function and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
-            if function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
+            if self._unstarted_first_assignment_test_conflicts():
+                # Repair only the test declaration before any worker call or baseline exists.
+                previous = dispatch.current
+                retained = {k for k in previous if k not in {'test_files', 'review_test', 'check_ids'}}
+                approved = {key for key in previous['check_ids'] if not key.startswith('auto:')}
+                if (any(revised.get(k) != previous[k] for k in retained)
+                        or not approved <= set(revised['check_ids'])):
+                    raise ValueError('Test path repair must preserve the active assignment and its fixed checks')
+            elif function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
                 repairing_scope = bool((self._planning_rejection or {}).get('scope_repair'))
                 if (not repairing_scope or function_tasks.identity(revised)[:-1] != function_tasks.identity(dispatch.current)[:-1]
                         or any(revised.get(key) != dispatch.current.get(key)
@@ -1722,10 +1738,16 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
+            if not self.function_tasks.current or self._unstarted_first_assignment_test_conflicts():
+                self._validate_new_assignment_tests(dispatch.current)
         elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
             raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
         complete = (self._validate_complete_function_plan(backlog, dispatch, staged.items, brief)
                     if self.config.full_function_plan else None)
+        if not self.config.full_function_plan and not self.function_tasks.current:
+            problems = function_plan.assertion_problems(dispatch.current)
+            if problems:
+                raise ValueError(problems[0])
         return staged, dispatch, complete
 
     def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None):
@@ -1848,8 +1870,10 @@ class Supervisor:
                                +str(exc)+'. For ready, blockers must be []. Move genuinely deferred validation gates '
                                'into constraints without deleting or marking them satisfied. If the next step is genuinely '
                                'blocked, return needs_input instead. Preserve substantive criteria, completed research, '
-                               'authorized scope and valid plan entries; correct invalid assignment fields without '
-                               'expanding permissions. Do not repeat repository research or implementation. '
+                               'authorized scope and valid plan entries. If a dispatch ID and field are cited, '
+                               'revise those entries and their necessary order or dependency references only. '
+                               'Return the complete plan with the other entries carried forward. '
+                               'Do not repeat repository research or implementation. '
                                'Previous report:\n'+turn.text)
                     continue
                 self._event('requirements_assignment_repair',reason=str(exc),output_file=artifact+'-text.md')
@@ -1947,13 +1971,25 @@ class Supervisor:
                     prompt += '\nPreviously approved function plan (revise remaining entries only with concrete findings):\n'+json.dumps(self.function_plan,ensure_ascii=False)
                 if self._function_gate:
                     prompt += self._function_planning_contract()
+                    browser = browser_guidance(self.config.requirement + '\n' + json.dumps(
+                        self.function_tasks.current, ensure_ascii=False))
+                    if browser:
+                        prompt += '\n\n' + browser
                 if next_function:
                     prompt += ('\nReuse the existing brief; preserve the current assignment while planning remaining work. '
                                'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
                     if self.function_tasks.current:
-                        prompt += '\nExact unfinished assignment (preserve identity and checks):\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
+                        conflicts = self._unstarted_first_assignment_test_conflicts()
+                        if conflicts:
+                            prompt += ('\nThe worker has not started. Preserve the existing project tests at '
+                                       + ', '.join(conflicts)
+                                       + '. Correct test_files, review_test and check_ids only in the first assignment. '
+                                       'Use a new path for any new test and preserve fixed checks. If the existing '
+                                       'test is needed, reference an approved regression or fixed check that covers it. '
+                                       'Keep next_task and the plan first entry equal.')
+                        prompt += '\nExact unfinished assignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
             elif next_function:
                 prompt += ('\nAssess the changed project inputs against the existing brief and update the implementation plan. '
                            'Preserve its original acceptance criteria and all outstanding work: '
@@ -3452,7 +3488,8 @@ class Supervisor:
                 'whole-file edits; keep the named function as the primary implementation and verify the complete change. '
                 'Use edit_files=[] for strict single-function work. Boundaries prose does not grant extra file permissions. '
                 'Before dispatch, trace the user-facing entry point, direct callers, helpers and relevant tests for this behavior. '
-                'Split independently testable behaviors. Include files that must change together in edit_files and describe '
+                'Split independently testable behaviors. For each verification assertion, name the operation and expected observable result. '
+                'Include files that must change together in edit_files and describe '
                 'the entry point and dependencies in boundaries. Leave unaffected callers outside the write scope. '
                 'Existing tests and test configuration remain protected. Do not list directories, patterns or unrelated files. '
                 'A scope_repair rejection authorizes reviewer-only correction of edit_files for the SAME unfinished task, '
@@ -3515,6 +3552,23 @@ class Supervisor:
             missing_ok=not started, historical_source=self._historical_function_source)
         return self._function_baseline
 
+    def _existing_assignment_tests(self, task):
+        return [name for name in task['test_files']
+                if (self.config.cwd / name).exists() or (self.config.cwd / name).is_symlink()]
+
+    def _validate_new_assignment_tests(self, task):
+        existing = self._existing_assignment_tests(task)
+        if existing:
+            raise ValueError(task['id'] + '.test_files already exist: ' + ', '.join(existing)
+                             + '. Preserve those files and choose unique paths for new tests.')
+
+    def _unstarted_first_assignment_test_conflicts(self):
+        task = self.function_tasks.current
+        if (not self._function_gate or not task or self._next_round != 1 or self._last_worker_invocation
+                or (self.run_dir / 'function-baseline.json.gz').exists()):
+            return []
+        return self._existing_assignment_tests(task)
+
     def _historical_function_source(self, file, digest):
         if not self.git_history:
             return None
@@ -3569,14 +3623,16 @@ class Supervisor:
                     and self.function_tasks.current in self.function_plan['tasks'])
 
     def _validate_complete_function_plan(self, backlog, ledger, modules, brief):
-        plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
+        impact = ModuleLedger.restore(list(modules.values()))
+        preserved = self.function_tasks.current or {}
+        plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current, impact=impact,
+                                      preserved_id=preserved.get('id'))
         regressions = list(dict.fromkeys([
             *self._local_test_paths,
             *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
         ]))
         problems = []
         accepted_modules = {key for key, item in modules.items() if item['status'] == 'accepted'}
-        impact = ModuleLedger.restore(list(modules.values()))
         for task in plan['tasks']:
             if task.get('kind') != 'verification':
                 accepted_modules.difference_update(impact.affected(function_tasks.writable_files(task)))
@@ -3844,6 +3900,10 @@ class Supervisor:
             if self._function_gate:
                 try:
                     staged.assign(candidate, self.modules.items)
+                    if not self.config.full_function_plan:
+                        problems = function_plan.assertion_problems(staged.current)
+                        if problems:
+                            raise ValueError(problems[0])
                     self._validate_function_plan(staged, self.modules.items, self.requirements_review,
                                                  provisional=task)
                 except ValueError as exc:
@@ -4670,6 +4730,7 @@ class Supervisor:
                           if record.role=='worker' and record.index==index),None)
         receipt = candidate.watcher_result.get('candidate_checks') if candidate else None
         task = self.function_tasks.current
+        browser = browser_guidance(json.dumps(task, ensure_ascii=False)) if receipt and task else ''
         focused = bool(task and task.get('review_test') and task['delivery_scope'] == 'function')
         audit_scope = None
         if focused:
@@ -4692,6 +4753,8 @@ class Supervisor:
                    'protected tests or other files. Acceptance still requires all mandatory checks to pass. '
                    'You own the delivery decision. Approve only after the required checks pass. '
                    'The watcher publishes the approved candidate without repeating the acceptance assessment.'] if receipt else []),
+                *([guidance('review-evidence')] if receipt and task and self.config.task_type == 'code' else []),
+                *([browser] if browser else []),
                 *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
                    function_tasks.verdict_contract('reviewer', self.function_tasks.current, module_ids=self.modules.items),
                    "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
@@ -4699,6 +4762,9 @@ class Supervisor:
                 *([self._function_planning_contract()] if self._function_gate else []),
                 *([self._function_test_scope(self.function_tasks.current)]
                   if self._function_gate and self.function_tasks.current else []),
+                *(['In module review reports, list exact source and test paths that the accepted behavior depends on. '
+                   'Use directory-wide patterns only when the entire directory is demonstrably part of that behavior.']
+                  if task and task['delivery_scope'] != 'function' else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",
                 ("This is verification-only work: neither model may edit files. Return a bounded implementation assignment for concrete defects. "

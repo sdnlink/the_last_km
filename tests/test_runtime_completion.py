@@ -1,4 +1,3 @@
-import gzip
 import json
 import os
 import subprocess
@@ -9,13 +8,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from auto_moniter.cli import build_parser
-from auto_moniter.documentation import baseline_problems, verify
 from auto_moniter.locking import workspace_lease, workspaces_overlap
 from auto_moniter.providers import resolve_provider
 from auto_moniter.selftest import selftest
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
-from auto_moniter.workspace import LockError, file_snapshot
+from auto_moniter.workspace import LockError
 from tests.test_supervisor import ScriptedProvider
 from console.tasks import TaskStore, TaskError
 
@@ -130,43 +128,9 @@ class RuntimeCompletionTests(unittest.TestCase):
         self.assertEqual(provider.calls, [])
         self.assertIn('history_bytes', result.summary)
 
-    def test_documentation_baseline_does_not_allow_contract_or_test_changes(self):
-        baseline = {str(self.project/'docs/a.md'): 'old', str(self.project/'tests/test.py'): 'old'}
-        self.assertEqual(baseline_problems(self.project, baseline, {**baseline, str(self.project/'docs/a.md'): 'new'}), [])
-        self.assertTrue(baseline_problems(self.project, baseline, {**baseline, str(self.project/'tests/test.py'): 'new'}))
-        self.assertTrue(baseline_problems(self.project, baseline, {**baseline, str(self.project/'docs/new.json'): 'new'}))
-
     def test_installed_smoke_requires_independent_review_and_feedback(self):
         report = selftest()
         self.assertTrue(report['passed'])
         self.assertEqual(report['reviewer_calls'], 2)
         self.assertEqual(report['worker_calls'], 2)
         self.assertIn('explicit audit closure', report['checks'])
-
-    def test_documentation_gate_classifies_only_archived_markdown_and_keeps_other_failures(self):
-        import hashlib
-        (self.project/'scripts').mkdir()
-        (self.project/'docs/sql/validation').mkdir(parents=True)
-        (self.project/'docs/a.md').write_text('updated documentation')
-        record = self.project/'docs/sql/validation/2026-11-05-code-review.json'
-        record.write_text(json.dumps({'artifacts': [{'path': 'docs/a.md', 'sha256': hashlib.sha256(b'old').hexdigest()}]}))
-        source = '''class Context:
- def load_context(self): return ({},{},{})
- def load_spec(self): return {}
-def module(name): return Context()
-def review_plan(*args): return [{'subject':'evidence_hashes' if i==0 else str(i)} for i in range(100)]
-def focus_check(focus,*args):
- return (['Stale validation artifact: docs/a.md'] if focus['subject']=='evidence_hashes' else EXTRA, {})
-EXTRA = []
-'''
-        script = self.project/'scripts/review_development.py'
-        baseline = self.root/'baseline.json.gz'
-        before = record.read_bytes()
-        for extra in ([], ['Authorization missing'], ['Stale validation artifact: api/openapi.yaml']):
-            script.write_text(source + '\nEXTRA = ' + repr(extra) + '\n')
-            baseline.write_bytes(gzip.compress(json.dumps(file_snapshot(self.project)).encode()))
-            result = verify(self.project, baseline)
-            self.assertEqual(result['passed'], not extra)
-            self.assertEqual(result['archived_documentation'], ['docs/a.md'])
-            if extra: self.assertIn(extra[0], result['errors'])
-        self.assertEqual(before, record.read_bytes())

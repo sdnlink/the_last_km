@@ -1,10 +1,6 @@
 # 任务停止原因与页面诊断
 
-已检查任务 `198e3dca7c784819a349069863a578d2`（完整性检查）。最终报告为 failed，原始原因是 `Business HEAD changed outside watcher approval`，不是 worker 第三轮进程失败。
-
-任务绑定 main 的提交 `506f978a40e5e07a39a3f407a3b8141a7edc50c9`。运行期间，main 在北京时间 2026-11-09 21:44:20 被推进到文档提交 `02bb346b75fd2437768d0cc1080821cff2b18d46`。第三轮 worker 返回 M-CREATE 模块 done 后，watcher 准备审核候选时发现版本绑定改变，于 21:49:21 停止。当前有 worker 代码及新增测试，尚无该任务批准的业务提交或 reviewer 复核。
-
-此前同一任务还有：首次需求审核的服务 503；Grok 第一轮 900 秒无输出中断；第二轮收到终止信号后停止；切换 Codex 后第三轮产生候选。先前问题保留在日志中，不能替代或混淆最终的版本一致性错误。
+任务在终态停止时，页面需要将真实停止原因（例如外部 `Business HEAD changed outside watcher approval`、认证失败、预算耗尽等）与模型单轮结论明确区分，避免误导排查。
 
 旧页面存在三个信息断点：
 

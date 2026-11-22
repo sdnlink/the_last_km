@@ -94,27 +94,13 @@ def scan(cwd, kind='code', python=''):
             ['node', '--test', *node_paths], artifacts=node_paths,
             effects='执行列出的项目测试代码，可能写入文件、启动子进程或访问网络；不运行 npm 生命周期，不安装依赖。扫描只读取文件。',
             recommended=True)
-    ndr = all(source(p) for p in ('scripts/check_docs.py','scripts/check_hzd_contracts.py','scripts/check_development_contracts.py',
-                                  'scripts/review_development.py','docs/sql/validation/2026-11-05-code-review.json'))
     for filename, title, purpose, deps in [
-            ('check_docs.py','文档结构与链接','检查文档登记、链接与引用',[]),
-            ('check_hzd_contracts.py','接口契约一致性','检查 HZD OpenAPI 契约与样例',['yaml','jsonschema']),
-            ('check_development_contracts.py','需求与开发契约','检查需求、资源及命令清单的登记一致性',[])]:
+            ('check_docs.py','文档结构与链接','检查文档登记、链接与引用',[])]:
         name = 'scripts/' + filename
         if source(name):
             add(filename, title, purpose, [interpreter, name], dependencies=deps, artifacts=[name],
                 effects='执行已有检查脚本；不自动运行数据库或部署。脚本行为应结合项目说明确认。',
                 estimate='通常数秒至数分钟', recommended=kind=='documentation')
-    if ndr:
-        from auto_moniter import documentation
-        helper = Path(documentation.__file__).resolve()
-        # The baseline is created outside the target only after an explicit task
-        # selection, never while scanning. Filled with the actual run path later.
-        add('ndr-documentation', '当前文档的 100 个审阅焦点', '保留历史运行证据，核验当前静态文档；不代表生产验收',
-            [interpreter, str(helper), '--project', str(root), '--baseline', '{run_dir}/documentation-baseline.json.gz'],
-            dependencies=['yaml','jsonschema'], artifacts=['scripts/review_development.py'],
-            effects='只读检查；旧文档哈希差异明确归为历史证据，不改历史记录。创建任务时保存文件哈希基线。',
-            recommended=kind=='documentation')
     package = source('package.json')
     if package:
         try:

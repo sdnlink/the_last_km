@@ -839,8 +839,6 @@ class TaskStore:
             if guided:
                 meta['acceptance_plan'] = guided
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']
-                if 'ndr-documentation' in guided['selected_ids'] and run.is_relative_to(cwd):
-                    raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
             if migration_snapshot is not None:
                 context, seconds, directions, queue, acceptance = migration_snapshot
                 meta.update(migrated_from=context['source_task_id'], max_runtime_seconds=seconds, acceptance=acceptance)
@@ -984,13 +982,6 @@ class TaskStore:
             else:
                 if meta.get('acceptance_plan'):
                     write_json(run/'acceptance-plan.json', meta['acceptance_plan'], durable=True)
-                    if 'ndr-documentation' in meta['acceptance_plan']['selected_ids']:
-                        if run.is_relative_to(Path(meta['cwd'])):
-                            raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
-                        import gzip
-                        from auto_moniter.workspace import file_snapshot
-                        baseline = file_snapshot(Path(meta['cwd']))
-                        (run/'documentation-baseline.json.gz').write_bytes(gzip.compress(json.dumps(baseline).encode()))
                 if meta.get('modules'):
                     write_json(run / 'modules.json', meta['modules'], durable=True)
                 if meta.get('quality_policy'):

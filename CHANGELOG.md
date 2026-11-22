@@ -15,7 +15,6 @@
 - Expose strict review, protected worker paths, fixed module plans, execution timeouts, verification mode and storage budgets in the console; permit explicit cumulative budget increases on resume.
 - Account for shared Git audit objects and known native provider session stores, stopping at configured sampled quotas without deleting evidence.
 - Exercise independent review rejection, worker correction and explicit audit closure in the installed offline selftest; pin models in real backend certification.
-- Add a read-only NDR documentation gate that distinguishes historical Markdown evidence from current static verification without rewriting historical records.
 
 - Avoid full host process scans when an exited invocation's process group is already absent; retain background-process verification and cleanup for existing or uncertain groups, and reject invalid group IDs.
 

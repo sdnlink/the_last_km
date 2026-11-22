@@ -100,7 +100,17 @@ export function initialize() {
     const close=e.target.closest('[data-close]');if(close){$(`#${close.dataset.close}`)?.close();return;}
     const toggle=e.target.closest('[data-toggle-navigation]');if(toggle){const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));$('#primary-navigation').dataset.expanded=String(open);return;}
     const gitRecord=e.target.closest('[data-git-record]');if(gitRecord){(await import('./dialogs.js')).openGitRecord(gitRecord.dataset.id,gitRecord.dataset.gitRecord);return;}
-    const action=e.target.closest('[data-action]');if(action){if(action.dataset.action==='roles'){(await import('./dialogs.js')).openRoles(action.dataset.id);}else if(action.dataset.action==='delete'){(await import('./dialogs.js')).confirmDelete(action.dataset.id);}else if(action.dataset.action==='stop'){(await import('./dialogs.js')).confirmStop(action.dataset.id);}else if(['resume','checks'].includes(action.dataset.action)){(await import('./dialogs.js')).openResume(action.dataset.id);}else runAction(action.dataset.id,action.dataset.action);return;}
+    const action=e.target.closest('[data-action]');
+    if(action){
+      const {id,action:name}=action.dataset;
+      if(name==='migrate'){(await import('./dialogs.js')).openMigration(id);}
+      else if(name==='roles'){(await import('./dialogs.js')).openRoles(id);}
+      else if(name==='delete'){(await import('./dialogs.js')).confirmDelete(id);}
+      else if(name==='stop'){(await import('./dialogs.js')).confirmStop(id);}
+      else if(['resume','checks'].includes(name)){(await import('./dialogs.js')).openResume(id);}
+      else runAction(id,name);
+      return;
+    }
     const direction=e.target.closest('[data-direction]');if(direction){(await import('./dialogs.js')).openDirection(direction.dataset.direction);return;}
     const requirementQueue=e.target.closest('[data-requirement-queue]');if(requirementQueue){(await import('./requirement-queue.js')).openRequirementQueue(requirementQueue.dataset.requirementQueue);return;}
     if(e.target.closest('#new-task,#empty-create,[data-create-task]')){(await import('./dialogs.js')).openCreate();return;}

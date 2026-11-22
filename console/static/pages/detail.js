@@ -30,6 +30,12 @@ async function loadDispatch(){
 }
 function render(t){
  task=t;$('#detail-title').textContent=t.title;$('#detail-project').textContent=t.project_cwd||t.cwd;
+ const origin=$('#detail-migrated-from');
+ origin.hidden=!t.migrated_from;
+ if(t.migrated_from)origin.href=`/tasks/${encodeURIComponent(t.migrated_from)}`;
+ const followUp=$('#detail-migrated-to');
+ followUp.hidden=!t.migrated_to;
+ if(t.migrated_to)followUp.href=`/tasks/${encodeURIComponent(t.migrated_to)}`;
  $('#detail-open-direction').dataset.direction=id;$('#detail-open-direction').disabled=!t.can_direct;
  $('#detail-open-requirement-queue').dataset.requirementQueue=id;
  $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;

@@ -10,8 +10,8 @@ let acceptanceScan=null,acceptanceSequence=0;
 let acceptanceScanRequest=0,preflightRequest=0;
 let createSequence=0;
 const createPending=new Set();
-const taskDialogs=Object.fromEntries(['roles','resume','delete'].map(name=>[name,{sequence:0,target:null,pending:new Set()}]));
-const submitButtons={roles:'roles-submit',resume:'resume-submit',delete:'confirm-delete'};
+const taskDialogs=Object.fromEntries(['roles','resume','delete','migrate'].map(name=>[name,{sequence:0,target:null,pending:new Set()}]));
+const submitButtons={roles:'roles-submit',resume:'resume-submit',delete:'confirm-delete',migrate:'migrate-submit'};
 function beginTaskDialog(name){
  const view=taskDialogs[name];view.target=null;
  const button=$('#'+submitButtons[name]);if(button)button.disabled=true;
@@ -186,6 +186,21 @@ export async function confirmDelete(id){
   showTaskDialog('delete',id);
  }catch(error){if(currentTaskDialog('delete',sequence))toast(error.message,true);}
 }
+export async function openMigration(id){
+ const sequence=beginTaskDialog('migrate');
+ try{
+  await ensure('migrate');
+  if(!currentTaskDialog('migrate',sequence))return;
+  const task=await api(`/api/tasks/${id}`);
+  if(!currentTaskDialog('migrate',sequence))return;
+  if(!task.actions.includes('migrate'))throw new Error(i18n('当前状态不支持此操作，请刷新后重试'));
+  $('#migrate-task-title').textContent=task.title;
+  $('#migrate-error').hidden=true;
+  showTaskDialog('migrate',id);
+ }catch(error){
+  if(currentTaskDialog('migrate',sequence))toast(error.message,true);
+ }
+}
 export async function openResume(id){
  const sequence=beginTaskDialog('resume');
  try{
@@ -350,6 +365,27 @@ export async function openGitRecord(id,commit){
 }
 function bind(name){
  if(taskDialogs[name])bindTaskDialog(name);
+ if(name==='migrate'){
+  $('#migrate-form').addEventListener('submit',async event=>{
+   event.preventDefault();
+   const view=taskDialogs.migrate,{target:id,sequence}=view;
+   if(!id||view.pending.has(id))return;
+   view.pending.add(id);
+   $('#migrate-submit').disabled=true;
+   $('#migrate-error').hidden=true;
+   try{
+    const task=await api(`/api/tasks/${id}/migrate`,{});
+    if(currentTaskDialog('migrate',sequence,id))location.assign(`/tasks/${encodeURIComponent(task.id)}`);
+    else await refresh();
+   }catch(error){
+    if(currentTaskDialog('migrate',sequence,id)){
+     $('#migrate-error').hidden=false;
+     $('#migrate-error').textContent=error.message;
+    }else toast(error.message,true);
+   }finally{settleTaskDialog('migrate',id);}
+  });
+  return;
+ }
  if(name==='roles'){
   $('#roles-form').addEventListener('submit',async e=>{
    e.preventDefault();const view=taskDialogs.roles,{target:id,sequence}=view;if(!id||view.pending.has(id))return;

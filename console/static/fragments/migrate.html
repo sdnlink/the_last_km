@@ -1,0 +1,12 @@
+<dialog id="migrate-dialog" class="confirm-dialog" aria-labelledby="migrate-heading">
+ <form id="migrate-form">
+  <div class="dialog-heading"><h2 id="migrate-heading">迁移剩余工作</h2></div>
+  <p id="migrate-task-title"></p>
+  <p>新任务将在当前项目中排队，沿用剩余预算与验收检查。已验收的工作会作为历史依据，交付前会验证当前版本。</p>
+  <p id="migrate-error" role="alert" hidden></p>
+  <div class="dialog-footer">
+   <button type="button" class="button secondary" data-close="migrate-dialog">返回</button>
+   <button class="button primary" id="migrate-submit">创建续做任务</button>
+  </div>
+ </form>
+</dialog>

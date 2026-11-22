@@ -46,6 +46,7 @@ const actionLabels = {
   resume: i18n("恢复执行"),
   roles: i18n("临时调整角色"),
   checks: i18n("补充验收并恢复"),
+  migrate: i18n("迁移剩余工作"),
   delete: i18n("删除任务"),
 };
 const active = (t) => ["running", "starting", "paused"].includes(t.status);
@@ -102,7 +103,7 @@ function taskButtons(task, compact = false) {
   return task.actions
     .filter(
       (action) =>
-        !compact || ["start", "pause", "continue", "resume", "delete", "roles"].includes(action),
+        !compact || ["start", "pause", "continue", "resume", "delete", "roles", "migrate"].includes(action),
     )
     .map((action) => {
       const cancellingPause =

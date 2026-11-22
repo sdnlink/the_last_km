@@ -10,6 +10,7 @@ body[data-page="detail"] .page-heading { display:none; }
 .task-workspace-title { min-width:0; flex:1; }
 .task-workspace #detail-title { font-size:21px; margin:0; line-height:1.55; letter-spacing:0; overflow-wrap:anywhere; }
 .task-workspace #detail-project { font-size:11px; line-height:1.6; margin:5px 0 0; }
+.task-workspace-title a { display:inline-block; margin:4px 12px 0 0; font-size:12px; color:var(--accent); }
 .task-workspace .detail-page-actions { flex-direction:row; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:8px; max-width:52%; }
 .task-workspace #detail-actions { gap:6px; }
 .task-workspace .detail-edit-actions { gap:6px; }

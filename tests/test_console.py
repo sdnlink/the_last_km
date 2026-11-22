@@ -168,6 +168,101 @@ class ConsoleTests(unittest.TestCase):
         write_json(run/'state.json', state)
         self.assertEqual(self.store.detail(task['id'])['time_estimate'], {'status': 'plan_pending'})
 
+    def test_migrate_remaining_work_preserves_pending_queue_acceptance_and_remaining_budget(self):
+        from auto_moniter.cli import build_parser
+        from auto_moniter.directions import Directions
+        from auto_moniter.migration import read
+        from auto_moniter.requirement_queue import RequirementQueue
+        from tests.test_function_dispatch import task as assignment
+
+        original = self.create(workflow='review-first', checks=['git diff --check'],
+                               max_rounds=20, quality_policy={'max_tokens': 1000})
+        run = Path(original['run_dir'])
+        run.mkdir()
+        directions = Directions(run)
+        direction = directions.append('保留已有行为')
+        directions.receipt([direction['id']], 'reviewer', 1, responded=True)
+        queue = RequirementQueue(run)
+        completed = queue.append('已完成的需求')
+        active = queue.append('正在处理的排队需求')
+        waiting = queue.append('尚未处理的排队需求')
+        accepted = {**assignment('F1', 'app.py'), 'test_files': ['tests/test_app.py']}
+        current = assignment('F2', 'app.py')
+        final = assignment('F3', 'app.py', depends=['F2'], scope='requirement')
+        state = {
+            'status': 'stopped', 'cwd': str(self.project), 'next_round': 5, 'rounds': [],
+            'checks': ['git diff --check', 'python3 verify.py'], 'acceptance': '固定验收约束',
+            'active_queued_requirement': active,
+            'requirement_cycles': [{'handoff': {'queued_requirement': completed}}],
+            'modules': [{'id': 'main', 'title': '实现', 'acceptance': ['实现通过'], 'status': 'accepted'}],
+            'function_plan': {'version': 1, 'cycle': 1, 'tasks': [accepted, current, final]},
+            'function_tasks': {'current': current, 'accepted': [
+                {'task': accepted, 'round': 1, 'tree': 'a' * 64, 'evidence': []},
+            ]},
+            'audit_issues': {'items': [{'id': 'AUD-1', 'summary': '待复核边界', 'module_ids': ['main'], 'status': 'open'}]},
+            'git_history': {'business_head': {'commit': 'a' * 40}},
+            'usage': {'elapsed_s': 121.75, 'max_runtime_s': 601, 'agent_calls': 7, 'max_agent_calls': 18,
+                      'provider_reported': {'tokens': 375}},
+        }
+        write_json(run / 'state.json', state)
+        write_json(run / 'report.json', {'status': 'stopped', 'rounds': 4, 'summary': 'Stopped', 'stop_reason': 'stopped'})
+        (run / 'supervisor.lock').touch()
+        self.assertIn('migrate', self.store.detail(original['id'])['actions'])
+        migrated = self.store.action(original['id'], 'migrate')
+        self.assertEqual(migrated['status'], 'queued')
+        self.assertEqual(migrated['migrated_from'], original['id'])
+        self.assertEqual(migrated['requirement'], active['text'])
+        meta = self.store._get(migrated['id'])
+        args = build_parser().parse_args(self.store._new_args(meta))
+        self.assertEqual((args.max_runtime, args.max_agent_calls, args.max_rounds), ('479', 11, 16))
+        self.assertEqual(meta['checks'], state['checks'])
+        self.assertEqual(meta['acceptance'], state['acceptance'])
+        self.assertEqual(meta['quality_policy']['max_tokens'], 625)
+        migrated_run = Path(migrated['run_dir'])
+        self.assertEqual(RequirementQueue(migrated_run).items(), [waiting])
+        self.assertEqual(Directions(migrated_run).messages(), [direction])
+        self.assertIsNone(Directions(migrated_run).snapshot()[0]['reviewer'])
+        self.assertFalse((migrated_run / 'state.json').exists())
+        history = read(migrated_run)
+        self.assertEqual(history['source_commit'], 'a' * 40)
+        self.assertEqual(history['accepted_modules'], ['main'])
+        self.assertEqual(history['regression_files'], ['tests/test_app.py'])
+        self.assertEqual([item['id'] for item in history['pending_assignments']], ['F2', 'F3'])
+        self.assertEqual([item['id'] for item in history['open_issues']], ['AUD-1'])
+        self.assertEqual(json.loads((run / 'state.json').read_text()), state)
+        restored = TaskStore(self.root / 'data', self.project)
+        self.assertEqual(restored.action(original['id'], 'migrate')['id'], migrated['id'])
+        migrated_source = restored.detail(original['id'])
+        self.assertEqual(migrated_source['migrated_to'], migrated['id'])
+        self.assertNotIn('resume', migrated_source['actions'])
+        self.assertFalse(migrated_source['can_queue_requirements'])
+        restored.action(migrated['id'], 'cancel')
+        self.assertFalse(restored.detail(original['id'])['migrated_to'])
+        another = restored.action(original['id'], 'migrate')
+        self.assertNotEqual(another['id'], migrated['id'])
+        started = restored._get(another['id'])
+        started['started_at'] = started['created_at']
+        restored._save(started)
+        restored.action(another['id'], 'delete', {'confirm': another['id']})
+        self.assertNotIn('migrate', restored.detail(original['id'])['actions'])
+
+    def test_migrate_refuses_exhausted_budget_and_pending_publication(self):
+        original = self.create(workflow='review-first')
+        run = Path(original['run_dir'])
+        run.mkdir()
+        state = {'status': 'stopped', 'cwd': str(self.project),
+                 'usage': {'agent_calls': 20, 'max_agent_calls': 20}}
+        write_json(run / 'state.json', state)
+        write_json(run / 'report.json', {'status': 'stopped', 'rounds': 1, 'summary': 'Stopped', 'stop_reason': 'stopped'})
+        (run / 'supervisor.lock').touch()
+        with self.assertRaisesRegex(TaskError, '预算已耗尽'):
+            self.store.action(original['id'], 'migrate')
+        self.assertEqual(len(self.store.task_summaries()['tasks']), 1)
+        write_json(run / 'publication.json', {'phase': 'preparing'})
+        self.assertNotIn('migrate', self.store.detail(original['id'])['actions'])
+        with self.assertRaises(TaskError):
+            self.store.action(original['id'], 'migrate')
+
     def test_append_checks_preserves_ids_budget_and_checkpoint_and_is_idempotent(self):
         task = self.create(checks=['git diff --check'])
         run = Path(task['run_dir']);run.mkdir()
@@ -246,6 +341,25 @@ class ConsoleTests(unittest.TestCase):
                 self.assertEqual(json.loads(payload)['status'], 'cancelled')
                 self.assertEqual(request('GET', '/api/tasks/missing/logs')[0], 404)
                 self.assertEqual(request('GET', '/api/overview')[0], 200)
+                status, fragment = request('GET', '/fragments/migrate.html')
+                self.assertEqual(status, 200)
+                self.assertIn(b'id="migrate-submit"', fragment)
+                original = self.create(workflow='review-first')
+                run = Path(original['run_dir'])
+                run.mkdir()
+                write_json(run / 'state.json', {'status': 'stopped', 'cwd': str(self.project),
+                                                'usage': {'elapsed_s': 3, 'agent_calls': 1}})
+                write_json(run / 'report.json', {'status': 'stopped', 'rounds': 1,
+                                                 'summary': 'Stopped', 'stop_reason': 'stopped'})
+                (run / 'supervisor.lock').touch()
+                migration = f"/api/tasks/{original['id']}/migrate"
+                self.assertEqual(request('POST', migration, {})[0], 403)
+                status, payload = request('POST', migration, {}, headers)
+                self.assertEqual(status, 200)
+                migrated = json.loads(payload)
+                self.assertEqual(migrated['migrated_from'], original['id'])
+                self.assertEqual(migrated['status'], 'queued')
+                self.assertEqual(request('GET', f"/tasks/{migrated['id']}")[0], 200)
             finally:
                 server.shutdown()
                 worker.join(timeout=5)

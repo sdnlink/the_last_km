@@ -71,6 +71,7 @@ from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
 from auto_moniter import function_plan, deployment, documentation_tasks
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
+from auto_moniter import migration
 
 
 LogFn = Callable[[str], None]
@@ -249,6 +250,7 @@ class Supervisor:
         self._passed_function_checks = {}
         self._local_check_receipt = None
         self._local_test_paths = []
+        self._migration_context = {}
         self._dispatch_directions = []
         self._function_issue_ids = []
         self._planning_rejection = None
@@ -429,6 +431,9 @@ class Supervisor:
             if incoming and incoming != saved:
                 self.log("resume uses the requirement saved in the run directory")
             self.config.requirement = saved
+        self._migration_context = migration.read(self.run_dir)
+        self._local_test_paths = list(dict.fromkeys([
+            *self._migration_context.get('regression_files', []), *self._local_test_paths]))
         if not hasattr(self, "_baseline_files"):
             self._baseline_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
         self.quality = Quality(self.config.quality_policy, self._baseline_files, getattr(self, '_saved_quality_state', None))
@@ -1677,6 +1682,10 @@ class Supervisor:
 
     def _queued_cycle_can_add_modules(self):
         """Only a newly activated user request may extend the previous module ledger."""
+        if (self._migration_context.get('active_queued_requirement') and not self.requirement_cycles
+                and not self.function_tasks.current and not self.function_tasks.accepted):
+            original_modules = self._migration_context['accepted_modules'] + self._migration_context['pending_modules']
+            return set(self.modules.items) == set(original_modules)
         if not self.active_queued_requirement or not self.requirement_cycles or self.function_tasks.current:
             return False
         handoff = self.requirement_cycles[-1]['handoff']
@@ -1916,6 +1925,8 @@ class Supervisor:
                 continuation=continuation, queued_requirement=self.active_queued_requirement,
                 state_path=self.run_dir / 'state.json', checks=review_checks,
             )
+            if not follow_up:
+                prompt += migration.planning_context(self.run_dir, self._migration_context)
             if self.config.function_dispatch:
                 module_contract = (
                     'This explicitly activated user-queued requirement may append new modules for its new scope. '
@@ -3543,8 +3554,10 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
                                     approvals=self._integration_scopes(),
-                                    regressions=list(dict.fromkeys(name for item in ledger.accepted
-                                        for name in item['task'].get('test_files', []))))
+                                    regressions=list(dict.fromkeys([
+                                        *self._local_test_paths,
+                                        *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
+                                    ])))
         if task['delivery_scope'] != 'function':
             missing = function_gate.coverage(ledger, modules, task, brief, self.config.cwd,
                                               provisional=provisional)
@@ -3557,7 +3570,10 @@ class Supervisor:
 
     def _validate_complete_function_plan(self, backlog, ledger, modules, brief):
         plan = function_plan.validate(backlog, ledger, modules, brief, head=ledger.current)
-        regressions = list(dict.fromkeys(name for item in ledger.accepted for name in item['task'].get('test_files', [])))
+        regressions = list(dict.fromkeys([
+            *self._local_test_paths,
+            *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
+        ]))
         problems = []
         accepted_modules = {key for key, item in modules.items() if item['status'] == 'accepted'}
         impact = ModuleLedger.restore(list(modules.values()))

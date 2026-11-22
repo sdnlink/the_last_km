@@ -2,7 +2,12 @@
           <section class="panel task-workspace" aria-labelledby="detail-title">
           <div class="task-detail-top"><!-- DETAIL_BACK --><span class="subtle-badge">每 3 秒同步</span></div>
           <header class="task-detail-heading">
-            <div class="task-workspace-title"><h1 id="detail-title">任务工作详情</h1><p id="detail-project"></p></div>
+            <div class="task-workspace-title">
+              <h1 id="detail-title">任务工作详情</h1>
+              <p id="detail-project"></p>
+              <a id="detail-migrated-from" hidden>查看原任务</a>
+              <a id="detail-migrated-to" hidden>查看续做任务</a>
+            </div>
             <div class="detail-page-actions"><div id="detail-actions"></div><div class="detail-edit-actions"><button class="button secondary" id="detail-open-direction">调整当前需求</button><button class="button primary" id="detail-open-requirement-queue">追加排队需求</button></div></div>
           </header>
           <div id="detail-current-state"></div>

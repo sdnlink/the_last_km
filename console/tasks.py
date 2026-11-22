@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from auto_moniter.health import delivery_recovery_warning, read_run_snapshot, run_health
+from auto_moniter.health import confirms_follow_up_wait, delivery_recovery_warning, read_run_snapshot, run_health
 from auto_moniter.control import ControlError, read_control
 from auto_moniter.paths import state_root
 from auto_moniter.processes import process_identity
@@ -43,6 +43,7 @@ from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
 from console.diagnostics import diagnose, console_result
 from console.launch import abort_start
+from console import migration
 
 
 PROVIDERS = tuple(AGENTS)
@@ -192,8 +193,17 @@ class TaskStore:
             self._catalog_at = time.monotonic()
         managed_paths = {item['run_dir'] for item in tasks.values()}
         tasks.update({key: item for key, item in self._external.items() if item['run_dir'] not in managed_paths})
-        return {ident: item for ident, item in tasks.items()
-                if not (self.deleted_dir / (run_key(item['run_dir']) + '.json')).exists()}
+        removed = {ident for ident, item in tasks.items()
+                   if (self.deleted_dir / (run_key(item['run_dir']) + '.json')).exists()}
+        for item in tasks.values():
+            source = tasks.get(item.get('migrated_from'))
+            if not source or item.get('status') == 'cancelled':
+                continue
+            if item['id'] not in removed:
+                source['_migrated_to'] = item['id']
+            elif item.get('started_at'):
+                source['_migration_consumed'] = True
+        return {ident: item for ident, item in tasks.items() if ident not in removed}
 
     def _get(self, ident: str) -> dict:
         meta = self._catalog().get(ident)
@@ -202,7 +212,9 @@ class TaskStore:
         return meta
 
     def _save(self, meta: dict) -> None:
-        write_json(self.tasks_dir / (meta['id'] + '.json'), meta, durable=True)
+        write_json(self.tasks_dir / (meta['id'] + '.json'),
+                   {key: value for key, value in meta.items() if key not in {'_migrated_to', '_migration_consumed'}},
+                   durable=True)
         if meta.get('parallel_project'):
             write_json(Path(meta['run_dir']) / 'project-lifecycle.json', {'status':meta['status']}, durable=True)
 
@@ -304,6 +316,16 @@ class TaskStore:
             actions.append('roles')
         if 'resume' in actions:
             actions.append('checks')
+        migrated_to = meta.get('_migrated_to', '')
+        migrated = migrated_to or meta.get('_migration_consumed')
+        if migrated:
+            actions = [action for action in actions if action not in {'resume', 'checks', 'roles'}]
+            resume_unavailable = ('剩余工作已迁移，请在续做任务中继续处理。' if migrated_to else
+                                  '续做任务已归档，原任务的剩余预算已随任务转移。')
+        if ('delete' in actions and migration.eligible(meta, state, status)
+                and not meta.get('_migration_consumed')
+                and not (run / 'publication.json').exists() and not (run / 'work-checkpoint.json').exists()):
+            actions.append('migrate')
         control_message = ''
         if meta.get('error') and not live:
             control_message = '上次启动失败：' + str(meta['error'])
@@ -343,8 +365,9 @@ class TaskStore:
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
             requirement_revision = {}
-        can_direct = not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
+        can_direct = not migrated and not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
         can_queue_requirements = (state.get('workflow', meta.get('workflow')) == 'review-first'
+                                  and not migrated
                                   and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE})
         delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
         if active and state.get('directions_version') != 1:
@@ -373,6 +396,8 @@ class TaskStore:
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
                      'time_estimate': estimate_task_time(state, status, health['usage'].get('elapsed_s'))
                                       if include_details else {},
+                     'migrated_from': meta.get('migrated_from', ''),
+                     'migrated_to': migrated_to,
                      'provider': meta.get('provider') or (provider.get('worker') or {}).get('name', '—'),
                      'reviewer': meta.get('reviewer') or (provider.get('reviewer') or {}).get('name', '—'),
                      'model': meta.get('model', ''), 'reviewer_model': meta.get('reviewer_model', ''),
@@ -603,7 +628,7 @@ class TaskStore:
         except (ValueError,OSError) as exc:
             raise TaskError(str(exc)) from exc
 
-    def create(self, data: dict, *, supervision_preferences=None) -> dict:
+    def create(self, data: dict, *, supervision_preferences=None, migration_snapshot=None) -> dict:
         def text(key, default='', maximum=32000):
             value = data.get(key, default)
             if not isinstance(value, str) or '\x00' in value or len(value) > maximum:
@@ -793,6 +818,15 @@ class TaskStore:
                 meta['acceptance'] = ('验收方案须说明如何验证以下目标，不要求在本任务实现或证明原功能已通过：\n' if verification_mode=='planning' else '') + guided['criteria']
                 if 'ndr-documentation' in guided['selected_ids'] and run.is_relative_to(cwd):
                     raise TaskError('文档只读验收的基线须在目标项目外，请使用外部控制台 --data-dir',409)
+            if migration_snapshot is not None:
+                context, seconds, directions, queue, acceptance = migration_snapshot
+                meta.update(migrated_from=context['source_task_id'], max_runtime_seconds=seconds, acceptance=acceptance)
+                run.mkdir(mode=0o700)
+                write_json(run / 'migration-context.json', context, durable=True)
+                if directions:
+                    write_json(run / 'directions.json', {'version': 1, 'messages': directions}, durable=True)
+                if queue:
+                    write_json(run / 'requirement-queue.json', {'version': 1, 'items': queue}, durable=True)
             if auto_start and not parallel:
                 self._check_start(meta)
             self._save(meta)
@@ -878,7 +912,7 @@ class TaskStore:
                 '--provider', meta['provider'], '--reviewer', meta['reviewer'],
                 '--git-history', 'off' if meta.get('task_type') == 'deployment' else 'required',
                 '--review-every', str(meta.get('review_every', 5)),
-                '--max-runtime', str(meta['max_runtime_minutes'] * 60),
+                '--max-runtime', str(meta.get('max_runtime_seconds', meta['max_runtime_minutes'] * 60)),
                 '--max-agent-calls', str(meta['max_agent_calls']), '--max-rounds', str(meta['max_rounds']), '--guard']
         argv.append('--task-type=' + meta.get('task_type', 'code'))
         for key, flag in [('model', '--model'), ('reviewer_model', '--reviewer-model'), ('paseo_backend', '--paseo-backend'), ('reviewer_paseo_backend', '--reviewer-paseo-backend')]:
@@ -1015,6 +1049,27 @@ class TaskStore:
             if action not in view['actions']:
                 raise TaskError('当前状态不支持此操作，请刷新后重试', 409)
             run = Path(meta['run_dir'])
+            if action == 'migrate':
+                if meta.get('_migrated_to'):
+                    return self.detail(meta['_migrated_to'])
+                try:
+                    with inactive_run(run), Directions(run).lock():
+                        directions = Directions(run)
+                        state = directions.read('state.json', 32 * 1024 * 1024)
+                        status = state.get('status')
+                        if status == 'running' and confirms_follow_up_wait(run, state, read_json(run / 'report.json')):
+                            status = 'action_required'
+                        if not migration.eligible(meta, state, status):
+                            raise ValueError('原任务的状态已变化，请刷新后重试')
+                        requirement = migration.original_requirement(run, meta)
+                        payload, context, seconds, queue = migration.build(meta, state, run, requirement)
+                        acceptance = state.get('acceptance', meta.get('acceptance', ''))
+                        return self.create(payload, migration_snapshot=(
+                            context, seconds, directions.messages(), queue, acceptance))
+                except TaskError:
+                    raise
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    raise TaskError(redact(str(exc)), 409) from exc
             if action == 'checks':
                 additions = (data or {}).get('additional_checks')
                 if (not isinstance(additions, list) or not additions or len(additions) > 20
@@ -1121,7 +1176,9 @@ class TaskStore:
                         try:
                             if previous_lifecycle is not None:
                                 write_json(lifecycle,{'status':'deleted'},durable=True)
-                            (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
+                            # A started follow-up has already taken ownership of the source budget.
+                            if not (meta.get('migrated_from') and meta.get('started_at')):
+                                (self.tasks_dir / (ident + '.json')).unlink(missing_ok=True)
                         except OSError:
                             if previous_lifecycle is not None:
                                 write_json(lifecycle,previous_lifecycle,durable=True)

@@ -17,7 +17,7 @@ from auto_moniter.isolation import WorkerIsolation
 from auto_moniter.paths import default_run_dir
 from auto_moniter.paths import workspace_lock
 from auto_moniter.providers import PreparedCommand, ProviderError, resolve_provider
-from auto_moniter.redaction import redact
+from auto_moniter.redaction import redact, safe
 from auto_moniter.service import main as service_main
 from auto_moniter.supervisor import RunConfig, Supervisor, run_command
 from tests.test_supervisor import _verdict
@@ -148,6 +148,15 @@ for path in (Path('test.py'),Path(sys.argv[1])):
                 self.assertNotIn("sensitive-secret-for-test", (run / name).read_text())
             self.assertIn("[REDACTED]", (run / "report.json").read_text())
             self.assertNotIn("secret123", redact('password=secret123 Bearer token123'))
+
+    def test_nested_redaction_reads_environment_once_per_payload(self):
+        with patch.dict(os.environ, {"TEST_API_KEY": "first-test-credential"}):
+            with patch.object(os.environ, "copy", wraps=os.environ.copy) as snapshot:
+                self.assertEqual(safe({"rows": ["first-test-credential", {"detail": "Bearer example-token"}]}),
+                                 {"rows": ["[REDACTED]", {"detail": "Bearer [REDACTED]"}]})
+                self.assertEqual(snapshot.call_count, 1)
+        with patch.dict(os.environ, {"TEST_API_KEY": "second-test-credential"}):
+            self.assertEqual(safe(["second-test-credential"]), ["[REDACTED]"])
 
 
 if __name__ == "__main__":

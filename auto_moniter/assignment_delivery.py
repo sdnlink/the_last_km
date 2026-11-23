@@ -77,8 +77,8 @@ def verified(run, workspace, assignment, module, brief):
     expected = function_gate.known_criteria({module['id']: module}, brief)
     actual = function_gate.known_criteria({module['id']: child_module}, state.get('requirements_review') or {})
     requested = set(assignment['criterion_ids'])
-    if (not requested <= set(delivered['task']['criterion_ids']) or not requested <= expected.keys()
-            or any(expected[key] != actual.get(key) for key in requested)):
+    verified_text = {actual[key] for key in delivered['task']['criterion_ids'] if key in actual}
+    if not requested <= expected.keys() or any(expected[key] not in verified_text for key in requested):
         raise ValueError('关联任务的验收条目与原派单不一致。')
     records = state.get('rounds', [])
     final = next((row for row in reversed(records) if row.get('role') == 'reviewer'

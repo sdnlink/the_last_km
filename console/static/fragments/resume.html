@@ -8,6 +8,8 @@
   <label>裁判恢复<select name="referee"><option value="inherit">沿用当前设置</option><option value="on">启用裁判</option><option value="off">关闭裁判</option></select></label>
   <label>裁判模型<select name="referee_model"><option value="">沿用当前设置</option></select><input name="referee_model_custom" hidden maxlength="200" placeholder="自定义模型 ID"><small data-model-note="referee"></small></label>
   <label>追加验收命令（可选，每行一条）<textarea name="additional_checks" rows="4" placeholder="只填写本轮缺少的行为检查命令"></textarea></label>
+  <label>派单仓库绑定（可选，每行一条）<textarea name="assignment_workspaces" rows="2" placeholder="项目内路径=仓库绝对路径"></textarea><small>Watcher 据此识别需要在其他仓库处理的派单。</small></label>
+  <label>关联跨仓任务（可选，每行一条）<textarea name="assignment_deliveries" rows="2" placeholder="派单编号=运行目录绝对路径"></textarea><small>关联任务验收通过后，Watcher 会核对代码版本和检查记录。</small></label>
   <fieldset id="resume-check-corrections" class="resume-check-corrections" hidden>
    <legend>撤回误录的追加验收命令</legend>
    <div id="resume-removable-checks"></div>

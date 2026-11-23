@@ -78,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--guard-stop-timeout", default="30s", help="Graceful monitor shutdown deadline, then SIGKILL (default 30s)")
     run.add_argument("--worker-isolation", choices=("provider", "strict"), default="provider", help="strict protects external monitor state using bwrap; native workers only")
     run.add_argument("--protect", action="append", default=[], help="Project validation file/directory mounted read-only for strict worker; repeatable")
+    run.add_argument("--assignment-workspace", action="append", metavar="PREFIX=ROOT",
+                     help="Bind a project-relative assignment path prefix to its absolute Git workspace; repeatable")
+    run.add_argument("--assignment-delivery", action="append", metavar="TASK=RUN",
+                     help="Link an assignment to a Watcher run in its target repository; repeatable")
     run.add_argument("--memory-bytes", type=_nonnegative_int, default=0, help="Per-process virtual memory limit, inherited by native worker/check children")
     run.add_argument("--file-bytes", type=_nonnegative_int, default=0, help="Per-file write size limit for native subprocesses")
     run.add_argument("--max-run-bytes", type=_nonnegative_int, default=0, help="Monitor run directory storage budget, checked periodically")
@@ -309,6 +313,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    from auto_moniter import assignment_delivery
+    from auto_moniter.project_workspace import assignment_workspaces
+    try:
+        bindings = [] if args.assignment_workspace == [''] else args.assignment_workspace
+        assignment_workspaces(bindings or [])
+        deliveries = [] if args.assignment_delivery == [''] else args.assignment_delivery
+        assignment_delivery.links(deliveries or [])
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     requirement = _load_requirement(args)
     if not requirement.strip() and not args.resume:
         print("requirement is empty. Pass text, --file, or pipe it on stdin.", file=sys.stderr)
@@ -405,6 +419,8 @@ def _run(args: argparse.Namespace) -> int:
         review_isolation=args.review_isolation,
         keep_rounds=args.keep_rounds,
         worker_isolation=args.worker_isolation, protect_paths=args.protect,
+        assignment_workspaces=bindings,
+        assignment_deliveries=deliveries,
         memory_bytes=args.memory_bytes, file_bytes=args.file_bytes, max_run_bytes=args.max_run_bytes,
         max_history_bytes=args.max_history_bytes, max_agent_state_bytes=args.max_agent_state_bytes,
     )

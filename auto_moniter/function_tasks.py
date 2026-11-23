@@ -164,9 +164,20 @@ class FunctionTasks:
         for item in self.accepted:
             if not isinstance(item,dict) or set(item) - {'file_hashes'} not in (
                     {'task','round','tree','evidence'}, {'task','round','tree','evidence','verification','symbol_hash'},
-                    {'task','round','tree','evidence','verification','target_hashes'}):
+                    {'task','round','tree','evidence','verification','target_hashes'},
+                    {'task','round','tree','evidence','external_delivery'}):
                 raise ValueError('Invalid accepted function checkpoint')
             task=validate(item['task'])
+            if 'external_delivery' in item:
+                delivery = item['external_delivery']
+                if (not isinstance(delivery, dict)
+                        or set(delivery) != {'run_dir', 'workspace', 'commit', 'tree', 'checks_digest'}
+                        or any(not isinstance(value, str) for value in delivery.values())
+                        or not all(Path(delivery[key]).is_absolute() for key in ('workspace', 'run_dir'))
+                        or not re.fullmatch(r'[0-9a-f]{40,64}', delivery['commit'])
+                        or delivery['tree'] != item['tree']
+                        or not re.fullmatch(r'[0-9a-f]{64}', delivery['checks_digest'])):
+                    raise ValueError('Invalid external assignment acceptance')
             if (task['id'] in seen or not set(task['depends_on']) <= seen or type(item['round']) is not int or item['round']<1
                     or not isinstance(item['tree'], str) or not re.fullmatch('[0-9a-f]{64}',item['tree'])):
                 raise ValueError('Invalid accepted function version')
@@ -190,7 +201,7 @@ class FunctionTasks:
                         or not valid_hashes
                         or any(not isinstance(log, str) or not re.fullmatch(r'[0-9]+-check-[0-9]+\.log', log) for log in checks.values())):
                     raise ValueError('Invalid accepted function verification')
-            elif task.get('kind') == 'integration':
+            elif task.get('kind') == 'integration' and 'external_delivery' not in item:
                 raise ValueError('Accepted integration requires verification for every target')
             seen.add(task['id'])
         if self.current and (self.current['id'] in seen or not set(self.current['depends_on']) <= seen):

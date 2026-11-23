@@ -141,6 +141,8 @@ class RunConfig:
     task_type: str = 'code'
     referee: bool | None = None
     referee_model: str = ''
+    assignment_workspaces: list[str] | None = None
+    assignment_deliveries: list[str] | None = None
 
 
 @dataclass
@@ -545,6 +547,9 @@ class Supervisor:
             self._process_control()
             if self._stop:
                 break
+            problem = self._external_delivery_problem()
+            if problem:
+                return self._finish('action_required', problem, records, last_worker)
             self._check_budget()
             if self._referee_replan:
                 if not self._elaborate_requirement(records, next_function=True):
@@ -564,8 +569,10 @@ class Supervisor:
                 break
             if self.project:
                 self._sync_business_head(records)
-            separated_verification = self._separate_verification_milestone(records)
-            scope_candidate = self._scope_replan_candidate(records)
+            task = self.function_tasks.current
+            foreign_assignment = bool(self._function_gate and task and self._assignment_repository_conflict(task))
+            separated_verification = not foreign_assignment and self._separate_verification_milestone(records)
+            scope_candidate = None if foreign_assignment else self._scope_replan_candidate(records)
             if scope_candidate is not None:
                 recovery_path = self.run_dir / 'scope-recovery.json'
                 key = {'task_id': self.function_tasks.current['id'], 'tree': scope_candidate.tree}
@@ -607,7 +614,7 @@ class Supervisor:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
-            pending = None if separated_verification else self._pending_review(records)
+            pending = None if separated_verification or foreign_assignment else self._pending_review(records)
             if pending is not None:
                 record = pending
                 round_index, verdict, tree = record.index, record.verdict, record.tree
@@ -641,6 +648,24 @@ class Supervisor:
                     self._process_control()
                     if self._stop:
                         break
+                task = self.function_tasks.current
+                if self._function_gate and task:
+                    outside = self._assignment_repository_conflict(task)
+                    if outside:
+                        self._event('function_workspace_mismatch', task_id=task['id'], reason=outside)
+                        problem = self._receive_external_assignment(task, records)
+                        if problem == '':
+                            continue
+                        if self._advance_local_assignment(records):
+                            continue
+                        if problem and problem.startswith(f'派单 {task["id"]} 正在等待') and self._external_assignment_running(task):
+                            self._beat('等待跨仓派单完成验收：' + task['id'])
+                            while self._external_assignment_running(task) and not self._stop:
+                                self._process_control()
+                                self._check_budget()
+                                self._stop_event.wait(2)
+                            continue
+                        return self._finish('action_required', problem or outside, records, last_worker)
                 self._check_budget(new_call=True)
                 outside_check = self._assignment_whitespace_preflight()
                 self._process_control()
@@ -2269,6 +2294,10 @@ class Supervisor:
             self._write_state(records,'running',0,'',workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir))
 
     def _commit_approved(self,worker,reviewer,worker_text,review_text,tree):
+        problem = self._external_delivery_problem()
+        if problem:
+            reviewer.verdict.gaps.append(problem)
+            return False
         if self.config.workflow != 'review-first':
             return True
         if self._verification_only() and self.function_tasks.current['delivery_scope'] == 'function':
@@ -2299,6 +2328,10 @@ class Supervisor:
         entry and again immediately before irreversible ref updates.
         """
         self._process_control(active=True)
+        problem = self._external_delivery_problem()
+        if problem:
+            reviewer.verdict.gaps.append(problem)
+            return False
         if self.project:
             self.project.observe(force=True)
             if self.project.needs_review:
@@ -3132,6 +3165,10 @@ class Supervisor:
                 'commands':list(dict.fromkeys([*commands, *(item['command'] for item in supplemental)])),
                 **({'supplemental_checks': supplemental} if supplemental else {}),
                 'configured_checks':list(self.config.checks),
+                **({'external_deliveries': {
+                    item['task']['id']: item['external_delivery'] for item in self.function_tasks.accepted
+                    if 'external_delivery' in item}}
+                   if any('external_delivery' in item for item in self.function_tasks.accepted) else {}),
                 'check_timeout_s':self.config.check_timeout_s,
                 'provider_config':self._provider_config(), 'reviewer_model':self._reviewer_model(),
                 'worker_model':self.config.model, 'requirement':self.config.requirement,
@@ -3991,6 +4028,147 @@ class Supervisor:
             if missing:
                 raise ValueError('Assign remaining implementation before declaring delivery; uncovered criteria: ' + ', '.join(missing))
 
+    def _assignment_repository_conflict(self, task):
+        root = self.config.cwd
+        from auto_moniter.project_workspace import assignment_workspaces
+        bindings = assignment_workspaces(self.config.assignment_workspaces or [])
+        explicitly_local = set()
+        for file in function_tasks.writable_files(task):
+            path = Path(file)
+            match = next((workspace for prefix, workspace in bindings if path.is_relative_to(prefix)), None)
+            if match is not None and match != root:
+                return self._assignment_repository_message(task, file, match)
+            if match == root:
+                explicitly_local.add(file)
+        missing = [file for file, _ in function_tasks.targets(task)
+                   if file not in explicitly_local and not (root / file).is_file()]
+        if not missing:
+            return ''
+        # A missing file alone is valid for implementation. Only flag a
+        # positive match in a neighboring Git worktree; never execute there.
+        try:
+            from itertools import islice
+            siblings = list(islice(root.parent.iterdir(), 128))
+            for sibling in siblings:
+                if sibling == root or sibling.is_symlink() or not (sibling / '.git').exists():
+                    continue
+                for file in missing:
+                    target = sibling / file
+                    if target.is_file() and target.resolve().is_relative_to(sibling):
+                        return self._assignment_repository_message(task, file, sibling)
+        except OSError:
+            pass
+        return ''
+
+    def _assignment_repository_message(self, task, file, workspace):
+        return (f'派单 {task["id"]} 的目标文件 {file} 位于 {workspace}。'
+                f'当前工作区是 {self.config.cwd}。请在目标仓库安排修复和验收。')
+
+    def _receive_external_assignment(self, task, records):
+        from auto_moniter import assignment_delivery
+        from auto_moniter.project_workspace import assignment_workspaces
+        run = assignment_delivery.links(self.config.assignment_deliveries or []).get(task['id'])
+        bindings = assignment_workspaces(self.config.assignment_workspaces or [])
+        roots = {next((root for prefix, root in bindings if Path(file).is_relative_to(prefix)),
+                      self.config.cwd) for file, _ in function_tasks.targets(task)}
+        if len(roots) != 1 or self.config.cwd in roots or task['delivery_scope'] == 'requirement':
+            return None
+        workspace = roots.pop()
+        module = self.modules.items[task['module_id']]
+        criteria = function_gate.known_criteria({module['id']: module}, self.requirements_review)
+        handoff = {'task': task, 'workspace': str(workspace), 'run_dir': str(run) if run else '',
+                   'module': {key: module[key] for key in ('id', 'title', 'acceptance')},
+                   'criteria': {key: criteria[key] for key in task['criterion_ids'] if key in criteria},
+                   'requirement_cycle': len(self.requirement_cycles) + 1}
+        write_json(self.run_dir / f'assignment-handoff-{task["id"]}.json', handoff, durable=True)
+        if not run:
+            return None
+        if run == self.run_dir or any(item['id'] not in self._dispatch_directions for item in self.directions.messages()):
+            return '跨仓派单需要关联另一个任务，并使用最新的需求版本。'
+        try:
+            proof = assignment_delivery.verified(run, workspace, task, module, self.requirements_review)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            return f'派单 {task["id"]} 的跨仓验收记录未通过核对。{exc}'
+        if proof is None:
+            return f'派单 {task["id"]} 正在等待 {workspace} 的关联任务完成验收。'
+        index = max(1, self._next_round - 1)
+        evidence = [str(run / 'report.json'), proof['commit']]
+        staged = self.function_tasks.export()
+        staged['accepted'].append({'task': task, 'round': index, 'tree': proof['tree'],
+                                  'evidence': evidence, 'external_delivery': proof})
+        staged['current'] = None
+        if task['delivery_scope'] == 'module':
+            verdict = Verdict('done', scope='module', module_ids=[task['module_id']], evidence=evidence)
+            problems = self.modules.coverage(verdict, verdict)
+            if problems and self.modules.items[task['module_id']]['status'] != 'accepted':
+                return '跨仓模块验收仍缺少前置模块。' + ' '.join(problems)
+        self.function_tasks = function_tasks.FunctionTasks(staged)
+        if task['delivery_scope'] == 'module':
+            self.modules.accept(verdict, verdict, index, workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
+        self._drop_worker_session = True
+        self._event('external_assignment_accepted', task_id=task['id'], workspace=workspace,
+                    commit=proof['commit'], checks_digest=proof['checks_digest'])
+        self._write_state(records, 'running', 0, '', workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
+        return ''
+
+    def _external_delivery_problem(self):
+        from auto_moniter import assignment_delivery
+        for item in self.function_tasks.accepted:
+            saved = item.get('external_delivery')
+            if not saved:
+                continue
+            task = item['task']
+            try:
+                proof = assignment_delivery.verified(Path(saved['run_dir']), Path(saved['workspace']), task,
+                    self.modules.items[task['module_id']], self.requirements_review)
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                return f'派单 {task["id"]} 的跨仓验收记录需要重新核对。{exc}'
+            if proof != saved:
+                return f'派单 {task["id"]} 的跨仓验收版本已变化，需要重新核对。'
+        return ''
+
+    def _external_assignment_running(self, task):
+        from auto_moniter.assignment_delivery import links
+        from auto_moniter.health import run_health
+        run = links(self.config.assignment_deliveries or []).get(task['id'])
+        if run is None or run == self.run_dir:
+            return False
+        return run_health(run)['health'] in {'active', 'recovering'}
+
+    def _advance_local_assignment(self, records):
+        if not self._complete_function_plan_ready() or self._pending_directions():
+            return False
+        blocked = self.function_tasks.current
+        snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+        if self._assignment_worker_started(blocked):
+            try:
+                if self._prepare_function_baseline(snapshot)['files'] != snapshot:
+                    return False
+            except (OSError, ValueError):
+                return False
+        waiting = function_plan.waiting(self.function_plan, self.function_tasks)
+        for task in waiting:
+            if task['delivery_scope'] == 'requirement' or self._assignment_repository_conflict(task):
+                continue
+            staged = function_tasks.FunctionTasks(self.function_tasks.export())
+            staged.current = None
+            try:
+                staged.assign(task, self.modules.items)
+                self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+                self._validate_new_assignment_tests(task)
+                plan = self._validate_complete_function_plan(
+                    [task, blocked, *(item for item in waiting if item['id'] != task['id'])],
+                    staged, self.modules.items, self.requirements_review)
+            except ValueError:
+                continue
+            self.function_tasks, self.function_plan = staged, plan
+            self._drop_worker_session = True
+            self._record_assignment(task)
+            self._event('function_workspace_deferred', task_id=blocked['id'], next_task_id=task['id'])
+            self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, snapshot))
+            return True
+        return False
+
     def _complete_function_plan_ready(self):
         return bool(self.function_plan and self.function_plan['cycle'] == len(self.requirement_cycles) + 1
                     and self.function_tasks.current in self.function_plan['tasks'])
@@ -4450,6 +4628,8 @@ class Supervisor:
 
     def _finish_locked(self, status: str, summary: str, records: list[RoundRecord],
                        verdict: Verdict | None) -> RunReport:
+        if status == 'done' and (problem := self._external_delivery_problem()):
+            status, summary = 'action_required', problem
         if status == 'done' and self._pending_directions():
             status, summary = 'action_required', 'New human instructions arrived during delivery. Resume to implement them.'
         if status == 'done' and self.requirement_queue.snapshot(self._requirement_queue_state())['waiting']:
@@ -4639,6 +4819,8 @@ class Supervisor:
             "check_changes": self._check_changes,
             "execution_settings": {key: getattr(self.config, key) for key in _EXECUTION_DEFAULTS},
             "protect_paths": self.config.protect_paths,
+            "assignment_workspaces": self.config.assignment_workspaces or [],
+            "assignment_deliveries": self.config.assignment_deliveries or [],
             "recovery_note": self._recovery_note,
             "no_progress_turns": self._no_progress,
             "progress_pending": self._progress_reset,
@@ -4898,6 +5080,16 @@ class Supervisor:
                 or not isinstance(self._rounds_since_review, int) or self._rounds_since_review < 0):
             raise ValueError("invalid saved review schedule")
         saved_checks = state.get("checks") or []
+        from auto_moniter.project_workspace import assignment_workspaces
+        saved_workspaces = state.get('assignment_workspaces', [])
+        assignment_workspaces(saved_workspaces)
+        if self.config.assignment_workspaces is None:
+            self.config.assignment_workspaces = saved_workspaces
+        from auto_moniter import assignment_delivery
+        saved_deliveries = state.get('assignment_deliveries', [])
+        assignment_delivery.links(saved_deliveries)
+        if self.config.assignment_deliveries is None:
+            self.config.assignment_deliveries = saved_deliveries
         self._check_changes = state.get('check_changes', [])
         check_history.configurations(saved_checks, self._check_changes)
         settings = state.get("execution_settings", {})

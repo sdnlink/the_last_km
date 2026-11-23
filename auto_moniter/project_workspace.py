@@ -19,6 +19,23 @@ class ProjectInputsChanged(RuntimeError):
     """Restart from durable watcher state instead of accepting a stale result."""
 
 
+def assignment_workspaces(values):
+    """Parse operator-provided source prefixes, preferring the most specific."""
+    if not isinstance(values, list) or len(values) > 30:
+        raise ValueError('最多可配置 30 条派单仓库绑定。')
+    bindings = {}
+    for value in values:
+        if not isinstance(value, str) or '\0' in value or len(value) > 4096 or '=' not in value:
+            raise ValueError('派单仓库绑定应填写为「项目内路径=仓库绝对路径」。')
+        name, destination = value.split('=', 1)
+        prefix, root = Path(name), Path(destination)
+        if (not name or not prefix.parts or prefix.is_absolute() or '..' in prefix.parts
+                or str(prefix) != name or not root.is_absolute() or prefix in bindings):
+            raise ValueError('派单仓库绑定需要互不重复的项目内路径和仓库绝对路径。')
+        bindings[prefix] = root.resolve()
+    return sorted(bindings.items(), key=lambda item: -len(item[0].parts))
+
+
 def git(cwd, *args, check=True):
     result = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, timeout=30)
     if check and result.returncode:

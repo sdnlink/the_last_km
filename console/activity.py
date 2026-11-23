@@ -77,6 +77,9 @@ EVENT_LABELS = {
     'function_assigned': '已下发函数任务',
     'function_dispatch_validated': '派单校验通过，即将开始执行',
     'function_dispatch_preflight_rejected': '派单校验未通过，已退回 Reviewer',
+    'function_workspace_mismatch': '派单目标位于另一个仓库',
+    'function_workspace_deferred': '已暂缓跨仓派单，继续执行当前仓库的任务',
+    'external_assignment_accepted': '已核对跨仓派单的验收结果',
     'function_accepted': '函数通过验收',
     'verification_scope_separated': '已将验证结果与模块验收分开处理',
     'verification_evidence_accepted': '独立验证通过，结果已登记',
@@ -207,8 +210,12 @@ class ActivityReader:
                 text += '：' + present_summary(event.get('summary') or event.get('status'))
             elif name == 'supplemental_checks_queued':
                 text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('paths') or '')
-            elif name == 'function_dispatch_preflight_rejected':
+            elif name in {'function_dispatch_preflight_rejected', 'function_workspace_mismatch'}:
                 text += '：' + str(event.get('task_id') or '') + '\n' + present_summary(event.get('reason'))
+            elif name == 'function_workspace_deferred':
+                text += '：' + str(event.get('task_id') or '') + ' → ' + str(event.get('next_task_id') or '')
+            elif name == 'external_assignment_accepted':
+                text += '：' + str(event.get('task_id') or '') + ' · ' + str(event.get('commit') or '')
             elif name == 'function_next_assignment_rejected':
                 text += '：' + str(event.get('rejected_task_id') or '') + '\n' + str(event.get('reason') or '')
             elif name in {'function_gate_rejected', 'function_acceptance_blocked'}:

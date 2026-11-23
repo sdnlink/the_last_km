@@ -487,6 +487,9 @@ def coverage(ledger, modules, task, brief, root, *, provisional=None):
         return current_hashes[key]
     for item in reversed(ledger.accepted):
         old = item['task']
+        if item.get('external_delivery'):
+            covered.update(old['criterion_ids'])
+            continue
         if not item.get('verification') or not required.intersection(old['criterion_ids']) - covered:
             continue
         accepted = item.get('target_hashes') if old.get('kind') == 'integration' else {old['file']: item['symbol_hash']}

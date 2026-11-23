@@ -439,6 +439,8 @@ class TaskStore:
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'project_cwd':meta.get('project_cwd',''), 'parallel_project':meta.get('parallel_project',False),
                      'task_scope':meta.get('task_scope',[]), 'task_dependencies':meta.get('task_dependencies',[]),
+                     'assignment_workspaces': state.get('assignment_workspaces', []) if include_details else [],
+                     'assignment_deliveries': state.get('assignment_deliveries', []) if include_details else [],
                      'task_branch':meta.get('task_branch',''),
                      'managed': bool(meta.get('managed')), 'status': status, 'health': health,
                      'time_estimate': estimate_task_time(state, status, health['usage'].get('elapsed_s'))
@@ -1323,6 +1325,20 @@ class TaskStore:
                             arguments.append(flag + '=' + str(total))
                     from auto_moniter.cli import build_parser, _parse_duration
                     parsed = build_parser().parse_args(arguments)
+                    from auto_moniter.project_workspace import assignment_workspaces
+                    from auto_moniter.assignment_delivery import links
+                    for key, flag, validate in (
+                            ('assignment_workspaces', '--assignment-workspace=', assignment_workspaces),
+                            ('assignment_deliveries', '--assignment-delivery=', links)):
+                        if key not in additions:
+                            continue
+                        bindings = additions[key]
+                        try:
+                            validate(bindings)
+                        except (OSError, ValueError) as exc:
+                            raise TaskError(str(exc)) from exc
+                        arguments = [arg for arg in arguments if not arg.startswith(flag)]
+                        arguments.extend(flag + binding for binding in (bindings or ['']))
                     if (_parse_duration(parsed.max_runtime) and float(usage.get('elapsed_s', 0)) >= _parse_duration(parsed.max_runtime)
                             or parsed.max_agent_calls and int(usage.get('agent_calls', 0)) >= parsed.max_agent_calls):
                         raise TaskError('累计预算已耗尽，请在恢复窗口明确追加预算', 409)

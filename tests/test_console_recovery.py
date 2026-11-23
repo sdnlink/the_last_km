@@ -60,6 +60,13 @@ class ResumeArgumentsTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(ValueError):
                 resume_arguments({'argv': argv}, self.root / 'run', self.state)
 
+    def test_resume_keeps_explicit_workspace_bindings_and_reset(self):
+        for value in (f'src/backend={self.root / "backend"}', ''):
+            with self.subTest(value=value):
+                args = resume_arguments({'argv': [*self.argv, '--assignment-workspace', value]},
+                                        self.root / 'run', self.state)
+                self.assertIn('--assignment-workspace=' + value, args)
+
     def test_deployment_category_is_preserved_and_cannot_be_changed_by_manifest(self):
         state = {**self.state, 'task_type': 'deployment', 'workflow': 'review-first'}
         argv = [*self.argv, '--task-type=deployment', '--workflow=review-first']

@@ -83,6 +83,10 @@ paseo heartbeat create --cron "*/15 * * * *" "读取并执行 skills/paseo-watch
 
 “需求队列”页上方分页展示 reviewer 完整派单，支持“全部、待派发、当前派单、已验收”筛选，以及随页面数量、每页 10/20/50 项和跳页。展开每项可查看目标函数、输入、预期输出、边界、验证要求、前置依赖、验收条目和批准检查。每 3 秒刷新保留当前页和已展开项。用户追加的后续需求保留在下方。完整函数计划保存于 `state.json.function_plan`，已验收和当前派单保存在 `function_tasks`。历史任务未生成完整计划时明确提示“待生成”，不会把未拆分工作显示成零项。
 
+恢复窗口可按「项目内路径=仓库绝对路径」填写派单仓库绑定。命令行使用可重复的 `--assignment-workspace PREFIX=ROOT`。绑定随检查点保留，多个前缀匹配时以最长的为准。Watcher 优先推进当前仓库中依赖已满足并能通过校验的工作。
+
+指向其他仓库的派单会在运行目录生成 `assignment-handoff-<派单编号>.json`。可用「关联跨仓任务」填写「派单编号=运行目录绝对路径」，或使用 `--assignment-delivery TASK=RUN`。关联任务须在对应仓库验收完成，且保留相同的派单编号、目标和验收要求。Watcher 核对提交、Git 审核记录、候选指纹和检查日志后继续依赖该派单的工作。整体验收仍由原任务负责。
+
 分页接口：`GET /api/tasks/<id>/dispatch-plan?page=1&page_size=10&status=all`，`page_size` 范围 1–100，`status` 支持 `all`、`waiting`、`active`、`accepted`；返回当前页 `items`、总数、页数及全局状态计数。仅返回请求页内容。升级前已运行的监督器需停止并恢复以加载新版逻辑；恢复已有受验证的函数任务时，控制台默认开启完整计划，在安全审核边界保留当前派单并补齐后续计划。CLI 可显式传 `--function-dispatch --full-function-plan`；直接 Python 集成的完整计划模式默认关闭，以兼容已有增量派单。
 
 Web 新建开发任务使用 `--git-history required`，目标目录须属于 Git 仓库，无法保存 Git 轮次记录时会停止执行。普通目录请先在目标目录执行 `git init`。部署任务默认关闭 Git 自动提交，不要求通过源码改动证明部署。恢复已有 CLI 任务沿用其原参数；旧版未指定 Git 参数的任务按 `auto` 模式恢复，在 Git 项目中开启后续轮次留痕。

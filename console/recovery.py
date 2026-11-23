@@ -127,8 +127,9 @@ def resume_arguments(manifest: dict, run: Path, state: dict, *, settings_path: P
         value = getattr(args, key)
         if value is not None:
             result.append('--' + key.replace('_', '-') + '=' + str(value))
-    for key, flag in [('protect', '--protect'), ('extra_arg', '--extra-arg'), ('reviewer_extra_arg', '--reviewer-extra-arg')]:
-        result.extend(flag + '=' + value for value in getattr(args, key))
+    for key, flag in [('protect', '--protect'), ('extra_arg', '--extra-arg'), ('reviewer_extra_arg', '--reviewer-extra-arg'),
+                      ('assignment_workspace', '--assignment-workspace'), ('assignment_delivery', '--assignment-delivery')]:
+        result.extend(flag + '=' + value for value in (getattr(args, key) or []))
     if args.no_review:
         result.append('--no-review')
     if not args.fresh_review:

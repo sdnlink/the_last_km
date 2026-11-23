@@ -109,6 +109,10 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。'
         actions=['核对失败命令和原始日志；需要修改范围外代码、既有测试或生成文档时，先安排明确范围的修复。',
                  '恢复时保留当前候选；仅复用与当前版本和检查结果一致的审核结论，检查结果变化后重新审核。检查通过前不会派发下一项。']
+    elif re.match(r'^派单 \S+ 的目标文件 .* 位于 .*。当前工作区是 ', raw):
+        code='assignment_workspace_mismatch';title='派单目标位于另一个仓库';role='watcher';phase='派单校验'
+        reason=raw
+        actions=['在目标仓库安排单独的任务，并让修改、候选版本和验收检查使用同一个工作区。']
     elif text.startswith('verification needs an external prerequisite'):
         code='verification_waiting';title='验收等待补齐条件';role='watcher';phase='验收'
         reason=present_summary(raw)

@@ -215,7 +215,13 @@ export async function openResume(id){
   const task=await api(`/api/tasks/${id}`);if(!currentTaskDialog('resume',sequence))return;
   const u=task.usage||task.health?.usage||{};
   $('#resume-usage').textContent=i18n`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
-  $('#resume-form').reset();showRemovableChecks(task);$('#resume-error').hidden=true;showTaskDialog('resume',id);
+  const form=$('#resume-form');
+  form.reset();
+  for(const name of ['assignment_workspaces','assignment_deliveries']){
+   const field=form.elements[name];
+   if(field)field.value=field.defaultValue=(task[name]||[]).join('\n');
+  }
+  showRemovableChecks(task);$('#resume-error').hidden=true;showTaskDialog('resume',id);
   const cfg=await config();if(!currentTaskDialog('resume',sequence,id))return;
   modelChoices($('#resume-form'),cfg,{preserve:true,roles:['referee'],values:{reviewer:task.reviewer,reviewer_paseo_backend:task.reviewer_paseo_backend||'claude',referee_model:task.referee?.model||''}});
  }catch(error){if(currentTaskDialog('resume',sequence))toast(error.message,true);}
@@ -440,8 +446,15 @@ function bind(name){
    delete data.referee;delete data.referee_model;
    const additionalChecks=String(data.additional_checks||'').split(/\r?\n/).map(c=>c.trim()).filter(Boolean);
    const removeChecks=fields.getAll('remove_checks');
+   const bindings={};
+   for(const name of ['assignment_workspaces','assignment_deliveries']){
+    const field=e.target.elements[name];
+    if(field&&field.value!==field.defaultValue)bindings[name]=field.value.split(/\r?\n/).map(item=>item.trim()).filter(Boolean);
+    delete data[name];
+   }
    delete data.additional_checks;delete data.remove_checks;
    for(const key of Object.keys(data))data[key]=Number(data[key]);
+   Object.assign(data,bindings);
    if(referee==='on'||referee==='off')data.referee=referee==='on';
    if(refereeModel)data.referee_model=refereeModel;
    view.pending.add(id);

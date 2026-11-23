@@ -68,6 +68,123 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_completed_external_assignment_unblocks_frontend_after_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frontend, backend = root/'frontend', root/'backend'
+            frontend.mkdir()
+            backend.mkdir()
+            (frontend/'app.py').write_text('def parse_input(): return 42\n')
+            (backend/'model.py').write_text('def parse_input(): return 0\n')
+            subprocess.run(['git', 'init', '-q', str(backend)], check=True)
+            subprocess.run(['git', '-C', str(backend), 'add', 'model.py'], check=True)
+            subprocess.run(['git', '-C', str(backend), '-c', 'user.name=Test',
+                '-c', 'user.email=test@local', 'commit', '-qm', 'Initial'], check=True)
+            foreign = task('BACKEND', 'model.py')
+            backend_final = verification_task('DONE', 'model.py', depends=['BACKEND'])
+            frontend_final = verification_task('FINAL', depends=['BACKEND'])
+            candidate = result('BACKEND', 'done', file='model.py')
+            candidate['touch'] = 'model.py'
+            verification = result('DONE', 'done', status='done', file='model.py')
+
+            class Reviewer(ScriptedProvider):
+                def _command(self, session, prompt_file, read_only):
+                    match = re.search(r'Worker checkpoint: ([0-9a-f]{40,64})', prompt_file.read_text())
+                    if match:
+                        self.scripts[0]['verdict']['evidence'].append(match[1])
+                    return super()._command(session, prompt_file, read_only)
+
+            worker = FunctionWorker('worker', [candidate, verification])
+            reviewer = Reviewer('reviewer', [plan(foreign),
+                result('BACKEND', 'accepted', file='model.py', next_task=backend_final),
+                result('DONE', 'accepted', status='done', file='model.py')])
+            backend_run = backend/'run'
+            child = Supervisor(RunConfig('Verify backend behavior', backend, worker, reviewer=reviewer,
+                workflow='review-first', function_dispatch=True, git_history='required', run_dir=backend_run,
+                checks=[CHECK], retry_delay_s=0), log=lambda _:None).run()
+            self.assertEqual(child.status, 'done', child.summary)
+
+            initial = json.loads(plan(foreign)['text'])
+            initial['function_plan'] = [foreign, frontend_final]
+            frontend_worker = FunctionWorker('worker', [])
+            stopped = self.run_monitor(frontend, frontend_worker, ScriptedProvider('reviewer', [
+                {'verdict':{}, 'text':json.dumps(initial)}]), full_function_plan=True,
+                assignment_workspaces=['model.py=' + str(backend)])
+            self.assertEqual(stopped.status, 'action_required', stopped.summary)
+            self.assertFalse(frontend_worker.calls)
+            run = frontend/'run'
+            handoff = json.loads((run/'assignment-handoff-BACKEND.json').read_text())
+            self.assertEqual(handoff['workspace'], str(backend))
+            frontend_worker = FunctionWorker('worker', [result('FINAL', 'done', status='done')])
+            next_plan = json.loads(plan(frontend_final)['text'])
+            next_plan.update(function_plan=[frontend_final], modules=[])
+            reviewer = ScriptedProvider('reviewer', [{'verdict':{}, 'text':json.dumps(next_plan)},
+                result('FINAL', 'accepted', status='done')])
+            resumed = Supervisor(RunConfig('', frontend, frontend_worker, reviewer=reviewer,
+                workflow='review-first', resume=True, git_history='off', run_dir=run, retry_delay_s=0,
+                assignment_deliveries=['BACKEND=' + str(backend_run)]), log=lambda _:None).run()
+            self.assertEqual(resumed.status, 'done', resumed.summary)
+            self.assertEqual(len(frontend_worker.calls), 1)
+            state = json.loads((run/'state.json').read_text())
+            accepted = state['function_tasks']['accepted']
+            self.assertEqual([item['task']['id'] for item in accepted], ['BACKEND', 'FINAL'])
+            self.assertEqual(accepted[0]['external_delivery']['workspace'], str(backend))
+            self.assertFalse((frontend/'model.py').exists())
+            from auto_moniter.assignment_delivery import verified
+            (backend_run/'001-check-01.log').write_text('Replaced check output')
+            child_state = json.loads((backend_run/'state.json').read_text())
+            with self.assertRaisesRegex(ValueError, '检查记录'):
+                verified(backend_run, backend, foreign, child_state['modules'][0], child_state['requirements_review'])
+
+    def test_foreign_repository_assignment_waits_while_local_work_advances(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                self.assert_foreign_repository_assignment(explicit)
+
+    def assert_foreign_repository_assignment(self, explicit):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent/'frontend'
+            backend = parent/'services'/'backend' if explicit else parent/'backend'
+            root.mkdir()
+            backend.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(backend)], check=True)
+            (backend/'model.py').write_text('def parse_input(): return 0\n')
+            (root/'app.py').write_text('def parse_input(): return 0\n')
+            foreign = task('BACKEND', 'model.py')
+            local = {**task('FRONTEND', 'app.py'), 'verification':['Empty input returns 42']}
+            final = verification_task('FINAL', depends=['BACKEND', 'FRONTEND'])
+            initial = json.loads(plan(foreign)['text'])
+            initial['function_plan'] = [foreign, local, final]
+            worker = FunctionWorker('worker', [
+                {**result('FRONTEND', 'done'), 'touch':'app.py'},
+            ])
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict':{}, 'text':json.dumps(initial)}, result('FRONTEND', 'accepted', next_task=foreign),
+            ])
+            bindings = ['model.py=' + str(backend)] if explicit else []
+            report = self.run_monitor(root, worker, reviewer, max_rounds=3, full_function_plan=True,
+                                      assignment_workspaces=bindings)
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn(str(backend), report.summary)
+            self.assertIn('model.py', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertIn('FRONTEND', worker.calls[0]['prompt'])
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['current']['id'], 'BACKEND')
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['FRONTEND'])
+            self.assertFalse((root/'model.py').exists())
+            self.assertIn('return 0', (backend/'model.py').read_text())
+            self.assertEqual(state['assignment_workspaces'], bindings)
+            if explicit:
+                resumed_worker = FunctionWorker('worker', [])
+                resumed = Supervisor(RunConfig('', root, resumed_worker, reviewer=ScriptedProvider('reviewer', []),
+                    workflow='review-first', resume=True, git_history='off', run_dir=root/'run',
+                    retry_delay_s=0), log=lambda _:None).run()
+                self.assertEqual(resumed.status, 'action_required', resumed.summary)
+                self.assertIn(str(backend), resumed.summary)
+                self.assertFalse(resumed_worker.calls)
+
     def test_reviewer_authored_test_is_run_again_after_function_repair(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

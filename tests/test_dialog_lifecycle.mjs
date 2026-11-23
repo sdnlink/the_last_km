@@ -102,6 +102,20 @@ test('resume appends approved checks before starting and leaves numeric budgets 
   assert.deepEqual(JSON.parse(posts[1].options.body), {additional_runtime_minutes:5,additional_agent_calls:0});
 });
 
+test('resume sends changed assignment repository bindings', async () => {
+  const h = await harness();
+  const field = element('');
+  h.nodes['resume-form'].elements.assignment_workspaces = field;
+  await h.dialogs.openResume('A');
+  field.value = 'src/backend=/work/backend\n';
+  await h.nodes['resume-form'].emit('submit');
+  const request = h.requests.find(r => r.options.method === 'POST');
+  assert.deepEqual(JSON.parse(request.options.body), {
+    additional_runtime_minutes:0, additional_agent_calls:0,
+    assignment_workspaces:['src/backend=/work/backend'],
+  });
+});
+
 test('resume saves withdrawals and replacements together before launching', async () => {
   const h = await harness();
   await h.dialogs.openResume('A');

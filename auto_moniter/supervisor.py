@@ -2800,7 +2800,7 @@ class Supervisor:
                   'Only the independent reviewer may propose audit closures; do not create or duplicate audit IDs. '
                   'Independent review and watcher checks awaiting execution are not implementation gaps. '
                   'Return corrected JSON; watcher checks and independent review still follow.\n'
-                  + (documentation_tasks.instructions('worker') if self.config.task_type == 'documentation' else
+                  + (documentation_tasks.instructions('report_correction') if self.config.task_type == 'documentation' else
                      'Describe known platform limits in summary/evidence, preserving actual unresolved behavior as gaps.\n')
                   + 'Report errors:\n' + json.dumps(errors, ensure_ascii=False)
                   + '\nPrevious report failure (if any):\n' + previous_failure

@@ -29,8 +29,17 @@ def instructions(role):
             'This stage is strictly read-only. Define the report/document deliverable and its review criteria, '
             'then return ready so the worker can carry out the analysis. No analysis report has been delivered yet.\n'
         )
-    if role == 'worker':
-        return common + (
+    if role in ('worker', 'report_correction'):
+        reporting = (
+            'When several modules share one report, a report edit may make a previously reviewed prerequisite pending again. '
+            'Recheck that prerequisite’s existing sections and cite them. If their evidence still holds, include the prerequisite '
+            'and the newly completed module in the same completion report for joint independent review. A pending ledger status '
+            'alone does not require another edit or prevent submitting both modules. '
+        )
+        if role == 'report_correction':
+            return ('Report correction keeps the saved report unchanged. Product defects and faithfully recorded verification limits '
+                    'belong in summary or done. Reserve gaps, blockers and next_actions for missing analysis. ' + reporting)
+        return common + reporting + (
             'Create a substantive report in an allowed project document location and cite its path in evidence. '
             'Use a new Markdown report when the original inputs must remain unchanged. '
             'If the user specified an output location, use it. Include findings, supporting references, '

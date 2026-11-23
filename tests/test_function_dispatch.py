@@ -170,10 +170,21 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(handoff['workspace'], str(backend))
             frontend_worker = FunctionWorker('worker', [result('FINAL', 'done', status='done')])
             reviewer = ScriptedProvider('reviewer', [result('FINAL', 'accepted', status='done')])
-            resumed = Supervisor(RunConfig('', frontend, frontend_worker, reviewer=reviewer,
+            config = RunConfig('', frontend, frontend_worker, reviewer=reviewer,
                 workflow='review-first', resume=True, git_history='off', run_dir=run, retry_delay_s=0,
-                assignment_deliveries=['BACKEND=' + str(backend_run), 'MILESTONE=' + str(backend_run)]),
-                log=lambda _:None).run()
+                assignment_deliveries=['BACKEND=' + str(backend_run), 'MILESTONE=' + str(backend_run)])
+            receiver = Supervisor(config, log=lambda _:None)
+            event = receiver._event
+
+            def stop_after_handoff(kind, **details):
+                event(kind, **details)
+                if kind == 'external_assignment_accepted' and details['task_id'] == 'MILESTONE':
+                    receiver.request_stop()
+
+            with patch.object(receiver, '_event', side_effect=stop_after_handoff):
+                interrupted = receiver.run()
+                self.assertEqual(interrupted.status, 'stopped', interrupted.summary)
+            resumed = Supervisor(config, log=lambda _:None).run()
             self.assertEqual(resumed.status, 'done', resumed.summary)
             self.assertEqual(len(frontend_worker.calls), 1)
             self.assertEqual(len(reviewer.calls), 1)
@@ -182,6 +193,9 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual([item['task']['id'] for item in accepted], ['BACKEND', 'MILESTONE', 'FINAL'])
             self.assertEqual(accepted[0]['external_delivery']['workspace'], str(backend))
             self.assertFalse((frontend/'model.py').exists())
+            worker_record = next(row for row in state['rounds'] if row['role']=='worker')
+            local_checks = worker_record['watcher_result']['candidate_checks']['context']['commands']
+            self.assertFalse(any(test_path in command for command in local_checks))
             from auto_moniter.assignment_delivery import verified
             child_state = json.loads((backend_run/'state.json').read_text())
             self.assertIsNotNone(verified(backend_run, backend, milestone, child_state['modules'][0],

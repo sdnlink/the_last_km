@@ -4080,12 +4080,14 @@ class Supervisor:
             files = function_tasks.writable_files(task)
             if any(not contains(self.project.scope,file) for file in files):
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
+        foreign = bool(self._assignment_repository_conflict(task))
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
                                     approvals=self._integration_scopes(),
-                                    future=bool(self._assignment_repository_conflict(task)),
+                                    future=foreign,
                                     regressions=list(dict.fromkeys([
                                         *self._local_test_paths,
-                                        *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
+                                        *(name for item in ledger.accepted if foreign or 'external_delivery' not in item
+                                          for name in item['task'].get('test_files', [])),
                                     ])))
         if task['delivery_scope'] != 'function':
             missing = function_gate.coverage(ledger, modules, task, brief, self.config.cwd,
@@ -4299,8 +4301,11 @@ class Supervisor:
                                       preserved_id=preserved.get('id'))
         regressions = list(dict.fromkeys([
             *self._local_test_paths,
-            *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
+            *(name for item in ledger.accepted if 'external_delivery' not in item
+              for name in item['task'].get('test_files', [])),
         ]))
+        remote_regressions = [name for item in ledger.accepted if 'external_delivery' in item
+                              for name in item['task'].get('test_files', [])]
         problems = []
         planned = {item['task']['id']: item['task'] for item in ledger.accepted}
         planned.update((task['id'], task) for task in plan['tasks'])
@@ -4323,12 +4328,17 @@ class Supervisor:
                 if any(not contains(self.project.scope, name) for name in paths):
                     problems.append('Complete plan must stay inside the declared parallel task scope: '+task['id'])
             if self._function_gate:
+                foreign = bool(self._assignment_repository_conflict(task))
+                catalog = list(dict.fromkeys([*regressions, *remote_regressions])) if foreign else regressions
                 try:
                     function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
-                        approvals=self._integration_scopes(), regressions=regressions, future=True)
+                        approvals=self._integration_scopes(), regressions=catalog, future=True)
                 except ValueError as error:
                     problems.append(task['id']+': '+str(error))
-            regressions = list(dict.fromkeys([*regressions, *task.get('test_files', [])]))
+                if foreign:
+                    remote_regressions.extend(task.get('test_files', []))
+                else:
+                    regressions = list(dict.fromkeys([*regressions, *task.get('test_files', [])]))
         if problems:
             raise ValueError('; '.join(problems)[:12000])
         return plan
@@ -5022,6 +5032,7 @@ class Supervisor:
         validate_task_type(self.config)
         self.function_plan = function_plan.restore(state.get('function_plan'))
         self._local_test_paths = list(dict.fromkeys(name for accepted in self.function_tasks.accepted
+                                                   if 'external_delivery' not in accepted
                                                    for name in accepted['task'].get('test_files', [])))
         self._dispatch_directions = state.get('dispatch_directions', [])
         self._function_issue_ids = state.get('function_issue_ids', [])

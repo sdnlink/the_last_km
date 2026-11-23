@@ -207,6 +207,8 @@ class ActivityReader:
                 text += '：' + str(event.get('task_id') or '')
             elif name in {'acceptance_checks_added', 'acceptance_checks_removed'}:
                 commands = event.get('added' if name == 'acceptance_checks_added' else 'removed')
+                if event.get('task_id'):
+                    text += ' · ' + str(event['task_id'])
                 text += '：' + ('\n'.join(commands) if isinstance(commands, list) else str(commands or ''))
             elif name == 'maintenance_started':
                 text += '：' + str(event.get('reason') or '')

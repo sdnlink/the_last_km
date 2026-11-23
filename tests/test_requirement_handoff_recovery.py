@@ -118,14 +118,14 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         self.assertEqual(_git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertEqual(_git(self.root, 'rev-list', '--count', 'HEAD'), '2')
 
-    def assert_revalidation(self, original, head, worker, reviewer):
+    def assert_revalidation(self, original, head, worker, reviewer, *, planning=False):
         resumed = self.supervisor(worker, reviewer, resume=True, max_rounds=4)
         report = resumed.run()
         self.assertEqual(report.status, 'max_rounds', report.summary)
         self.assertEqual(len(worker.calls), 1)
-        self.assertEqual(len(reviewer.calls), 1)
-        self.assertTrue(reviewer.calls[0]['read_only'])
-        self.assertIn('Worker checkpoint:', reviewer.calls[0]['prompt'])
+        self.assertEqual(len(reviewer.calls), 2 if planning else 1)
+        self.assertTrue(all(call['read_only'] for call in reviewer.calls))
+        self.assertIn('Worker checkpoint:', reviewer.calls[-1]['prompt'])
         state = self.state()
         self.assertEqual(state['requirement_cycles'], [])
         self.assertEqual(_git(self.root, 'rev-parse', 'HEAD'), head)
@@ -154,9 +154,16 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         head = _git(self.root, 'rev-parse', 'HEAD')
         direction = 'Verify the existing behavior with the amended input constraints.'
         message = Directions(self.run_dir).append(direction)
-        worker, reviewer = self.revalidation_agents()
-        receipt = self.assert_revalidation(original, head, worker, reviewer)
-        self.assertIn(direction, worker.calls[0]['prompt'])
+        integrated = 'Revalidate the existing behavior against amended input constraints.'
+        worker = ScriptedProvider('worker', [{'verdict': outcome(['A', 'B'], scope='requirement')}])
+        reviewer = CitingReviewer([
+            {'verdict': {}, 'text': json.dumps({**BRIEF, 'refined_requirement': integrated})},
+            {'verdict': _verdict('continue', ['verify the current inputs'])},
+        ], self.root)
+        receipt = self.assert_revalidation(original, head, worker, reviewer, planning=True)
+        self.assertIn(direction, reviewer.calls[0]['prompt'])
+        self.assertIn(integrated, worker.calls[0]['prompt'])
+        self.assertNotIn(direction, worker.calls[0]['prompt'])
         self.assertEqual(receipt['context']['direction_ids'], [message['id']])
 
     def test_adopted_business_fast_forward_revalidates_after_another_resume(self):

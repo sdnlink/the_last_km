@@ -564,7 +564,7 @@ class TaskStore:
                     'discovery': {'roots': list(dict.fromkeys(str(p) for p in self.runs_dirs)), 'warnings': self._scan_warnings},
                     'at': timestamp()}
 
-    def add_direction(self, ident: str, data: dict) -> dict:
+    def add_direction(self, ident: str, data: dict, *, activate: bool = True) -> dict:
         with self._lock:
             meta = self._get(ident)
             view = self._view(meta, {})
@@ -592,7 +592,7 @@ class TaskStore:
             if pause:
                 write_json(Path(meta['run_dir']) / 'control.json', {'action': 'pause'}, durable=True)
                 submission.update(status='pause_requested', message='补充要求已保存，当前轮次结束后暂停。')
-            else:
+            elif activate:
                 try:
                     if 'continue' in view['actions']:
                         self.action(ident, 'continue')
@@ -621,7 +621,11 @@ class TaskStore:
                     raise TaskError('当前任务不能追加排队需求；需要尚未结束的 review-first 任务', 409)
                 try:
                     if data.get('action', 'append') == 'append':
-                        queue.append(data.get('text'), data.get('position', 'last'))
+                        position = data.get('position', 'last')
+                        if position == 'current':
+                            self.add_direction(ident, {'text': data.get('text')}, activate=False)
+                        else:
+                            queue.append(data.get('text'), position)
                     elif data.get('action') == 'remove':
                         queue.remove(data.get('id'))
                     else:
@@ -633,7 +637,26 @@ class TaskStore:
                 snapshot = queue.snapshot(state)
             except ValueError as exc:
                 raise TaskError(str(exc), 409) from exc
+            try:
+                directions = Directions(Path(meta['run_dir'])).messages()
+            except (OSError, ValueError) as exc:
+                raise TaskError(str(exc), 409) from exc
+            brief = state.get('requirements_review') or {}
+            reviewed = list(state.get('dispatch_directions') or [])
+            if not state.get('function_dispatch') and brief.get('status') == 'ready':
+                revision = state.get('requirement_revision') or {}
+                for item in revision.get('amendments', []):
+                    reviewed.append(item['direction_id'])
+                    if item['sha256'] == brief.get('reviewed_direction_sha256'):
+                        break
+                else:
+                    reviewed = []
             return {**snapshot, 'id': ident, 'title': view['title'], 'status': view['status'],
+                    'amendments': safe([{**item, 'planned': item['id'] in reviewed} for item in directions]),
+                    'check_supplements': safe([{**change['target'], 'at': change['at'],
+                                                'count': len(change['added'])}
+                                               for change in state.get('check_changes', [])
+                                               if change.get('target') and change.get('added')]),
                     'original_requirement': view['requirement'],
                     'can_append': view.get('can_queue_requirements', False),
                     'delivery': 'restart_required' if state and state.get('requirement_queue_version') != 1 else 'after_acceptance'}
@@ -1155,6 +1178,11 @@ class TaskStore:
                             return self.detail(ident)
                         original = (run / 'state.json').read_bytes()
                         change = {'at': timestamp(), 'added': combined[retained:]}
+                        if change['added'] and state.get('tree'):
+                            current = (state.get('function_tasks') or {}).get('current') or {}
+                            change['target'] = {'task_id': current.get('id', ''),
+                                'criterion_ids': current.get('criterion_ids', []),
+                                'tree': state['tree'], 'cycle': len(state.get('requirement_cycles', [])) + 1}
                         if removed:
                             change['removed'] = removed
                         changes = [*state.get('check_changes', []), change]
@@ -1170,7 +1198,8 @@ class TaskStore:
                             raise
                     from auto_moniter.events import record
                     if change['added']:
-                        record(run, 'acceptance_checks_added', added=change['added'])
+                        record(run, 'acceptance_checks_added', added=change['added'],
+                               **(change.get('target') or {}))
                     if removed:
                         record(run, 'acceptance_checks_removed', removed=[item['command'] for item in removed])
                 except (OSError, ValueError) as exc:

@@ -9,9 +9,18 @@ def configurations(checks, changes):
     current = list(checks)
     history = [current]
     for change in reversed(changes):
-        if (not isinstance(change, dict) or set(change) not in ({'at', 'added'}, {'at', 'added', 'removed'})
+        if (not isinstance(change, dict) or not {'at', 'added'} <= change.keys()
+                or change.keys() - {'at', 'added', 'removed', 'target'}
                 or not isinstance(change['at'], str) or len(change['at']) > 100):
             raise ValueError('Invalid saved acceptance check history')
+        target = change.get('target')
+        if target is not None and (not isinstance(target, dict)
+                or set(target) != {'task_id', 'criterion_ids', 'tree', 'cycle'}
+                or not isinstance(target['task_id'], str) or not isinstance(target['tree'], str)
+                or type(target['cycle']) is not int or target['cycle'] < 1
+                or not isinstance(target['criterion_ids'], list)
+                or any(not isinstance(item, str) for item in target['criterion_ids'])):
+            raise ValueError('Invalid saved acceptance check target')
         added = change['added']
         removed = change.get('removed', [])
         if (not isinstance(added, list) or not isinstance(removed, list)

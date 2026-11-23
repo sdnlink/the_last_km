@@ -681,7 +681,7 @@ class Supervisor:
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
                                      workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 worker_directions = None
-                if first_follow_up:
+                if self.config.workflow == 'review-first' and not self.config.function_dispatch:
                     # Compare the inputs used for dispatch to those reviewed.
                     # Later amendments stay pending for a later turn.
                     worker_directions = self.directions.messages()
@@ -690,16 +690,22 @@ class Supervisor:
                     # A legacy brief without a binding can only be reused
                     # when the original requirement has no amendments.
                     reviewed = brief.get('reviewed_direction_sha256', revision['original_sha256'])
-                    if (brief.get('status') != 'ready'
+                    amendment_pending = reviewed != revision['sha256']
+                    if amendment_pending or (first_follow_up and (brief.get('status') != 'ready'
                             or brief.get('cycle') != len(self.requirement_cycles) + 1
-                            or reviewed != revision['sha256']
                             or not requirement_context.matches_ready_inputs(
                                 self.run_dir, self.config.cwd, self.config.requirement, brief,
-                                worker_start_tree, self.config.checks, worker_directions)):
-                        if not self._elaborate_requirement(records):
+                                worker_start_tree, self.config.checks, worker_directions))):
+                        if not self._elaborate_requirement(records, next_function=amendment_pending and not first_follow_up):
                             return self._finish('stopped' if self._stop_requested else 'action_required',
                                 self.requirements_review.get('summary', 'Next requirement did not become ready.'),
                                 records, last_worker)
+                        if amendment_pending:
+                            self._drop_worker_session = True
+                        continue
+                elif self.config.function_dispatch:
+                    worker_directions = self.directions.messages()
+                    if any(item['id'] not in self._dispatch_directions for item in worker_directions):
                         continue
                 worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
                 # Compare to the last verified workspace, including changes made
@@ -2055,8 +2061,10 @@ class Supervisor:
                     if browser:
                         prompt += '\n\n' + browser
                 if next_function:
-                    prompt += ('\nReuse the existing brief; preserve the current assignment while planning remaining work. '
-                               'Copy acceptance_criteria exactly, without paraphrasing or renumbering. '
+                    prompt += ('\nMerge newly reviewed amendments into the remaining plan and consolidate overlapping work. '
+                               'Preserve the current assignment and all accepted assignments. '
+                               'Copy the existing acceptance_criteria as an exact prefix, without paraphrasing or renumbering. '
+                               'Append additional criteria only for explicitly requested behavior. '
                                'The watcher retains these approved criteria and validates the new task against them. Brief: '
                                + json.dumps(previous_brief, ensure_ascii=False))
                     if self._referee_replan:
@@ -2082,8 +2090,9 @@ class Supervisor:
                                        'Keep next_task and the plan first entry equal.')
                         prompt += '\nExact unfinished assignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
             elif next_function:
-                prompt += ('\nAssess the changed project inputs against the existing brief and update the implementation plan. '
-                           'Preserve its original acceptance criteria and all outstanding work: '
+                prompt += ('\nReconcile new user amendments and changed inputs with the existing brief. '
+                           'Merge overlapping work. Keep existing acceptance criteria in their original order and append new criteria. '
+                           'Preserve already accepted work and identify affected behavior that needs fresh evidence. '
                            +json.dumps(previous_brief,ensure_ascii=False))
             if self.project:
                 self.project.observe(force=True)
@@ -2169,15 +2178,17 @@ class Supervisor:
                     raise ValueError('Blocked planning cannot dispatch a function')
             else:
                 brief=requirements_review.parse(turn.text)
+                if next_function and previous_brief.get('status') == 'ready' and brief['status'] == 'ready':
+                    previous = previous_brief['acceptance_criteria']
+                    criteria = brief['acceptance_criteria']
+                    if criteria[:len(previous)] != previous:
+                        brief['acceptance_criteria'] = list(previous)
                 requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
                     len(self.requirement_cycles)+1,brief,before_files,review_checks,review_directions)
-                if next_function and previous_brief.get('status') == 'ready':
-                    brief['acceptance_criteria'] = list(previous_brief['acceptance_criteria'])
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
-            ready_follow_up = follow_up and not self.config.function_dispatch and brief['status'] == 'ready'
-            if ready_follow_up:
+            if not self.config.function_dispatch and brief['status'] == 'ready':
                 brief['reviewed_direction_sha256'] = self._last_invocation['requirement_revision']['sha256']
                 brief['reviewed_checks_sha256'] = requirement_context.checks_digest(review_checks)
             self.requirements_review=brief
@@ -2187,7 +2198,7 @@ class Supervisor:
                 self.project.mark_reviewed(project_signature)
                 self._project_replan = False
             self.directions.receipt(self._direction_ids['reviewer'],'reviewer',1,responded=True)
-            if ready_follow_up:
+            if not self.config.function_dispatch and brief['status'] == 'ready':
                 # The run checkpoint is authoritative on resume. Save it before
                 # publishing the separate brief so a ready plan is not reviewed twice.
                 self._write_state(records, 'running', 0, '', before)
@@ -5672,7 +5683,11 @@ class Supervisor:
         if role=='worker' and self.config.function_dispatch:
             prompt += ("This worker may implement only its dispatched assignment and the reviewer-approved "
                        "direction IDs; pending amendments require reviewer replanning, not an expanded worker scope.\n")
-        if messages:
+        # Older ready briefs may depend on the reviewed source text. New
+        # briefs carry the integrated change in the checked planning result.
+        integrated_worker = (role == 'worker' and self.config.workflow == 'review-first'
+                             and 'reviewed_checks_sha256' in self.requirements_review)
+        if messages and not integrated_worker:
             prompt += "\n\nLatest instructions from the human managing this task (in chronological order):\n"
             prompt += json.dumps(messages, ensure_ascii=False, indent=2)
             prompt += ("\nApply these instructions to priorities and implementation within the authorized project. "

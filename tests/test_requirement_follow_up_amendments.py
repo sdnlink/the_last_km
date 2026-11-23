@@ -114,6 +114,30 @@ class RequirementFollowUpAmendmentsTests(unittest.TestCase):
         self.assertEqual(context['direction_ids'], [amendment['id']])
         self.assert_publication(original)
 
+    def test_amendment_before_original_worker_requires_updated_reviewed_brief(self):
+        amendment = 'Also reject negative input.'
+        revised = {**BRIEF, 'refined_requirement': 'Handle empty and negative inputs.',
+                   'acceptance_criteria': [*BRIEF['acceptance_criteria'], 'negative input is rejected']}
+        worker = self.next_worker()
+        reviewer = CitingReviewer([self.brief(BRIEF), self.brief(revised)], self.root)
+        monitor = self.supervisor(worker, reviewer)
+        original_beat = monitor._beat
+        added = []
+
+        def amend_at_dispatch(note, *args, **kwargs):
+            if note == 'round 1: starting worker' and not added:
+                added.append(Directions(self.run_dir).append(amendment))
+            return original_beat(note, *args, **kwargs)
+
+        with patch.object(monitor, '_beat', side_effect=amend_at_dispatch), \
+                patch.object(monitor, '_invoke', wraps=monitor._invoke) as invoke:
+            monitor.run()
+        self.assertEqual([call.kwargs['role'] for call in invoke.call_args_list[:3]],
+                         ['reviewer', 'reviewer', 'worker'])
+        self.assertIn(revised['refined_requirement'], worker.calls[0]['prompt'])
+        self.assertNotIn(amendment, worker.calls[0]['prompt'])
+        self.assertEqual(self.state()['requirements_review']['acceptance_criteria'], revised['acceptance_criteria'])
+
     def test_resume_reviews_amendment_before_first_worker(self):
         original = self.stop_after_ready()
         amendment = Directions(self.run_dir).append(DIRECTION)

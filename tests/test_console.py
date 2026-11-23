@@ -306,7 +306,8 @@ class ConsoleTests(unittest.TestCase):
         (run/'requirement.md').write_text('saved original requirement')
         saved = {'cwd': str(self.project), 'status': 'action_required', 'tree': 'candidate',
                  'checks': [fixed], 'usage': {'elapsed_s': 42, 'agent_calls': 3},
-                 'function_tasks': {'current': {'check_ids': ['check:2']}}}
+                 'function_tasks': {'current': {'id': 'V2-Verify', 'check_ids': ['check:2'],
+                                                'criterion_ids': ['req:1:2']}}}
         write_json(run/'state.json',saved)
         with patch.object(self.store,'_resume_args',return_value=['run','--resume']):
             self.store.action(task['id'],'checks',{'additional_checks':[referenced, mistaken, kept]})
@@ -324,6 +325,9 @@ class ConsoleTests(unittest.TestCase):
                          {key:saved[key] for key in ('tree', 'usage', 'function_tasks')})
         self.assertEqual(state['check_changes'][-1]['removed'], [{'index': 2, 'command': mistaken}])
         self.assertEqual(state['check_changes'][-1]['added'], [replacement])
+        self.assertEqual(state['check_changes'][-1]['target'],
+                         {'task_id': 'V2-Verify', 'criterion_ids': ['req:1:2'],
+                          'tree': 'candidate', 'cycle': 1})
 
     def test_logs_are_bounded_redacted_and_reject_paths_and_symlinks(self):
         task = self.create()

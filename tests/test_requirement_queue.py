@@ -236,6 +236,17 @@ class RequirementQueueTests(unittest.TestCase):
                 store.queued_requirements(task['id'], {'text': 'BAD', 'position': 'missing'})
             self.assertEqual(first['waiting'][0]['text'], 'LATER')
 
+    def test_console_submission_can_request_merge_into_current_requirement(self):
+        with patch.dict(os.environ, {'AUTO_MONITER_STATE_DIR': str(self.root / 'state')}):
+            store = TaskStore(self.root / 'data', self.root)
+            task = store.create({'title': 'Task', 'requirement': 'CURRENT'})
+            with patch.object(store, '_launch') as launch:
+                store.queued_requirements(task['id'], {'text': 'LATER'})
+                view = store.queued_requirements(task['id'], {'text': 'MERGE', 'position': 'current'})
+                launch.assert_not_called()
+            self.assertEqual([item['text'] for item in view['waiting']], ['LATER'])
+            self.assertEqual([(item['text'], item['planned']) for item in view['amendments']], [('MERGE', False)])
+
 
 if __name__ == '__main__':
     unittest.main()

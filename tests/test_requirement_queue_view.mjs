@@ -19,6 +19,15 @@ test('empty and delivered queue states are explicit',()=>{
  const html=requirementQueueMarkup({status:'done',original_requirement:'Original',active:null,waiting:[],completed:[]});
  assert.match(html,/当前没有正在处理/);assert.match(html,/等待处理 · 0 条/);assert.match(html,/暂无需求/);
 });
+test('the queue shows planning status and linked acceptance supplements',()=>{
+ const html=requirementQueueMarkup({status:'running',original_requirement:'Original',waiting:[],completed:[],
+  amendments:[{text:'<Pending>',planned:false},{text:'Reviewed',planned:true}],
+  check_supplements:[{cycle:1,task_id:'V2-Verify',criterion_ids:['req:1:2'],tree:'123456789abcde',count:1}]});
+ assert.match(positionOptions([]),/value="current"/);
+ assert.match(html,/等待 Reviewer 规划.*&lt;Pending&gt;/);
+ assert.match(html,/已纳入评审计划.*Reviewed/);
+ assert.match(html,/V2-Verify.*req:1:2.*123456789abc/);
+});
 
 const globals=['document','fetch','localStorage','setTimeout','clearTimeout'];
 const originals=Object.fromEntries(globals.map(key=>[key,globalThis[key]]));

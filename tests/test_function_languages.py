@@ -58,6 +58,17 @@ struct Service { func run() -> Int { return 123 }; func other() -> Int { return 
 @unittest.skipUnless(importlib.util.find_spec('tree_sitter_language_pack'),
                      'Install auto-moniter[languages] to verify optional grammar rules')
 class LanguageScopeTests(unittest.TestCase):
+    def test_verification_planning_rejects_missing_symbol_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'table.py').write_text('def render():\n    return 1\n')
+            task = {'id': 'Verify', 'kind': 'verification', 'file': 'table.py', 'symbol': 'missing',
+                    'criterion_ids': ['M:1'], 'check_ids': ['check:1'], 'test_files': [], 'module_id': 'M'}
+            modules = {'M': {'acceptance': ['Works']}}
+            with self.assertRaisesRegex(ValueError, r'Verify.*table\.py#missing'):
+                validate_task(task, root, modules, ['true'], {})
+            validate_task({**task, 'symbol': 'render'}, root, modules, ['true'], {})
+
     def test_react_wrapped_tsx_implementation_preserves_outside_scope(self):
         source = '''import {memo} from 'react'
 const Other = 123

@@ -213,6 +213,17 @@ def target_state(path, symbol):
         raise ValueError('Cannot parse function target: ' + path.name) from exc
 
 
+def _assignment_target_state(root, task, file, symbol):
+    try:
+        measured = target_state(_path(root, file), symbol)
+    except ValueError as exc:
+        raise ValueError(f"Assignment {task['id']}: {file}#{symbol}: {exc}") from exc
+    if task.get('kind') == 'verification' and measured['body'] is None:
+        raise ValueError(f"Verification-only assignment {task['id']}: cannot locate function "
+                         f"{file}#{symbol}. Select an existing, unambiguous implementation.")
+    return measured
+
+
 def criteria(modules, module_id):
     return {f'{module_id}:{i}': text
             for i, text in enumerate(modules[module_id]['acceptance'], 1)}
@@ -293,8 +304,9 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
         path = _path(root, name)
         if test_asset(name) or name in task['test_files'] or path.is_dir():
             raise ValueError('edit_files cannot grant directory or regression/test configuration edits: ' + name)
-    if not future and task.get('kind') == 'verification' and any(not path.is_file() for path in paths):
-        raise ValueError('Verification-only targets must already exist')
+    if not future and task.get('kind') == 'verification':
+        for file, symbol in targets(task):
+            _assignment_target_state(root, task, file, symbol)
     if task.get('kind') == 'integration':
         verify_integration_approval(task, approvals)
     module_criteria = criteria(modules, task['module_id'])
@@ -353,15 +365,7 @@ def baseline(path, root, task, snapshot, *, missing_ok, historical_source=None):
     for name in task['test_files']:
         if _path(root, name).exists():
             raise ValueError('Function tasks may add focused tests; preserve existing test assets: ' + name)
-    measured = {}
-    for file, symbol in targets(task):
-        try:
-            measured[file] = target_state(_path(root, file), symbol)
-        except ValueError as exc:
-            raise ValueError(f"Assignment {task['id']}: {file}#{symbol}: {exc}") from exc
-        if task.get('kind') == 'verification' and measured[file]['body'] is None:
-            raise ValueError(f"Verification-only assignment {task['id']}: cannot locate function "
-                             f"{file}#{symbol}. Select an existing, unambiguous implementation.")
+    measured = {file: _assignment_target_state(root, task, file, symbol) for file, symbol in targets(task)}
     saved = {'id': task['id'], 'files': snapshot, 'targets': measured}
     _write_baseline(path, saved)
     return saved

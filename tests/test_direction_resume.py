@@ -154,6 +154,7 @@ class DirectionResumeTests(unittest.TestCase):
     def test_real_resume_delivers_previously_saved_direction_to_reviewer_then_worker(self):
         subprocess.run(['git','init','-q',str(self.project)],check=True)
         marker='Validate the refused-input case'
+        integrated='Verify that rejected inputs produce no output.'
         fake=self.root/'bin/codex'
         fake.write_text(f'''#!{sys.executable}
 import json,sys
@@ -163,6 +164,8 @@ if 'independent requirement reviewer' in prompt:
     result={BRIEF!r}
     if {marker!r} not in prompt:
         result.update(status='needs_input',blockers=['Need the additional instruction'])
+    else:
+        result['refined_requirement'] += ' ' + {integrated!r}
     Path('.auto-moniter').mkdir(exist_ok=True)
     Path('.auto-moniter/review-input.txt').write_text(prompt)
 else:
@@ -192,7 +195,9 @@ print(json.dumps({{'type':'result','result':json.dumps(result)}}),flush=True)
             self.assertEqual(result['direction_submission']['status'],'resuming')
             until(lambda:ident not in self.store._children)
             self.assertIn(marker,(self.project/'.auto-moniter/review-input.txt').read_text())
-            self.assertIn(marker,(self.project/'.auto-moniter/worker-input.txt').read_text())
+            worker_input=(self.project/'.auto-moniter/worker-input.txt').read_text()
+            self.assertIn(integrated,worker_input)
+            self.assertNotIn(marker,worker_input)
             saved=Directions(run).snapshot()
             self.assertEqual(len(saved),1)
             self.assertTrue(saved[0]['reviewer']['responded_at'])

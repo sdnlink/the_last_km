@@ -170,6 +170,8 @@ def run_health(run_dir: Path, stale_after: float = 60, *, snapshot: dict | None 
         phase = "waiting_for_input"
     if 'referee' in note.lower():
         phase = 'refereeing'
+    if note.startswith(('等待跨仓派单完成验收：', 'waiting for project dependencies: ')):
+        phase = 'waiting_for_dependencies'
     if health in {"finished", "monitor_exited"}:
         phase = health
     elif health == "recovering":

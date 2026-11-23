@@ -52,6 +52,8 @@ def review_wait(state: dict, health: dict, status: str, rounds: list, current_ro
         reason = 'watcher 正在执行验收检查。'
     elif phase == 'publishing':
         reason = '独立审核已接收，watcher 正在提交当前派单。'
+    elif phase == 'waiting_for_dependencies':
+        reason = '依赖任务验收通过后，watcher 会自动继续调度。'
     elif due:
         reason = f'已达到周期审核阈值（{elapsed}/{every} 轮），等待当前 worker 正常结束并返回有效结论后触发审核。'
     elif every == 0:

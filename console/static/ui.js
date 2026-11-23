@@ -35,6 +35,7 @@ const phases = {
   paused: i18n("已在轮次边界暂停"),
   recovering: i18n("正在恢复"),
   waiting_for_input: i18n("等待输入"),
+  waiting_for_dependencies: i18n("等待依赖任务验收"),
   heartbeat_stale: i18n("心跳超时"),
   resuming: i18n("恢复执行中"),
 };
@@ -140,7 +141,7 @@ function taskMotion(t) {
   if(state!=='running')return state;
   if(t.health?.health==='heartbeat_stale'||t.health?.phase==='heartbeat_stale')return 'attention';
   if(t.control==='pause'||t.control==='stop')return 'waiting';
-  if(['retry_wait','waiting_for_input'].includes(t.health?.phase))return 'waiting';
+  if(['retry_wait','waiting_for_input','waiting_for_dependencies'].includes(t.health?.phase))return 'waiting';
   return state;
 }
 function activityState(t,item,{plan=false}={}) {
@@ -195,6 +196,7 @@ function taskNarrative(t) {
     publishing:[i18n('监督器正在保存已审核代码'),i18n('本地提交完成后，继续下一派单或确认交付。')],
     retry_wait:[i18n('正在等待重试'),i18n('等待期结束后，在原预算内重试。')],
     waiting_for_input:[i18n('正在等待必要输入'),i18n('查看所需信息，补充后再继续。')],
+    waiting_for_dependencies:[i18n('正在等待依赖任务完成验收'),i18n('验收通过后，任务会自动继续。')],
     closing_agents:[i18n('正在结束会话并整理记录'),i18n('最终交付状态以监督器确认结果为准。')],
     recovering:[i18n('正在恢复已保存的进度'),i18n('核对检查点与当前代码后继续。')],
     resuming:[i18n('正在恢复已保存的进度'),i18n('核对检查点与当前代码后继续。')],

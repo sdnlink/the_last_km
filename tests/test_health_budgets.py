@@ -100,6 +100,8 @@ class HealthTests(unittest.TestCase):
             with file_lock(run/'supervisor.lock'):
                 for note,phase in [('round 900001: reviewer running','refining_requirements'),
                                    ('paused at a turn boundary','paused'),
+                                   ('等待跨仓派单完成验收：F2B','waiting_for_dependencies'),
+                                   ('waiting for project dependencies: task-1','waiting_for_dependencies'),
                                    ('reviewer awaiting_permission','waiting_for_input')]:
                     (run/'heartbeat').write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'note':note}))
                     self.assertEqual(run_health(run)['phase'],phase)

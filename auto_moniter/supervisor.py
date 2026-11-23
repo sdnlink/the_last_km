@@ -659,11 +659,13 @@ class Supervisor:
                         if self._advance_local_assignment(records):
                             continue
                         if problem and problem.startswith(f'派单 {task["id"]} 正在等待') and self._external_assignment_running(task):
-                            self._beat('等待跨仓派单完成验收：' + task['id'])
                             while self._external_assignment_running(task) and not self._stop:
                                 self._process_control()
+                                if self._stop:
+                                    break
                                 self._check_budget()
-                                self._stop_event.wait(2)
+                                self._beat('等待跨仓派单完成验收：' + task['id'])
+                                self._stop_event.wait(5)
                             continue
                         return self._finish('action_required', problem or outside, records, last_worker)
                 self._check_budget(new_call=True)

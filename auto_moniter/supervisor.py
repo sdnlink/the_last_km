@@ -617,6 +617,12 @@ class Supervisor:
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
             pending = None if separated_verification or foreign_assignment else self._pending_review(records)
+            publication_paths = self._function_publication_paths()
+            if (pending is not None and publication_paths is not None and self.git_history.business_commits
+                    and self.git_history.candidate.get('publication_paths') != publication_paths):
+                # A legacy publication preview can include files outside the
+                # assignment. Collect a fresh submission and approval.
+                pending = None
             if pending is not None:
                 record = pending
                 round_index, verdict, tree = record.index, record.verdict, record.tree
@@ -859,7 +865,8 @@ class Supervisor:
                 if self.git_history and self.config.workflow!='review-first':
                     self._checkpoint(record, turn.text, self._git_before)
                 elif self.git_history:
-                    self.git_history.prepare_review(round_index,self._git_before)
+                    self.git_history.prepare_review(round_index,self._git_before,
+                                                    publication_paths=self._function_publication_paths())
                 if not turn.exit_code and not turn.timed_out and not turn.interruption and not verdict.parse_error:
                     self._merge_modules(verdict)
                 self._write_state(records, "running", stall, previous_gap_key, tree)
@@ -3195,7 +3202,10 @@ class Supervisor:
                 selected.extend(self._acceptance_commands(final, ids))
         supplemental = record.watcher_result.get('supplemental_checks', [])
         commands = self._acceptance_commands(final, ids, selected)
+        publication = getattr(self.git_history, 'candidate', {})
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
+                **({'publication_tree': publication['business_tree']} if publication.get('round') == record.index
+                   and 'publication_paths' in publication else {}),
                 'requirement_cycle':len(self.requirement_cycles)+1,
                 'business_update_count':self._business_update_count,
                 **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
@@ -3853,6 +3863,11 @@ class Supervisor:
     def _verification_only(self):
         return bool(self._function_gate and self.function_tasks.current
                     and self.function_tasks.current.get('kind') == 'verification')
+
+    def _function_publication_paths(self):
+        if self._function_gate and self.function_tasks.current and isinstance(self.git_history, ApprovedHistory):
+            return [] if self._verification_only() else function_tasks.writable_files(self.function_tasks.current)
+        return None
 
     def _local_test_commands(self, paths):
         from auto_moniter.local_tests import command

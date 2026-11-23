@@ -102,6 +102,8 @@ class DispatchTests(unittest.TestCase):
             subprocess.run(['git', '-C', str(backend), 'add', 'model.py'], check=True)
             subprocess.run(['git', '-C', str(backend), '-c', 'user.name=Test',
                 '-c', 'user.email=test@local', 'commit', '-qm', 'Initial'], check=True)
+            unrelated = backend/'local-notes.txt'
+            unrelated.write_text('Existing local notes\n')
             foreign = task('BACKEND', 'model.py')
             backend_final = verification_task('DONE', 'model.py', depends=['BACKEND'])
             frontend_final = verification_task('FINAL', depends=['BACKEND'])
@@ -130,6 +132,9 @@ class DispatchTests(unittest.TestCase):
                 run_dir=backend_run, checks=[CHECK], retry_delay_s=0, assignment_contracts=contracts([foreign])),
                 log=lambda _:None).run()
             self.assertEqual(child.status, 'done', child.summary)
+            self.assertEqual(unrelated.read_text(), 'Existing local notes\n')
+            self.assertNotIn(unrelated.name, subprocess.check_output(
+                ['git', '-C', str(backend), 'ls-tree', '--name-only', 'HEAD'], text=True).splitlines())
 
             initial = json.loads(plan(foreign)['text'])
             initial['function_plan'] = [foreign, frontend_final]

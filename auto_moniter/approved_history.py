@@ -125,13 +125,15 @@ class ApprovedHistory(GitHistory):
         self.verify()
         return self._tree()
 
-    def prepare_review(self,index,before):
+    def prepare_review(self,index,before,*,publication_paths=None):
         self.verify()
         self.candidate={'base':before,'commit':self._tree(),'round':index,
                         'record':str(self.run_dir/f'{index:03d}-worker-text.md'),'kind':'uncommitted_tree'}
         if self.business_commits:
             import tempfile
             from auto_moniter.publication import business_tree
+            if publication_paths is not None:
+                self.candidate['publication_paths'] = list(publication_paths)
             with tempfile.TemporaryDirectory(prefix='auto-moniter-business-tree-') as tmp:
                 self.candidate['business_tree'] = business_tree(self, Path(tmp)/'index')
             next_work=self.git('commit-tree',self.candidate['commit'],'-p',self.work_head,
@@ -166,7 +168,9 @@ class ApprovedHistory(GitHistory):
             'Do not repeat a full audit or demand another identical test run just because the round changed.',
             'The cumulative diff remains available when shared behavior or missing scope requires it:',
             self.diff_command(self.initial, head),
-            ('Business target: ' + self.business_head['ref'] + '\nExact code publication diff (including initially dirty input):\n'
+            ('Business target: ' + self.business_head['ref'] + '\nExact code publication diff '
+             + ('(limited to the approved assignment paths):\n' if 'publication_paths' in candidate
+                else '(including initially dirty input):\n')
              + self.diff_command(self.business_head['commit'], self.candidate['business_tree'])
              if self.business_commits and self.business_head['commit'] else
              'Unborn business branch: review the complete candidate source before its first code commit.'),

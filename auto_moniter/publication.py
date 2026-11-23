@@ -37,13 +37,23 @@ def business_tree(history, code_index):
     env = {'GIT_INDEX_FILE': str(code_index)}
     empty = history.git('hash-object', '-t', 'tree', '--stdin', data=b'').decode().strip()
     history.git('read-tree', history.business_head['commit'] or empty, env=env)
-    original = entries(history, history.initial)
     candidate = entries(history, history.candidate['commit'])
-    published_tree = history.last_business_commit.get('candidate_tree')
-    published = entries(history, published_tree) if published_tree else {}
-    committed = entries(history, history.business_head['commit']) if history.business_head['commit'] else {}
+    paths = history.candidate.get('publication_paths')
+    if paths is not None:
+        prefix = history.cwd.relative_to(history.root)
+        names = {os.fsencode(prefix / path) for path in paths}
+        # An unused new file has no entry to remove. An approved deletion of a
+        # tracked path still needs an index update.
+        committed = entries(history, history.business_head['commit']) if history.business_head['commit'] else {}
+        names &= candidate.keys() | committed.keys()
+    else:
+        original = entries(history, history.initial)
+        published_tree = history.last_business_commit.get('candidate_tree')
+        published = entries(history, published_tree) if published_tree else {}
+        committed = entries(history, history.business_head['commit']) if history.business_head['commit'] else {}
+        names = original.keys() | candidate.keys() | published.keys() | committed.keys()
     selected = set()
-    for name in original.keys() | candidate.keys() | published.keys() | committed.keys():
+    for name in names:
         path = history.root / os.fsdecode(name)
         try:
             path.relative_to(history.cwd)

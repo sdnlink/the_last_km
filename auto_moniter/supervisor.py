@@ -4082,6 +4082,7 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         function_gate.validate_task(task, self.config.cwd, modules, self.config.checks, brief,
                                     approvals=self._integration_scopes(),
+                                    future=bool(self._assignment_repository_conflict(task)),
                                     regressions=list(dict.fromkeys([
                                         *self._local_test_paths,
                                         *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),

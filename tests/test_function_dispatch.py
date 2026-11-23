@@ -116,7 +116,7 @@ class DispatchTests(unittest.TestCase):
                       'verification': ['The revised implementation still returns 42']}
             refreshed = {**milestone, 'id': 'REFRESHED', 'depends_on': ['REPAIR']}
             backend_final = verification_task('DONE', 'model.py', depends=['REFRESHED'])
-            frontend_final = verification_task('FINAL', depends=['BACKEND'])
+            frontend_final = verification_task('FINAL', depends=['MILESTONE'])
             candidate = result('BACKEND', 'done', file='model.py')
             candidate['touch'] = 'model.py'
             verification = result('DONE', 'done', status='done', file='model.py')
@@ -158,7 +158,7 @@ class DispatchTests(unittest.TestCase):
                 ['git', '-C', str(backend), 'ls-tree', '--name-only', 'HEAD'], text=True).splitlines())
 
             initial = json.loads(plan(foreign)['text'])
-            initial['function_plan'] = [foreign, frontend_final]
+            initial['function_plan'] = [foreign, milestone, frontend_final]
             frontend_worker = FunctionWorker('worker', [])
             stopped = self.run_monitor(frontend, frontend_worker, ScriptedProvider('reviewer', [
                 {'verdict':{}, 'text':json.dumps(initial)}]), full_function_plan=True,
@@ -172,13 +172,14 @@ class DispatchTests(unittest.TestCase):
             reviewer = ScriptedProvider('reviewer', [result('FINAL', 'accepted', status='done')])
             resumed = Supervisor(RunConfig('', frontend, frontend_worker, reviewer=reviewer,
                 workflow='review-first', resume=True, git_history='off', run_dir=run, retry_delay_s=0,
-                assignment_deliveries=['BACKEND=' + str(backend_run)]), log=lambda _:None).run()
+                assignment_deliveries=['BACKEND=' + str(backend_run), 'MILESTONE=' + str(backend_run)]),
+                log=lambda _:None).run()
             self.assertEqual(resumed.status, 'done', resumed.summary)
             self.assertEqual(len(frontend_worker.calls), 1)
             self.assertEqual(len(reviewer.calls), 1)
             state = json.loads((run/'state.json').read_text())
             accepted = state['function_tasks']['accepted']
-            self.assertEqual([item['task']['id'] for item in accepted], ['BACKEND', 'FINAL'])
+            self.assertEqual([item['task']['id'] for item in accepted], ['BACKEND', 'MILESTONE', 'FINAL'])
             self.assertEqual(accepted[0]['external_delivery']['workspace'], str(backend))
             self.assertFalse((frontend/'model.py').exists())
             from auto_moniter.assignment_delivery import verified

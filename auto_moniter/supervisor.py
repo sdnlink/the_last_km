@@ -564,6 +564,7 @@ class Supervisor:
                 break
             if self.project:
                 self._sync_business_head(records)
+            separated_verification = self._separate_verification_milestone(records)
             scope_candidate = self._scope_replan_candidate(records)
             if scope_candidate is not None:
                 recovery_path = self.run_dir / 'scope-recovery.json'
@@ -606,7 +607,7 @@ class Supervisor:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
-            pending = self._pending_review(records)
+            pending = None if separated_verification else self._pending_review(records)
             if pending is not None:
                 record = pending
                 round_index, verdict, tree = record.index, record.verdict, record.tree
@@ -648,6 +649,23 @@ class Supervisor:
                 self._check_budget(new_call=True)
                 if outside_check:
                     return self._finish('action_required', outside_check, records, last_worker)
+                dispatch_preflight = (self._function_gate
+                                      and not self._assignment_worker_started(self.function_tasks.current))
+                if dispatch_preflight:
+                    try:
+                        self._validate_function_plan(self.function_tasks, self.modules.items, self.requirements_review)
+                        if self._unstarted_assignment_test_conflicts():
+                            self._validate_new_assignment_tests(self.function_tasks.current)
+                    except ValueError as exc:
+                        task_id = self.function_tasks.current['id']
+                        self._planning_rejection = {'task_id': task_id, 'reason': str(exc)[:2000],
+                                                    'dispatch_preflight': True}
+                        self._event('function_dispatch_preflight_rejected', task_id=task_id, reason=str(exc))
+                        if not self._elaborate_requirement(records, next_function=True):
+                            return self._finish('stopped' if self._stop_requested else 'action_required',
+                                self.requirements_review.get('summary', 'The assignment could not pass dispatch checks.'),
+                                records, last_worker)
+                        continue
                 self._beat(f"round {round_index}: starting worker")
                 first_follow_up = (self.config.workflow == 'review-first' and not self.config.function_dispatch
                                    and not self.project and self.requirement_cycles
@@ -707,6 +725,9 @@ class Supervisor:
                     worker_directions = self.directions.messages()
                     if any(item['id'] not in self._dispatch_directions for item in worker_directions):
                         continue
+                    if dispatch_preflight:
+                        self._event('function_dispatch_validated', task_id=self.function_tasks.current['id'],
+                                    round=round_index, tree=worker_start_tree)
                 worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
                 # Compare to the last verified workspace, including changes made
                 # between turns; comparing only to turn-start would miss those edits.
@@ -1228,24 +1249,15 @@ class Supervisor:
             if self.config.function_dispatch:
                 if self._verification_only() and review.task_status == 'changes_required':
                     if review.next_task is None:
+                        if self._separate_verification_milestone(records):
+                            continue
                         reason = 'Verification needs an external prerequisite before it can continue.'
                         review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
                         self._event('verification_waiting', task_id=self.function_tasks.current['id'], round=round_index)
                         return self._finish('action_required', reason + ' ' + '; '.join(review.blockers), records, review)
                     try:
-                        staged = function_tasks.FunctionTasks(self.function_tasks.export())
-                        if not (review.gaps or review.blockers) or review.next_task.get('kind') == 'verification':
-                            raise ValueError('Failed verification requires concrete findings and an implementation assignment')
-                        previous_id = staged.current['id']
-                        if review.next_task.get('id') == previous_id:
-                            raise ValueError('Verification repair must use a new implementation task ID')
-                        staged.current = None
-                        staged.assign(review.next_task, self.modules.items)
-                        self._validate_new_assignment_tests(staged.current)
-                        problems = function_plan.assertion_problems(staged.current)
-                        if problems:
-                            raise ValueError(problems[0])
-                        self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+                        previous_id = self.function_tasks.current['id']
+                        staged = self._stage_verification_repair(review)
                         if self.config.full_function_plan and self._complete_function_plan_ready():
                             remaining = function_plan.waiting(self.function_plan, staged)
                             if staged.current['delivery_scope'] == 'requirement':
@@ -1787,6 +1799,7 @@ class Supervisor:
         staged = ModuleLedger.restore(self.modules.export())
         staged.merge(proposed)
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
+        preflight_repair = self._dispatch_preflight_repair()
         if self._referee_replan and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if self._assignment_worker_started(dispatch.current) and revised['id'] == dispatch.current['id']:
@@ -1808,6 +1821,20 @@ class Supervisor:
                 problems = function_plan.assertion_problems(revised)
                 if problems:
                     raise ValueError(problems[0])
+            elif preflight_repair:
+                previous = dispatch.current
+                fixed = {key for key in previous['check_ids'] if not key.startswith('auto:')}
+                if revised['id'] != previous['id'] or revised['module_id'] != previous['module_id']:
+                    raise ValueError('Dispatch repair must preserve the assignment ID and owning module')
+                if (revised.get('kind') != previous.get('kind')
+                        or revised['delivery_scope'] != previous['delivery_scope']):
+                    raise ValueError('Dispatch repair must preserve the assignment type and delivery scope')
+                if (not fixed <= set(revised['check_ids'])
+                        or not set(previous['criterion_ids']) <= set(revised['criterion_ids'])):
+                    raise ValueError('Dispatch repair must preserve fixed checks and assigned acceptance criteria')
+                problems = function_plan.assertion_problems(revised)
+                if problems:
+                    raise ValueError(problems[0])
             elif function_tasks.identity(revised) != function_tasks.identity(dispatch.current):
                 repairing_scope = bool((self._planning_rejection or {}).get('scope_repair'))
                 if (not repairing_scope or function_tasks.identity(revised)[:-1] != function_tasks.identity(dispatch.current)[:-1]
@@ -1823,7 +1850,8 @@ class Supervisor:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
-            if self._referee_replan or not self.function_tasks.current or self._unstarted_assignment_test_conflicts():
+            if (self._referee_replan or preflight_repair or not self.function_tasks.current
+                    or self._unstarted_assignment_test_conflicts()):
                 self._validate_new_assignment_tests(dispatch.current)
         elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
             raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
@@ -2047,7 +2075,8 @@ class Supervisor:
                 prompt += ('\n\n'+function_tasks.IDENTIFIER_CONTRACT+
                            'You own function decomposition. Propose exactly one next_task, normally for a single named function, '
                            'with objective, inputs, outputs, boundaries, focused verification and only already accepted dependencies. '
-                           'Use delivery_scope=function for intermediate work; module or requirement only for a final function plus the corresponding verification. '
+                           'Use delivery_scope=function for intermediate work, including read-only verification that records standalone evidence. '
+                           'Use module or requirement only when accepting the whole module or requirement. '
                            + module_contract +
                            'For needs_input use next_task=null. '
                            + (function_plan.planning_contract() if self.config.full_function_plan else 'Do not assign the full backlog. ')+
@@ -2074,6 +2103,11 @@ class Supervisor:
                                    'criterion. Use a fresh ID when replacing a started task. Return the complete remaining '
                                    'plan through final verification. Decision:\n' + json.dumps(self._referee_decision, ensure_ascii=False))
                     elif self.function_tasks.current:
+                        if self._dispatch_preflight_repair():
+                            prompt += ('\nWatcher rejected the unstarted assignment at dispatch. Correct the exact validation error. '
+                                       'You may repair the target before the worker starts. Keep the assignment ID, module, '
+                                       'assignment type, delivery scope, fixed checks and acceptance criteria. '
+                                       'Update any references in the remaining plan.\n')
                         conflicts = self._unstarted_assignment_test_conflicts()
                         if conflicts:
                             fixed = [key for key in self.function_tasks.current['check_ids']
@@ -2228,6 +2262,17 @@ class Supervisor:
     def _commit_approved(self,worker,reviewer,worker_text,review_text,tree):
         if self.config.workflow != 'review-first':
             return True
+        if self._verification_only() and self.function_tasks.current['delivery_scope'] == 'function':
+            with self.directions.lock():
+                if not (self._publication_boundary(reviewer) and not self._business_head_changed()
+                        and not self._pending_directions()
+                        and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree
+                        and self._verified_candidate_approval(reviewer, worker, self._candidate_check_context(worker))):
+                    reviewer.verdict.gaps.append('Verification evidence changed before it could be recorded.')
+                    return False
+                self._event('verification_evidence_accepted', task_id=self.function_tasks.current['id'],
+                            round=worker.index, tree=tree)
+                return True
         if not self.git_history:
             if self.config.task_type == 'deployment' and not self._verified_candidate_approval(
                     reviewer, worker, self._candidate_check_context(worker)):
@@ -3065,9 +3110,8 @@ class Supervisor:
         if self._function_gate and task and task['delivery_scope'] == 'function':
             catalog = self._function_check_catalog(task)
             selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
-            if task.get('kind') == 'verification' and self._check_changes:
-                original = check_history.configurations(self.config.checks, self._check_changes)[0]
-                selected.extend(self.config.checks[len(original):])
+            if task.get('kind') == 'verification':
+                selected.extend(self._acceptance_commands(final, ids))
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
                 'requirement_cycle':len(self.requirement_cycles)+1,
                 'business_update_count':self._business_update_count,
@@ -3802,6 +3846,12 @@ class Supervisor:
                 return []  # Damaged evidence must fail baseline recovery, not be reset.
         return self._existing_assignment_tests(task)
 
+    def _dispatch_preflight_repair(self):
+        task = self.function_tasks.current
+        problem = self._planning_rejection or {}
+        return bool(task and problem.get('dispatch_preflight') and problem.get('task_id') == task['id']
+                    and not self._assignment_worker_started(task))
+
     def _historical_function_source(self, file, digest):
         if not self.git_history:
             return None
@@ -3823,6 +3873,16 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
+        if task.get('kind') != 'verification':
+            root = self.config.cwd
+            protected = self.quality.protected(root)
+            paths = [root / file for file in function_tasks.writable_files(task)]
+            restrictions = [(root / file).resolve() for file in self.config.protect_paths]
+            denied = [str(path.relative_to(root)) for path in paths
+                      if str(path) in protected
+                      or any(path.is_relative_to(restriction) for restriction in restrictions)]
+            if denied:
+                raise ValueError('Assignment cannot edit protected files: ' + ', '.join(sorted(denied)))
         if task['delivery_scope'] == 'module':
             accepted = {key for key, item in modules.items() if item['status'] == 'accepted'}
             if provisional and provisional['delivery_scope'] in ('module', 'requirement'):
@@ -3854,6 +3914,45 @@ class Supervisor:
     def _complete_function_plan_ready(self):
         return bool(self.function_plan and self.function_plan['cycle'] == len(self.requirement_cycles) + 1
                     and self.function_tasks.current in self.function_plan['tasks'])
+
+    def _separate_verification_milestone(self, records):
+        """Keep an independently reviewed check separate from a later module delivery."""
+        task = self.function_tasks.current
+        if not (self._verification_only() and task['delivery_scope'] == 'module'
+                and self._complete_function_plan_ready() and not self._pending_directions()):
+            return False
+        last = records[-1] if records else None
+        if not (last and last.role == 'reviewer' and last.verdict.task_id == task['id']
+                and last.verdict.task_status == 'changes_required'
+                and last.verdict.blockers and not last.verdict.next_task):
+            return False
+        worker = next((record for record in reversed(records)
+                       if record.role == 'worker' and record.index == last.index), None)
+        receipt = worker.watcher_result.get('candidate_checks') if worker else None
+        if not (receipt and receipt.get('passed') and worker.tree == last.tree
+                and candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(worker))):
+            return False
+        remaining = function_plan.waiting(self.function_plan, self.function_tasks)
+        if not any(item['module_id'] == task['module_id'] and item['delivery_scope'] == 'module'
+                   for item in remaining):
+            return False
+        if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != last.tree:
+            return False
+        revised = {**task, 'delivery_scope': 'function'}
+        staged = function_tasks.FunctionTasks(self.function_tasks.export())
+        staged.current = None
+        staged.assign(revised, self.modules.items)
+        try:
+            self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+            plan = self._validate_complete_function_plan(
+                [revised, *remaining], staged, self.modules.items, self.requirements_review)
+        except ValueError as exc:
+            self._event('verification_scope_separation_rejected', task_id=task['id'], reason=str(exc))
+            return False
+        self.function_tasks, self.function_plan = staged, plan
+        self._event('verification_scope_separated', task_id=task['id'], tree=last.tree)
+        self._write_state(records, 'running', 0, '', last.tree)
+        return True
 
     def _validate_complete_function_plan(self, backlog, ledger, modules, brief):
         impact = ModuleLedger.restore(list(modules.values()))
@@ -4070,6 +4169,21 @@ class Supervisor:
         self._write_state(records, 'running', saved.get('stall', 0), saved.get('gap_key', ''), record.tree)
         return turn
 
+    def _stage_verification_repair(self, review):
+        if not (review.gaps or review.blockers) or review.next_task.get('kind') == 'verification':
+            raise ValueError('Failed verification requires concrete findings and an implementation assignment')
+        staged = function_tasks.FunctionTasks(self.function_tasks.export())
+        if review.next_task.get('id') == staged.current['id']:
+            raise ValueError('Verification repair must use a new implementation task ID')
+        staged.current = None
+        staged.assign(review.next_task, self.modules.items)
+        self._validate_new_assignment_tests(staged.current)
+        problems = function_plan.assertion_problems(staged.current)
+        if problems:
+            raise ValueError(problems[0])
+        self._validate_function_plan(staged, self.modules.items, self.requirements_review)
+        return staged
+
     def _function_reviewer_report_errors(self, review):
         """Check the report protocol before entering the function handoff."""
         task = self.function_tasks.current
@@ -4084,6 +4198,11 @@ class Supervisor:
             if verification and not repair and not review.blockers:
                 return ['Read-only verification cannot implement the reported fixes. Provide a bounded implementation '
                         'next_task, or identify the external prerequisite in blockers if no repair can run.']
+            if repair:
+                try:
+                    self._stage_verification_repair(review)
+                except ValueError as exc:
+                    return [f"Invalid verification repair {review.next_task.get('id', '')}: {exc}"]
             return []
         expected = task['delivery_scope']
         delivery_modules = list(self.modules.items) if expected == 'requirement' else [task['module_id']]
@@ -4991,6 +5110,12 @@ class Supervisor:
                 *([deployment.instructions(
                     'reviewer', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
                 *([documentation_tasks.instructions('reviewer')] if self.config.task_type == 'documentation' else []),
+                *(['This read-only assignment records independent verification evidence. '
+                   'Assess only its stated assertions and exact Watcher receipt. A later assignment handles module acceptance. '
+                   'Keep unrelated audits open without treating them as blockers for this evidence-only step. '
+                   'A protected test already adopted from the operator’s committed business baseline may be inspected and run. '
+                   'Adoption does not authorize any further test edits.']
+                  if task and task.get('kind') == 'verification' and task['delivery_scope'] == 'function' else []),
                 *(['Fixed checks executed BEFORE this review for the exact submitted candidate:',
                    json.dumps(safe(candidate_checks.review_summary(receipt)), ensure_ascii=False),
                    'Each log starts with the executed command. Inspect failed or relevant logs as needed, '
@@ -5164,6 +5289,10 @@ class Supervisor:
         if route.get('action') == 'retry_worker' and route.get('tree') == worker.tree:
             return None
         task = self.function_tasks.current
+        prior_task = worker.watcher_result.get('candidate_checks', {}).get('context', {}).get('task') or {}
+        if (self._verification_only() and task['delivery_scope'] == 'function'
+                and prior_task.get('id') == task['id'] and prior_task.get('delivery_scope') != 'function'):
+            return None  # Recheck an assignment that was separated from module delivery.
         if (self.config.function_dispatch and task and task['delivery_scope'] == 'requirement'
                 and len(self.modules.items) > 1 and worker.verdict.task_id == task['id']
                 and worker.verdict.task_status == 'done' and worker.verdict.module_ids == [task['module_id']]
@@ -5217,7 +5346,10 @@ class Supervisor:
             reasons = review.watcher_result.get('reasons', [])
             if not reasons or any(not reason.startswith('Acceptance check failed: ') for reason in reasons):
                 return None
-        rejected_audit = bool(review and (review.watcher_result.get('status') in {'rejected','blocked'}
+        invalid_repair = bool(review and self._verification_only()
+                              and review.verdict.task_status == 'changes_required' and review.verdict.next_task
+                              and self._function_reviewer_report_errors(review.verdict))
+        rejected_audit = bool(review and (invalid_repair or review.watcher_result.get('status') in {'rejected','blocked'}
                                          or review.failure or review.interruption or review.verdict.parse_error
                                          or self._check_retry_review(review)))
         function_ready = bool(self.config.function_dispatch and self.function_tasks.current
@@ -5414,6 +5546,11 @@ class Supervisor:
                 self._publication_review_reused = kwargs['index']
                 return _CompletedTurn(json.dumps({**payload['result'], 'modules': []}), '', 0, False, 0,
                                       self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
+        if (previous and self._verification_only()
+                and previous.verdict.task_status == 'changes_required' and previous.verdict.next_task):
+            errors = self._function_reviewer_report_errors(previous.verdict)
+            if errors:
+                prompt += '\nCorrect the prior verification repair assignment on the same candidate: ' + '; '.join(errors)
         for attempt in range(2):
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')
@@ -5440,7 +5577,7 @@ class Supervisor:
                 errors = self._function_reviewer_report_errors(review)
                 if errors:
                     review.status = 'continue'
-                    review.parse_error = 'invalid function handoff report'
+                    review.parse_error = 'invalid function handoff report: ' + '; '.join(errors)
                     review.gaps.extend(errors)
                     if attempt:
                         self._review_audit_retry_exhausted = kwargs['index']
@@ -5575,6 +5712,10 @@ class Supervisor:
         self._agent_calls += 1
         messages = self.directions.messages() if direction_snapshot is None else direction_snapshot
         revision = self.directions.revision(self.config.requirement, messages)
+        if re.search(r'[\u3400-\u9fff]', self.config.requirement):
+            prompt += ('\n请用自然、准确的中文写用户可见的摘要和停止原因。先说明具体步骤和实际结果，再说明如何继续。'
+                       '按实际情况写「测试数据」「测试准备」「模拟逻辑」或「断言」，避免使用「夹具」。'
+                       '保留文件路径、角色名和 AUD 编号。\n')
         # Persist the call before launch so interruption cannot reset its budget.
         state_path = self.run_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))

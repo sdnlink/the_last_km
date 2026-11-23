@@ -1,11 +1,18 @@
 """Present reviewer claims alongside the monitor's recorded decision."""
 
+from console.diagnostics import present_summary
+
 
 def present_conclusion(item: dict) -> dict:
     keys = ('index', 'role', 'status', 'summary', 'done', 'gaps', 'next_actions', 'evidence',
             'blockers', 'exit_code', 'elapsed_s', 'git_checkpoint', 'issue_resolutions', 'watcher_result',
             'task_id', 'task_status')
     result = {key: item.get(key) for key in keys}
+    if isinstance(result['summary'], str):
+        result['summary'] = present_summary(result['summary'])
+    for key in ('done', 'gaps', 'next_actions', 'blockers'):
+        if isinstance(result[key], list):
+            result[key] = [present_summary(value) if isinstance(value, str) else value for value in result[key]]
     outcome = item.get('watcher_result')
     if not isinstance(outcome, dict):
         outcome = {}

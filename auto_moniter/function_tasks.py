@@ -107,9 +107,8 @@ def validate(value, modules=None):
     else:
         validate_target(value['file'], value['symbol'])
         if set(value) - {'edit_files'} == VERIFICATION_TASK_FIELDS and (
-                value['kind'] != 'verification' or value['delivery_scope'] not in ('module', 'requirement')
-                or value['test_files']):
-            raise ValueError('Verification-only tasks must close a module or requirement without test file writes')
+                value['kind'] != 'verification' or value['test_files']):
+            raise ValueError('Verification-only tasks cannot write test files')
     edits = value.get('edit_files', [])
     if (not isinstance(edits, list) or len(edits) > 20
             or any(not isinstance(name, str) or not name or len(name) > 512 for name in edits)
@@ -241,7 +240,6 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
         task['required'].append('edit_files')
         verification = copy.deepcopy(task)
         verification['properties']['kind'] = {'type': 'string', 'enum': ['verification']}
-        verification['properties']['delivery_scope']['enum'] = ['module', 'requirement']
         verification['required'].append('kind')
         next_schema['anyOf'].append(verification)
         if integration:

@@ -248,6 +248,13 @@ class StorageAndCliImportTests(unittest.TestCase):
             localized = localize_response({"failure": diag}, "en", "/api/tasks/abc")["failure"]
             self.assertEqual(localized["phase"], "Referee diagnosis")
 
+    def test_verification_blocker_has_chinese_reason_and_preserves_original_log(self):
+        raw = 'Verification needs an external prerequisite before it can continue. AUD-3：夹具改动尚未验证。'
+        diag = diagnose('action_required', {'summary': raw}, {}, {}, {}, Path('.'))
+        self.assertEqual(diag['code'], 'verification_waiting')
+        self.assertEqual(diag['reason'], '验收受阻，补齐以下条件后可继续。AUD-3：测试准备的改动尚未验证。')
+        self.assertEqual(diag['raw_summary'], raw)
+
     def test_console_watch_rejects_invalid_json_and_oversized_body(self):
         from http.server import BaseHTTPRequestHandler, HTTPServer
 

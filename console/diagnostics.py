@@ -9,6 +9,31 @@ TERMINAL = {'failed','invalid','action_required','budget_exceeded','recovery_fai
             'interrupted','stopped','stalled','max_rounds','blocked','locked'}
 
 
+def present_summary(value):
+    text = str(value or '')
+    prefixes = {
+        'Verification needs an external prerequisite before it can continue.': '验收受阻，补齐以下条件后可继续。',
+        'Verification repair assignment rejected:': '修复派单未通过校验。',
+    }
+    for source, label in prefixes.items():
+        if text.startswith(source):
+            text = label + text[len(source):].lstrip()
+            break
+    for source, label in (
+        ('Function assignment must reference its module criteria and only known acceptance criteria',
+         '派单必须引用至少一项所属模块的验收条目，且只能引用已登记的验收条目。'),
+        ('Assignment cannot edit protected files:', '派单包含受保护的文件，无法修改：'),
+        ('夹具改动', '测试准备的改动'), ('夹具修复', '测试准备的修复'),
+        ('夹具', '测试准备'), ('module verification', '模块验收'),
+        ('; AUD-', '。AUD-'),
+    ):
+        text = text.replace(source, label)
+    text = re.sub(r'Verification-only assignment ([^:]+): cannot locate function (.+?)\. '
+                  r'Select an existing, unambiguous implementation\.',
+                  r'只读验证派单 \1 找不到 \2。请选择文件中可唯一定位的函数。', text)
+    return text
+
+
 def console_result(run):
     """Recover only the monitor's final structured result, never arbitrary prose."""
     path = Path(run)/'console.log'
@@ -84,7 +109,12 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         reason='独立审核已接收当前派单，但 Watcher 验收未通过；候选和失败记录已保存，未自动重新派发实现。'
         actions=['核对失败命令和原始日志；需要修改范围外代码、既有测试或生成文档时，先安排明确范围的修复。',
                  '恢复时保留当前候选；仅复用与当前版本和检查结果一致的审核结论，检查结果变化后重新审核。检查通过前不会派发下一项。']
-    elif 'function handoff rejected:' in text or 'invalid function handoff report' in text:
+    elif text.startswith('verification needs an external prerequisite'):
+        code='verification_waiting';title='验收等待补齐条件';role='watcher';phase='验收'
+        reason=present_summary(raw)
+        actions=['根据停止原因补齐配置、授权或检查结果，再从原检查点恢复。']
+    elif ('function handoff rejected:' in text or 'invalid function handoff report' in text
+          or text.startswith('verification repair assignment rejected:')):
         code='function_handoff_rejected';title='派单交付报告与验收协议不一致';role='watcher';phase='派单交付协议校验'
         reason='当前候选已保留，但任务完成状态、交付范围或模块确认没有满足监督器协议，未推进交付。'
         actions=['核对 worker 与 reviewer 的任务 ID、完成状态、交付范围和模块清单；需求级最终报告须确认完整模块账本。',

@@ -42,7 +42,7 @@ from console.logs import LogReader
 from console.task_timing import estimate as estimate_task_time
 from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
-from console.diagnostics import diagnose, console_result
+from console.diagnostics import diagnose, console_result, present_summary
 from console.launch import abort_start
 from console import migration
 
@@ -455,7 +455,7 @@ class TaskStore:
                      'updated_at': state.get('updated_at') or meta.get('created_at', ''),
                      'started_at': meta.get('started_at'), 'resources': resources,
                      'modules': modules, 'accepted_modules': accepted, 'total_modules': len(modules),
-                     'summary': state.get('summary') or (state.get('last_worker') or {}).get('summary', ''),
+                     'summary': present_summary(state.get('summary') or (state.get('last_worker') or {}).get('summary', '')),
                      'failure': failure,
                      'acceptance_warning': meta.get('acceptance_warning', ''),
                      'last_worker': state.get('last_worker'), 'last_review': state.get('last_review'),

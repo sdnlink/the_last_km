@@ -11,6 +11,7 @@ from pathlib import Path
 
 from auto_moniter.live import public_events
 from auto_moniter.redaction import safe
+from console.diagnostics import present_summary
 
 
 def json_lines(path: Path, limit: int = 512 * 1024, *, head: bool = False) -> list[dict]:
@@ -74,7 +75,11 @@ EVENT_LABELS = {
     'module_checks_reused_for_final': '源码与检查输入未变，最终验收复用已通过的模块检查',
     'module_checks_reused': '源码与检查输入未变，下一模块复用已通过的检查并重新审核',
     'function_assigned': '已下发函数任务',
+    'function_dispatch_validated': '派单校验通过，即将开始执行',
+    'function_dispatch_preflight_rejected': '派单校验未通过，已退回 Reviewer',
     'function_accepted': '函数通过验收',
+    'verification_scope_separated': '已将验证结果与模块验收分开处理',
+    'verification_evidence_accepted': '独立验证通过，结果已登记',
     'acceptance_checks_added': '已追加验收检查',
     'acceptance_checks_removed': '已撤回误录的验收检查',
     'maintenance_started': '部署维护，保存检查点后恢复',
@@ -198,12 +203,15 @@ class ActivityReader:
             elif name == 'check_finished':
                 text += f"（退出码 {event.get('exit', '?')}）：{event.get('command', '')}"
             elif name == 'run_finished':
-                text += '：' + str(event.get('summary') or event.get('status') or '')
+                text += '：' + present_summary(event.get('summary') or event.get('status'))
+            elif name == 'function_dispatch_preflight_rejected':
+                text += '：' + str(event.get('task_id') or '') + '\n' + present_summary(event.get('reason'))
             elif name == 'function_next_assignment_rejected':
                 text += '：' + str(event.get('rejected_task_id') or '') + '\n' + str(event.get('reason') or '')
             elif name in {'function_gate_rejected', 'function_acceptance_blocked'}:
                 text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('reasons') or '')
-            elif name in {'function_assigned', 'function_accepted'}:
+            elif name in {'function_assigned', 'function_accepted', 'function_dispatch_validated',
+                          'verification_scope_separated', 'verification_evidence_accepted'}:
                 text += '：' + str(event.get('task_id') or '')
             elif name in {'acceptance_checks_added', 'acceptance_checks_removed'}:
                 commands = event.get('added' if name == 'acceptance_checks_added' else 'removed')

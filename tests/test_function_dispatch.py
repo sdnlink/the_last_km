@@ -496,6 +496,82 @@ class DispatchTests(unittest.TestCase):
             ledger=json.loads((root/'run/state.json').read_text())['function_tasks']
             self.assertEqual([item['task']['id'] for item in ledger['accepted']],['REPAIR'])
 
+    def test_verification_repair_with_invalid_criteria_retries_reviewer_on_same_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 0\n')
+            repair = task('REPAIR', 'app.py', scope='requirement')
+            repair['criterion_ids'] = ['main:1', 'req:1:1', 'req:1:2']
+            invalid = {**repair, 'criterion_ids': ['req:1:1']}
+            finding = ['main/Return value must be 42']
+            worker = FunctionWorker('worker', [
+                result('VERIFY', 'incomplete', gaps=finding),
+                {**result('REPAIR', 'done', status='done'), 'touch': 'app.py'},
+            ])
+            approved = result('REPAIR', 'accepted', status='done')
+            approved['verdict']['issue_resolutions'] = [
+                {'id': 'AUD-1', 'summary': 'Verified return value is 42', 'evidence': ['app.py']}]
+            reviewer = ScriptedProvider('reviewer', [
+                plan(verification_task()),
+                result('VERIFY', 'changes_required', gaps=finding, next_task=invalid),
+                result('VERIFY', 'changes_required', gaps=finding, next_task=repair),
+                approved,
+            ])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=2, review_every=1)
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertEqual([call['read_only'] for call in worker.calls], [True, False])
+            self.assertTrue(reviewer.calls[2]['read_only'])
+            self.assertIn('Invalid verification repair REPAIR', reviewer.calls[2]['prompt'])
+            self.assertIn('must reference its module criteria', reviewer.calls[2]['prompt'])
+
+    def test_watcher_rejects_protected_edit_in_reviewer_assignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protected = root/'validation.py'
+            protected.write_text('KEEP = True\n')
+            assignment = task('IMPLEMENT', 'app.py', scope='requirement')
+            assignment['criterion_ids'] = ['main:1', 'req:1:1', 'req:1:2']
+            proposal = {**assignment, 'edit_files': ['validation.py']}
+            worker = FunctionWorker('worker', [
+                {**result('IMPLEMENT', 'done', status='done'), 'touch': 'app.py'}])
+            reviewer = ScriptedProvider('reviewer', [
+                plan(proposal), plan(assignment), result('IMPLEMENT', 'accepted', status='done')])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=1,
+                quality_policy={'validation_paths':['validation.py'], 'verified_progress':False})
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertIn('cannot edit protected files: validation.py', reviewer.calls[1]['prompt'])
+            self.assertEqual(protected.read_text(), 'KEEP = True\n')
+
+    def test_changed_verification_target_returns_to_reviewer_before_worker_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root/'app.py'
+            source.write_text('def parse_input(): return 42\n')
+            initial = verification_task()
+            corrected = {**initial, 'symbol': 'parse_value'}
+            worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')])
+            reviewer = ScriptedProvider('reviewer', [
+                plan(initial), plan(corrected), result('VERIFY', 'accepted', status='done'),
+            ])
+            monitor = Supervisor(RunConfig('Verify the current parser', root, worker, reviewer=reviewer,
+                workflow='review-first', function_dispatch=True, git_history='off',
+                run_dir=root/'run', checks=['test -f app.py'], max_rounds=1, retry_delay_s=0),
+                log=lambda _:None)
+            def change_after_planning():
+                source.write_text('def parse_value(): return 42\n')
+                return ''
+            with patch.object(monitor, '_assignment_whitespace_preflight', side_effect=change_after_planning):
+                report = monitor.run()
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertIn('parse_value', worker.calls[0]['prompt'])
+            self.assertIn('app.py#parse_input', reviewer.calls[1]['prompt'])
+            events = [json.loads(line) for line in (root/'run/events.jsonl').read_text().splitlines()]
+            names = [entry['event'] for entry in events]
+            self.assertLess(names.index('function_dispatch_preflight_rejected'),
+                            names.index('function_dispatch_validated'))
+
     def test_verification_waits_for_an_external_prerequisite_without_redispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -581,6 +657,67 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),head)
             publication=report.records[-1].git_checkpoint['business_commit']
             self.assertFalse(publication['created'])
+
+    def test_evidence_only_verification_advances_without_publishing_pending_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root/'app.py').write_text('def parse_input(): return 0\n')
+            subprocess.run(['git', 'add', 'app.py'], cwd=root, check=True)
+            subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@local',
+                            'commit', '-qm', 'initial'], cwd=root, check=True)
+            head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            evidence = {**verification_task('EVIDENCE'), 'delivery_scope':'function'}
+            module = {**verification_task('MODULE', depends=['EVIDENCE']), 'delivery_scope':'module'}
+            final = verification_task('FINAL', depends=['MODULE'])
+            initial = json.loads(plan(evidence)['text'])
+            initial['function_plan'] = [evidence, module, final]
+
+            class Reviewer(ScriptedProvider):
+                def _command(self, session, prompt_file, read_only):
+                    match = re.search(r'Worker checkpoint: ([0-9a-f]{40,64})', prompt_file.read_text())
+                    if match:
+                        self.scripts[0]['verdict']['evidence'].append(match[1])
+                    return super()._command(session, prompt_file, read_only)
+
+            worker = FunctionWorker('worker', [result('EVIDENCE', 'done')])
+            reviewer = Reviewer('reviewer', [{'verdict':{}, 'text':json.dumps(initial)},
+                                             result('EVIDENCE', 'accepted', next_task=module)])
+            report = Supervisor(RunConfig('Verify existing implementation', root, worker, reviewer=reviewer,
+                workflow='review-first', function_dispatch=True, full_function_plan=True,
+                git_history='required', run_dir=root/'run', checks=[CHECK], max_rounds=1,
+                retry_delay_s=0), log=lambda _:None).run()
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            ledger = json.loads((root/'run/state.json').read_text())['function_tasks']
+            self.assertEqual([item['task']['id'] for item in ledger['accepted']], ['EVIDENCE'])
+            self.assertEqual(ledger['current']['id'], 'MODULE')
+            self.assertEqual(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root,
+                                                     text=True).strip(), head)
+            self.assertIn('return 42', (root/'app.py').read_text())
+
+    def test_blocked_module_handoff_replans_read_only_evidence_before_later_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            early = {**verification_task('EVIDENCE'), 'delivery_scope':'module'}
+            module = {**verification_task('MODULE', depends=['EVIDENCE']), 'delivery_scope':'module'}
+            final = verification_task('FINAL', depends=['MODULE'])
+            initial = json.loads(plan(early)['text'])
+            initial['function_plan'] = [early, module, final]
+            blocked = result('EVIDENCE', 'changes_required')
+            blocked['verdict']['blockers'] = ['Module-wide validation is scheduled for MODULE.']
+            worker = FunctionWorker('worker', [result('EVIDENCE', 'incomplete', gaps=['Module review is pending']),
+                                               result('EVIDENCE', 'done')])
+            reviewer = ScriptedProvider('reviewer', [{'verdict':{}, 'text':json.dumps(initial)},
+                blocked, result('EVIDENCE', 'accepted', next_task=module)])
+            report = self.run_monitor(root, worker, reviewer, max_rounds=2, review_every=1,
+                                      full_function_plan=True)
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['accepted'][0]['task']['delivery_scope'], 'function')
+            self.assertEqual(state['function_tasks']['current']['id'], 'MODULE')
+            self.assertEqual(state['function_tasks']['current']['delivery_scope'], 'module')
 
     def test_review_repair_stays_on_first_function_then_dispatches_next(self):
         with tempfile.TemporaryDirectory() as d:

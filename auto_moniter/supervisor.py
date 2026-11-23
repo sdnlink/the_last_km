@@ -2799,9 +2799,10 @@ class Supervisor:
                   'You are the worker: issue_resolutions MUST be [], even for known AUD IDs. '
                   'Only the independent reviewer may propose audit closures; do not create or duplicate audit IDs. '
                   'Independent review and watcher checks awaiting execution are not implementation gaps. '
-                  'Describe known platform limits in summary/evidence, preserving actual unresolved behavior as gaps. '
                   'Return corrected JSON; watcher checks and independent review still follow.\n'
-                  'Report errors:\n' + json.dumps(errors, ensure_ascii=False)
+                  + (documentation_tasks.instructions('worker') if self.config.task_type == 'documentation' else
+                     'Describe known platform limits in summary/evidence, preserving actual unresolved behavior as gaps.\n')
+                  + 'Report errors:\n' + json.dumps(errors, ensure_ascii=False)
                   + '\nPrevious report failure (if any):\n' + previous_failure
                   + '\nOriginal report:\n' + json.dumps(report['original'], ensure_ascii=False)
                   + '\nAuthoritative module ledger:\n' + json.dumps(self.modules.export(), ensure_ascii=False))

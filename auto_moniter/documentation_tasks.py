@@ -14,6 +14,8 @@ def instructions(role):
         'clauses and distinguish verified facts, gaps, inferences and unavailable sources. '
         'A finding that a document or product is incomplete/noncompliant is a result of the analysis; '
         'it is not itself a reason to block delivery or demand an implementation fix outside the request. '
+        'For a completed report or module, record product defects and verification limits in the document and summarize them in '
+        'done or summary. Reserve gaps, blockers and next_actions for work still needed to finish the requested report or module. '
         'Distinguish evidence for an individual requirement from coverage of all applicable requirements. '
         'Do not claim product compliance, runtime verification or certification from document review alone. '
         'Preserve fixed checks: any supplied commands must still pass, but unrelated tests and git diff --check '

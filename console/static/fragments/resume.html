@@ -5,6 +5,7 @@
   <p>保留累计用量。预算已耗尽时需要明确追加；填写 0 表示不追加。</p>
   <label>追加运行时间（分钟）<input name="additional_runtime_minutes" type="number" min="0" max="100000" value="0" required></label>
   <label>追加 worker/reviewer 调用轮次<input name="additional_agent_calls" type="number" min="0" max="100000" value="0" required></label>
+  <label>追加 Worker 执行轮次<input name="additional_worker_rounds" type="number" min="0" max="100000" value="0" required></label>
   <label>裁判恢复<select name="referee"><option value="inherit">沿用当前设置</option><option value="on">启用裁判</option><option value="off">关闭裁判</option></select></label>
   <label>裁判模型<select name="referee_model"><option value="">沿用当前设置</option></select><input name="referee_model_custom" hidden maxlength="200" placeholder="自定义模型 ID"><small data-model-note="referee"></small></label>
   <label>追加验收命令（可选，每行一条）<textarea name="additional_checks" rows="4" placeholder="只填写本轮缺少的行为检查命令"></textarea></label>

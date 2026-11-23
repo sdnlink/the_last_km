@@ -199,7 +199,7 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
         actions=['查看停止前记录；需要继续时使用原检查点和累计预算恢复。']
     elif status=='max_rounds':
         title='开发轮次上限已达到';reason='任务已达到 worker 轮次限制，最后一轮结论不代表整份需求已交付。'
-        actions=['检查尚未关闭的审核问题和检查结果，再决定后续任务范围。']
+        actions=['核对剩余审核问题和检查结果，在恢复窗口追加 Worker 执行轮次。']
     elif status=='stalled':
         title='任务缺少有效进展';reason='相同问题或缺少已验证进展达到停止阈值。'
         actions=['核对反复出现的缺口、验证记录和外部依赖，缩小修复范围后再安排后续工作。']

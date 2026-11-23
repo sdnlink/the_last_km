@@ -48,7 +48,7 @@ from console import migration
 
 
 PROVIDERS = tuple(AGENTS)
-RESUMABLE = {'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required', 'interrupted'}
+RESUMABLE = {'stopped', 'blocked', 'budget_exceeded', 'max_rounds', 'recovery_failed', 'action_required', 'interrupted'}
 logger = logging.getLogger(__name__)
 
 
@@ -406,10 +406,11 @@ class TaskStore:
         except (ValueError, OSError) as exc:
             directions, direction_error = [], str(exc)
             requirement_revision = {}
-        can_direct = not migrated and not direction_error and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE}
+        directable = {'queued', 'starting', 'running', 'paused', *RESUMABLE} - {'max_rounds'}
+        can_direct = not migrated and not direction_error and status in directable
         can_queue_requirements = (state.get('workflow', meta.get('workflow')) == 'review-first'
                                   and not migrated
-                                  and status in {'queued', 'starting', 'running', 'paused', *RESUMABLE})
+                                  and status in directable)
         delivery = 'next_turn' if state.get('directions_version') == 1 else 'on_start'
         if active and state.get('directions_version') != 1:
             delivery = 'restart_required'
@@ -961,7 +962,7 @@ class TaskStore:
         state = state if state is not None else read_json(run / 'state.json')
         if state.get('status') == 'done' and delivery_recovery_warning(run):
             raise TaskError('仍有未完成的进程或提交恢复记录，尚不能确认交付；请先核对恢复记录并保留现场', 409)
-        if state.get('status') not in {'running', 'stopped', 'blocked', 'budget_exceeded', 'recovery_failed', 'action_required'}:
+        if state.get('status') not in {'running', *RESUMABLE} - {'interrupted'}:
             raise TaskError('检查点状态不支持恢复，请新建任务', 409)
         if not (run / 'requirement.md').is_file():
             raise TaskError('缺少原始需求检查点，无法恢复', 409)
@@ -1300,7 +1301,8 @@ class TaskStore:
                 self._check_start(meta)
                 if action == 'resume':
                     arguments = self._resume_args(meta)
-                    usage = read_json(run / 'state.json').get('usage', {})
+                    saved_state = read_json(run / 'state.json')
+                    usage = saved_state.get('usage', {})
                     additions = data or {}
                     if 'referee' in additions:
                         if type(additions['referee']) is not bool:
@@ -1325,6 +1327,15 @@ class TaskStore:
                             arguments.append(flag + '=' + str(total))
                     from auto_moniter.cli import build_parser, _parse_duration
                     parsed = build_parser().parse_args(arguments)
+                    additional_rounds = additions.get('additional_worker_rounds', 0)
+                    if type(additional_rounds) is not int or not 0 <= additional_rounds <= 100000:
+                        raise TaskError('追加 Worker 执行轮次必须为 0 至 100000 的整数')
+                    next_round = saved_state.get('next_round') or view['health'].get('rounds', 0) + 1
+                    if additional_rounds and (parsed.max_rounds or view['status'] == 'max_rounds'):
+                        total_rounds = max(parsed.max_rounds, next_round - 1) + additional_rounds
+                        arguments.append('--max-rounds=' + str(total_rounds))
+                    elif view['status'] == 'max_rounds':
+                        raise TaskError('已达到 Worker 执行轮次上限，请明确追加轮次后恢复', 409)
                     from auto_moniter.project_workspace import assignment_workspaces
                     from auto_moniter.assignment_delivery import links
                     for key, flag, validate in (

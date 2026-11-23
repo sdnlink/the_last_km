@@ -17,7 +17,7 @@ test('terminal states override stale running roles and pending control requests'
 });
 
 test('waiting, control requests and stale heartbeat never show an active task spinner',()=>{
- for(const phase of ['retry_wait','waiting_for_input'])assert.equal(taskMotion(task('running',phase)),'waiting');
+ for(const phase of ['retry_wait','waiting_for_input','waiting_for_dependencies'])assert.equal(taskMotion(task('running',phase)),'waiting');
  for(const control of ['stop','pause'])assert.equal(taskMotion({...task(),control}),'waiting');
  const stale={...task(),health:{phase:'working',health:'heartbeat_stale'}};
  assert.equal(taskMotion(stale),'attention');
@@ -31,7 +31,7 @@ test('narrative explains the current stage and what happens next in both languag
  try{
   for(const lang of ['zh-CN','en']){
    globalThis.document={documentElement:{lang}};
-   for(const phase of ['working','reviewing','validating','publishing','refining_requirements','retry_wait']){
+   for(const phase of ['working','reviewing','validating','publishing','refining_requirements','retry_wait','waiting_for_dependencies']){
     const value=taskNarrative(task('running',phase));
     assert.ok(value.title&&value.next);
     if(lang==='en')assert.doesNotMatch(value.title+value.next,/[\u3400-\u9fff]/);

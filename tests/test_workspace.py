@@ -47,6 +47,15 @@ class AcceptanceTests(unittest.TestCase):
                 with self.subTest(evidence=evidence):
                     self.assertEqual(acceptance_problems(root, [evidence], baseline=baseline), [])
 
+    def test_markdown_links_to_reports_with_spaces_are_file_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '逐页 TIG 排查.md').write_text('report', encoding='utf-8')
+            for citation in ('[排查](逐页%20TIG%20排查.md) 第 2 节',
+                             '[排查](<逐页 TIG 排查.md:15>)'):
+                with self.subTest(citation=citation):
+                    self.assertEqual(acceptance_problems(root, [citation], baseline={}), [])
+
     def test_annotations_do_not_allow_unchanged_or_outside_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

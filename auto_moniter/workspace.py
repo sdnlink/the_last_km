@@ -11,6 +11,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import unquote
 
 
 _IGNORED_PARTS = {
@@ -114,7 +115,10 @@ def evidence_paths(
     found: list[Path] = []
     for item in evidence:
         candidates = [item, *item.replace(",", " ").replace("`", " ").split()]
-        candidates.extend(part for token in re.findall(r"`([^`]+)`|\]\(([^)]+)\)", item) for part in token if part)
+        candidates.extend(re.findall(r'`([^`]+)`', item))
+        for destination in re.findall(r'\]\((<[^>]+>|[^)]+)\)', item):
+            destination = destination.removeprefix('<').removesuffix('>')
+            candidates.extend((destination, unquote(destination)))
         # Criteria labels and Chinese prose can be attached to a citation:
         # QUOTES:3、req:1:3：preview/input-state.js:86 or app.py、新增测试。
         # Keep the literal candidates above for paths containing punctuation

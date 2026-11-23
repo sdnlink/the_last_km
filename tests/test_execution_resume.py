@@ -225,6 +225,32 @@ class ExecutionResumeTests(unittest.TestCase):
             self.assertEqual(result.status, "max_rounds")
             self.assertEqual(result.records[0].interruption, "output limit")
 
+    def test_round_limit_can_resume_from_the_next_round_with_a_larger_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "run"
+
+            def run_worker(limit, *, resume=False):
+                worker = ScriptedProvider("worker", [{"verdict": _verdict("continue")}])
+                config = RunConfig("task", root, worker, no_review=True, run_dir=run,
+                                   max_rounds=limit, retry_delay_s=0, resume=resume)
+                return Supervisor(config, log=lambda _: None).run()
+
+            self.assertEqual(run_worker(1).status, "max_rounds")
+            checkpoint = (run / "state.json").read_bytes()
+            for limit in (0, 1):
+                result = run_worker(limit, resume=True)
+                self.assertEqual(result.status, "max_rounds")
+                self.assertEqual(result.rounds, 0)
+                self.assertEqual((run / "state.json").read_bytes(), checkpoint)
+
+            result = run_worker(2, resume=True)
+            self.assertEqual(result.status, "max_rounds", result.summary)
+            self.assertEqual(result.rounds, 2)
+            saved = json.loads((run / "state.json").read_text())
+            self.assertEqual(saved["next_round"], 3)
+            self.assertEqual(saved["usage"]["agent_calls"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

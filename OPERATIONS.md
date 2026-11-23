@@ -62,7 +62,8 @@ Paseo 在超时、等待权限、调用失败或主动停止后，若停止 agen
 | `recovery_failed` | 检查 daemon 连接或遗留进程身份，处理原因后 resume；不要删基线来绕过核对 |
 | `heartbeat_stale` | 先检查活动阶段、进程和日志；心跳过期不等于 AI 卡死，看守不因此自动杀进程 |
 | monitor 被强制杀死 | 启用 guard 时在重启上限内自动恢复；否则使用原目录 resume |
-| `failed` / `stalled` / `max_rounds` | 是明确结束结果，看守不自动循环；查看报告，修复环境或调整需求后启动新运行目录 |
+| `max_rounds` | 在控制台追加 Worker 执行轮次后从原检查点恢复，或以更大的 `--max-rounds` 和原运行目录执行 `run --resume` |
+| `failed` / `stalled` | 查看报告，修复环境或调整需求后启动新运行目录 |
 | `locked` | 已有 monitor/看守持锁；先确认已有进程，锁文件存在本身不表示正在运行 |
 | `stop` 后想重新运行 | 先 `continue RUN_DIR` 清除持久停止请求，再 `run --resume` |
 

@@ -5119,7 +5119,12 @@ class Supervisor:
         if state.get("cwd") and Path(state["cwd"]).resolve() != self.config.cwd:
             raise ValueError("saved workspace does not match --cwd")
         status = str(state.get("status") or "")
-        if status and status not in {"running", "stopped", "blocked", "budget_exceeded", "recovery_failed", "action_required"}:
+        next_round = int(state.get("next_round") or 1)
+        if next_round < 1:
+            raise ValueError("next_round must be positive")
+        has_additional_rounds = status == "max_rounds" and self.config.max_rounds >= next_round
+        if (status and status not in {"running", "stopped", "blocked", "budget_exceeded", "recovery_failed", "action_required"}
+                and not has_additional_rounds):
             self.log(f"resume refused: run already finished with status {status}")
             self._resume_refused = status
             return None
@@ -5247,9 +5252,7 @@ class Supervisor:
         current = self.function_tasks.current
         if current and current.get('kind') == 'integration':
             function_gate.verify_integration_approval(current, self._integration_scopes())
-        self._next_round = int(state.get("next_round") or 1)
-        if self._next_round < 1:
-            raise ValueError("next_round must be positive")
+        self._next_round = next_round
         baseline = state.get("baseline_files")
         if "baseline_file" in state:
             if state["baseline_file"] != "baseline.json.gz":

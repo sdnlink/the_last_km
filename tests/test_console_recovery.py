@@ -224,7 +224,7 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'继续�
                 self.imported.action(task['id'], 'resume')
             self.assertEqual(json.loads((run / 'control.json').read_text())['action'], 'stop')
 
-    def test_round_limit_resumes_only_with_explicit_additional_rounds(self):
+    def test_round_limit_resumes_with_new_or_previously_saved_additional_rounds(self):
         task, run = self.stopped_task()
         ident = task['id']
         for name in ('state.json', 'report.json'):
@@ -245,6 +245,13 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'继续�
             launch_task.assert_not_called()
             self.imported.action(ident, 'resume', {'additional_worker_rounds': 3})
         self.assertIn('--max-rounds=10', launch_task.call_args.args[0]['resume_argv'])
+        saved_meta = launch_task.call_args.args[0]
+        self.imported._save(saved_meta)
+        with patch.object(self.imported, '_launch') as retry:
+            self.imported.action(ident, 'resume')
+        arguments = retry.call_args.args[0]['resume_argv']
+        self.assertIn('--max-rounds=10', arguments)
+        self.assertNotIn('--max-rounds=13', arguments)
 
     def test_spawn_failure_preserves_checkpoint_and_stop_control(self):
         task, run = self.stopped_task()

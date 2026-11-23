@@ -1334,7 +1334,7 @@ class TaskStore:
                     if additional_rounds and (parsed.max_rounds or view['status'] == 'max_rounds'):
                         total_rounds = max(parsed.max_rounds, next_round - 1) + additional_rounds
                         arguments.append('--max-rounds=' + str(total_rounds))
-                    elif view['status'] == 'max_rounds':
+                    elif view['status'] == 'max_rounds' and parsed.max_rounds < next_round:
                         raise TaskError('已达到 Worker 执行轮次上限，请明确追加轮次后恢复', 409)
                     from auto_moniter.project_workspace import assignment_workspaces
                     from auto_moniter.assignment_delivery import links

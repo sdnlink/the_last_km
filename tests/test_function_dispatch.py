@@ -168,6 +168,45 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(explicit=explicit):
                 self.assert_foreign_repository_assignment(explicit)
 
+    def test_reviewer_can_dispatch_local_work_added_while_waiting_for_external_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root, backend, external = parent/'frontend', parent/'backend', parent/'external'
+            for path in (root, backend, external):
+                path.mkdir()
+            (root/'app.py').write_text('def parse_input(): return 0\n')
+            (backend/'model.py').write_text('def parse_input(): return 0\n')
+            subprocess.run(['git', 'init', '-q', str(backend)], check=True)
+            (external/'state.json').write_text(json.dumps({'cwd': str(backend), 'status': 'running'}))
+            foreign = task('BACKEND', 'model.py')
+            local = {**task('FRONTEND', 'app.py'), 'verification': ['Empty input returns 42']}
+            first = json.loads(plan(foreign)['text'])
+            first['function_plan'] = [foreign, verification_task('FINAL', depends=['BACKEND'])]
+            second = {**first, 'modules': [], 'function_plan': [foreign, local,
+                verification_task('FINAL', depends=['BACKEND', 'FRONTEND'])]}
+            reviewer = ScriptedProvider('reviewer', [{'verdict': {}, 'text': json.dumps(body)}
+                for body in (first, second)] + [result('FRONTEND', 'accepted', next_task=foreign)])
+            worker = FunctionWorker('worker', [{**result('FRONTEND', 'done'), 'touch': 'app.py'}])
+            marker = 'Repair the independent frontend behavior'
+
+            def external_running(supervisor, assignment):
+                if supervisor.directions.messages():
+                    return len(worker.calls) == 0
+                supervisor.directions.append(marker)
+                return True
+
+            with patch.object(Supervisor, '_external_assignment_running', autospec=True, side_effect=external_running):
+                report = self.run_monitor(root, worker, reviewer, full_function_plan=True, max_rounds=3,
+                    assignment_workspaces=['model.py=' + str(backend)],
+                    assignment_deliveries=['BACKEND=' + str(external)])
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertIn(marker, reviewer.calls[1]['prompt'])
+            self.assertNotIn(marker, worker.calls[0]['prompt'])
+            self.assertIn('FRONTEND', worker.calls[0]['prompt'])
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['FRONTEND'])
+
     def assert_foreign_repository_assignment(self, explicit):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)

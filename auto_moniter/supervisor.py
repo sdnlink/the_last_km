@@ -643,7 +643,7 @@ class Supervisor:
                         'reason': 'Existing project tests were declared as new files: ' + ', '.join(test_conflicts)}
                 if self.config.function_dispatch and (not self.function_tasks.current or test_conflicts or
                         self.config.full_function_plan and not self._complete_function_plan_ready() or
-                        any(m['id'] not in self._dispatch_directions for m in self.directions.messages())):
+                        self._unplanned_directions()):
                     if not self._elaborate_requirement(records, next_function=True):
                         return self._finish('stopped' if self._stop_requested else 'action_required',
                             self.requirements_review.get('summary', 'Reviewer did not supply a valid next function.'), records, last_worker)
@@ -660,10 +660,12 @@ class Supervisor:
                             continue
                         if self._advance_local_assignment(records):
                             continue
+                        if self._unplanned_directions():
+                            continue
                         if problem and problem.startswith(f'派单 {task["id"]} 正在等待') and self._external_assignment_running(task):
                             while self._external_assignment_running(task) and not self._stop:
                                 self._process_control()
-                                if self._stop:
+                                if self._stop or self._unplanned_directions():
                                     break
                                 self._check_budget()
                                 self._beat('等待跨仓派单完成验收：' + task['id'])
@@ -3818,6 +3820,9 @@ class Supervisor:
     def _pending_directions(self) -> bool:
         return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
 
+    def _unplanned_directions(self) -> bool:
+        return any(item['id'] not in self._dispatch_directions for item in self.directions.messages())
+
     def _integration_scopes(self):
         return self.config.quality_policy.get('integration_scopes', []) if self._function_gate else []
 
@@ -4100,7 +4105,7 @@ class Supervisor:
         write_json(self.run_dir / f'assignment-handoff-{task["id"]}.json', handoff, durable=True)
         if not run:
             return None
-        if run == self.run_dir or any(item['id'] not in self._dispatch_directions for item in self.directions.messages()):
+        if run == self.run_dir or self._unplanned_directions():
             return '跨仓派单需要关联另一个任务，并使用最新的需求版本。'
         try:
             proof = assignment_delivery.verified(run, workspace, task, module, self.requirements_review)
@@ -4153,7 +4158,7 @@ class Supervisor:
         return run_health(run)['health'] in {'active', 'recovering'}
 
     def _advance_local_assignment(self, records):
-        if not self._complete_function_plan_ready() or self._pending_directions():
+        if not self._complete_function_plan_ready() or self._unplanned_directions():
             return False
         blocked = self.function_tasks.current
         snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)

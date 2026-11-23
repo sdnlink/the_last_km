@@ -458,9 +458,10 @@ def scope_problems(root, task, saved, snapshot):
             continue
         old, new = states[file], target_state(target_paths[file], symbol)
         label = file + '::' + symbol
-        if new['body'] is None or new['body'] == old['body']:
+        whole_file = file in task.get('edit_files', [])
+        if new['body'] is None or (not whole_file and new['body'] == old['body']):
             gaps.append('Implement or change the assigned function: ' + label)
-        elif file not in task.get('edit_files', []) and (old['outside'] is not None and old['outside'] != new['outside']
+        elif not whole_file and (old['outside'] is not None and old['outside'] != new['outside']
                 or old['outside'] is None and old['whole'] not in new['without']):
             gaps.append('Restore edits outside the assigned function: ' + label)
         else:

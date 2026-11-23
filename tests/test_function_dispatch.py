@@ -68,6 +68,28 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_declaration_only_change_requires_primary_file_in_edit_scope(self):
+        from auto_moniter.function_gate import baseline, scope_problems
+        from auto_moniter.workspace import file_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'project'
+            root.mkdir()
+            source = root / 'schema.py'
+            original = 'class Schema:\n    def validate(self):\n        return True\n'
+            source.write_text(original)
+            assignment = {**task('FIELDS', 'schema.py'), 'symbol': 'Schema.validate'}
+            checkpoint = baseline(root.parent / 'baseline.gz', root, assignment, file_snapshot(root), missing_ok=True)
+            source.write_text(original.replace('    def validate', '    negated: bool = False\n    def validate'))
+            snapshot = file_snapshot(root)
+            self.assertTrue(scope_problems(root, assignment, checkpoint, snapshot)[0])
+            authorized = {**assignment, 'edit_files': ['schema.py']}
+            gaps, hashes = scope_problems(root, authorized, checkpoint, snapshot)
+            self.assertEqual(gaps, [])
+            self.assertEqual(hashes['schema.py'], checkpoint['targets']['schema.py']['body'])
+            source.write_text('class Schema:\n    negated: bool = False\n')
+            self.assertTrue(scope_problems(root, authorized, checkpoint, file_snapshot(root))[0])
+
     def test_completed_external_assignment_unblocks_frontend_after_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

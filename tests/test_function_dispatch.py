@@ -182,7 +182,8 @@ class DispatchTests(unittest.TestCase):
             local = {**task('FRONTEND', 'app.py'), 'verification': ['Empty input returns 42']}
             first = json.loads(plan(foreign)['text'])
             first['function_plan'] = [foreign, verification_task('FINAL', depends=['BACKEND'])]
-            second = {**first, 'modules': [], 'function_plan': [foreign, local,
+            paraphrased = {**foreign, 'verification': ['Paraphrased while replanning']}
+            second = {**first, 'modules': [], 'next_task': local, 'function_plan': [local, paraphrased,
                 verification_task('FINAL', depends=['BACKEND', 'FRONTEND'])]}
             reviewer = ScriptedProvider('reviewer', [{'verdict': {}, 'text': json.dumps(body)}
                 for body in (first, second)] + [result('FRONTEND', 'accepted', next_task=foreign)])
@@ -206,6 +207,7 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('FRONTEND', worker.calls[0]['prompt'])
             state = json.loads((root/'run/state.json').read_text())
             self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['FRONTEND'])
+            self.assertEqual(state['function_tasks']['current']['verification'], foreign['verification'])
 
     def assert_foreign_repository_assignment(self, explicit):
         with tempfile.TemporaryDirectory() as directory:

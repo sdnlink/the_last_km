@@ -1830,6 +1830,8 @@ class Supervisor:
     def _stage_requirement_plan(self, assignment, modules, backlog, brief, *, next_function=False):
         """Validate on cloned ledgers: no accepted state changes or worker dispatch."""
         from auto_moniter.modules import definitions
+        if next_function:
+            assignment, backlog = self._retain_linked_contracts(assignment, backlog)
         contracts = self.config.assignment_contracts or {}
         if contracts:
             assignment = assignment_delivery.preserve(contracts, assignment)
@@ -1907,6 +1909,28 @@ class Supervisor:
             if problems:
                 raise ValueError(problems[0])
         return staged, dispatch, complete
+
+    def _retain_linked_contracts(self, assignment, backlog):
+        if not (self.config.assignment_deliveries and self.function_plan and isinstance(backlog, list)
+                and backlog and isinstance(assignment, dict) and backlog[0] == assignment
+                and all(isinstance(item, dict) and isinstance(item.get('id'), str) for item in backlog)):
+            return assignment, backlog
+        links = assignment_delivery.links(self.config.assignment_deliveries)
+        current = self.function_tasks.current
+        pending = function_plan.waiting(self.function_plan, self.function_tasks)
+        if current:
+            pending.insert(0, current)
+        linked = {item['id']: item for item in pending if item['id'] in links
+                  and self._assignment_repository_conflict(item)}
+        missing = linked.keys() - {item['id'] for item in backlog}
+        if missing:
+            raise ValueError('派单计划须保留已关联验收任务的跨仓派单：' + '、'.join(sorted(missing)))
+        backlog = [linked.get(item['id'], item) for item in backlog]
+        if current and current['id'] in linked and not self._referee_replan:
+            # Keep the checkpoint head during validation. Dispatch can then
+            # advance independent local work from the complete approved plan.
+            backlog.insert(0, backlog.pop(backlog.index(current)))
+        return backlog[0], backlog
 
     def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None):
         """Repair distinct planning errors with durable limits, without dispatching work."""

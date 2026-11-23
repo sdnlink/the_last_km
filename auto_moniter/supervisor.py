@@ -3998,6 +3998,8 @@ class Supervisor:
                        and record.index > after_round for record in self._records)
 
     def _existing_assignment_tests(self, task):
+        if task['test_files'] and self._assignment_repository_conflict(task):
+            return []  # The receiving Watcher validates test paths in its workspace.
         return [name for name in task['test_files']
                 if (self.config.cwd / name).exists() or (self.config.cwd / name).is_symlink()]
 

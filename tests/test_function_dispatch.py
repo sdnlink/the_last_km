@@ -183,7 +183,9 @@ class DispatchTests(unittest.TestCase):
             (backend/'model.py').write_text('def parse_input(): return 0\n')
             subprocess.run(['git', 'init', '-q', str(backend)], check=True)
             (external/'state.json').write_text(json.dumps({'cwd': str(backend), 'status': 'running'}))
-            foreign = task('BACKEND', 'model.py')
+            same_name = 'test_remote.py'
+            (root/same_name).write_text('# Local reference copy\n')
+            foreign = {**task('BACKEND', 'model.py'), 'test_files': [same_name]}
             local = {**task('FRONTEND', 'app.py'), 'verification': ['Empty input returns 42']}
             first = json.loads(plan(foreign)['text'])
             first['function_plan'] = [foreign, verification_task('FINAL', depends=['BACKEND'])]

@@ -104,8 +104,15 @@ class DispatchTests(unittest.TestCase):
                 '-c', 'user.email=test@local', 'commit', '-qm', 'Initial'], check=True)
             unrelated = backend/'local-notes.txt'
             unrelated.write_text('Existing local notes\n')
-            foreign = task('BACKEND', 'model.py')
-            backend_final = verification_task('DONE', 'model.py', depends=['BACKEND'])
+            test_path = 'test_model.py'
+            test_source = ('import unittest\nfrom model import parse_input\n\n'
+                           'class ModelTests(unittest.TestCase):\n'
+                           '    def test_model(self):\n        self.assertEqual(parse_input(), 42)\n')
+            foreign = {**task('BACKEND', 'model.py'), 'test_files': [test_path], 'check_ids': ['auto:1'],
+                       'review_test': {'path': test_path, 'source': test_source}}
+            repair = {**task('REPAIR', 'model.py', depends=['BACKEND']),
+                      'verification': ['The revised implementation still returns 42']}
+            backend_final = verification_task('DONE', 'model.py', depends=['REPAIR'])
             frontend_final = verification_task('FINAL', depends=['BACKEND'])
             candidate = result('BACKEND', 'done', file='model.py')
             candidate['touch'] = 'model.py'
@@ -118,12 +125,15 @@ class DispatchTests(unittest.TestCase):
                         self.scripts[0]['verdict']['evidence'].append(match[1])
                     return super()._command(session, prompt_file, read_only)
 
-            worker = FunctionWorker('worker', [candidate, verification])
+            repair_candidate = {**result('REPAIR', 'done', file='model.py'), 'touch': 'model.py',
+                                'source': 'def parse_input():\n    return 40 + 2\n'}
+            worker = FunctionWorker('worker', [candidate, repair_candidate, verification])
             proposed = {**foreign, 'verification': ['Paraphrased by receiving reviewer']}
             child_plan = json.loads(plan(proposed)['text'])
-            child_plan['function_plan'] = [proposed, backend_final]
+            child_plan['function_plan'] = [proposed, repair, backend_final]
             reviewer = Reviewer('reviewer', [{'verdict':{}, 'text':json.dumps(child_plan)},
-                result('BACKEND', 'accepted', file='model.py', next_task=backend_final),
+                result('BACKEND', 'accepted', file='model.py', next_task=repair),
+                result('REPAIR', 'accepted', file='model.py', next_task=backend_final),
                 result('DONE', 'accepted', status='done', file='model.py')])
             backend_run = backend/'run'
             from auto_moniter.assignment_delivery import contracts
@@ -163,8 +173,17 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(accepted[0]['external_delivery']['workspace'], str(backend))
             self.assertFalse((frontend/'model.py').exists())
             from auto_moniter.assignment_delivery import verified
-            (backend_run/'001-check-01.log').write_text('Replaced check output')
             child_state = json.loads((backend_run/'state.json').read_text())
+            final = next(row for row in child_state['rounds'] if row['role']=='worker' and row['index']==3)
+            receipt = final['watcher_result']['candidate_checks']
+            final_log = backend_run / next(check['log'] for check in receipt['checks']
+                                           if test_path in check['command'])
+            previous = final_log.read_bytes()
+            final_log.write_text('Replaced final check output')
+            with self.assertRaisesRegex(ValueError, '检查记录'):
+                verified(backend_run, backend, foreign, child_state['modules'][0], child_state['requirements_review'])
+            final_log.write_bytes(previous)
+            (backend_run/'001-check-01.log').write_text('Replaced check output')
             with self.assertRaisesRegex(ValueError, '检查记录'):
                 verified(backend_run, backend, foreign, child_state['modules'][0], child_state['requirements_review'])
 
@@ -772,7 +791,7 @@ class DispatchTests(unittest.TestCase):
                 'import unittest\n\nclass Export(unittest.TestCase):\n'
                 '    def test_value(self): self.assertEqual(42, 42)\n')
             worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')])
-            requested = result('VERIFY', 'changes_required', gaps=['main/Need current export test evidence'])
+            requested = result('VERIFY', 'changes_required')
             requested['verdict']['supplemental_checks'] = [
                 {'path': 'test_export.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}]
             approved = result('VERIFY', 'accepted', status='done')
@@ -784,7 +803,9 @@ class DispatchTests(unittest.TestCase):
                 checks=['test -f app.py && echo fixed >> run/check-count'],
                 quality_policy={'protect_tests':True, 'verified_progress':False},
                 max_rounds=1, retry_delay_s=0), log=lambda _:None)
-            monitor.audit.record(['main/Need current export test evidence'], 1)
+            ids = monitor.audit.record(['Need current export test evidence'], 1, ['main'])
+            monitor.audit.resolve([{'id': ids[0], 'summary': 'Prior candidate passed',
+                                   'evidence': ['test_export.py']}], 1, 'a'*64, None)
             report = monitor.run()
             self.assertEqual(report.status, 'done', report.summary)
             self.assertEqual(len(worker.calls), 1)

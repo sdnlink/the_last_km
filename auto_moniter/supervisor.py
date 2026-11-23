@@ -3252,13 +3252,14 @@ class Supervisor:
                 or not candidate_checks.valid(receipt, self.run_dir, context)
                 or not receipt['passed']):
             raise ValueError('补跑前需要与当前候选一致的有效检查记录，且现有检查须先通过。')
-        pending = {item['id'] for item in self.audit.pending({task['module_id']})}
+        related = {item['id'] for item in self.audit.items if task['module_id'] in item['module_ids']}
+        related.update(item['id'] for item in self.audit.pending({task['module_id']}))
         additions = []
         commands = set(context['commands'])
         for item in review.supplemental_checks:
             name = item['path']
-            if item['criterion_id'] not in task['criterion_ids'] or item['audit_id'] not in pending:
-                raise ValueError('补跑请求必须关联当前派单的验收条目和未关闭的审核问题。')
+            if item['criterion_id'] not in task['criterion_ids'] or item['audit_id'] not in related:
+                raise ValueError('补跑请求必须关联当前派单的验收条目和本模块的审核记录。')
             try:
                 executable = command(self.config.cwd, name)
                 path = self.config.cwd / name
@@ -5481,6 +5482,7 @@ class Supervisor:
                    'with path, criterion_id and audit_id. Use task_status=changes_required, next_task=null and describe '
                    'the missing evidence in gaps or blockers. Watcher derives the execution command. Do not request '
                    'modified tests, arbitrary commands or a check already present in the current receipt. '
+                   'A resolved audit issue in this module may be cited to rerun its approved test on the current candidate. '
                    'After the new receipt arrives, assess its result and continue. Use supplemental_checks=[] otherwise.']
                   if task and self._verification_only() else []),
                 *([browser] if browser else []),

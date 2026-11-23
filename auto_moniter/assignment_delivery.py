@@ -71,6 +71,35 @@ def _recorded_approval(workspace, row, history):
     return (record.get('result') or {}).get('watcher_result', {}).get('candidate_approval')
 
 
+def _reverified(workspace, task, receipt, final_receipt, module, tree):
+    """Require the original behavioral check to pass again on the final candidate."""
+    from auto_moniter.local_tests import command
+    from auto_moniter.redaction import redact
+
+    test = task.get('review_test')
+    context = final_receipt['context']
+    if (task['delivery_scope'] != 'function' or task.get('kind') == 'verification' or not test
+            or module.get('status') != 'accepted' or module.get('tree') != tree
+            or not context.get('final') or context.get('tree') != tree):
+        return False
+    path = workspace / test['path']
+    runner = command(workspace, test['path'])
+    if (not runner or path.resolve() != path or not path.is_file()
+            or path.stat().st_size != len(test['source'].encode())
+            or path.read_bytes() != test['source'].encode()):
+        return False
+    paths = function_tasks.writable_files(task)
+    if (not git(workspace, '--literal-pathspecs', 'ls-tree', 'HEAD', '--', test['path'])
+            or git(workspace, '--literal-pathspecs', 'diff', '--name-only', 'HEAD', '--', *paths)
+            or git(workspace, '--literal-pathspecs', 'ls-files', '--others', '--', *paths)):
+        return False
+    original = {check['command'] for check in receipt['checks'] if check['status'] == 'passed'}
+    # Reused logs can prove the same candidate, but a receipt used to cover
+    # changed source must describe the rechecked final candidate.
+    passing = {check['command'] for check in final_receipt['checks'] if check['status'] == 'passed'}
+    return redact(runner) in original and original <= passing
+
+
 def verified(run, workspace, assignment, module, brief):
     """Require the target, behavior contract, receipt and current Git version."""
     state = Directions(run).read('state.json', 32 * 1024 * 1024)
@@ -148,6 +177,7 @@ def verified(run, workspace, assignment, module, brief):
             for file, symbol in function_tasks.targets(assignment))
             or any(file_hash(file) != digest
                    for file, digest in delivered.get('file_hashes', {}).items())):
-        raise ValueError('关联任务通过检查的代码与当前版本不一致。')
+        if not _reverified(workspace, delivered['task'], receipt, final_receipt, child_module, tree):
+            raise ValueError('关联任务通过检查的代码与当前版本不一致，最终验收缺少对原专项测试的复验。')
     return {'run_dir': str(run), 'workspace': str(workspace), 'commit': commit,
             'tree': tree, 'checks_digest': receipt['digest']}

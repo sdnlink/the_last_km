@@ -5629,6 +5629,10 @@ class Supervisor:
                 prompt += ('For a completed change, write a concise summary naming the concrete behavior change. '
                            'Use done to describe what changed in this candidate. '
                            'Watcher records independent review and its check results at publication.\n')
+                if re.search(r'[\u3400-\u9fff]', self.config.requirement):
+                    prompt += ('Watcher 会从 summary 和 done 提取提交说明。请使用自然、准确的中文，写清改动对象和结果。'
+                               '测试改动应说明实际调整的是测试数据、测试准备、模拟逻辑还是断言。'
+                               '例如「修正 TIG 分页回归测试的模拟逻辑和断言」。技术名称和代码标识符沿用原名。\n')
         if role != 'worker' or not self.config.function_dispatch:
             prompt += queued_requirement_prompt(self.active_queued_requirement)
         if (role == 'reviewer' and self.config.full_function_plan and self.function_tasks.current

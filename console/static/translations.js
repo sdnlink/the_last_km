@@ -1063,6 +1063,7 @@ export default {
   "验收等待补齐条件": "Acceptance needs additional prerequisites",
   "已将验证结果与模块验收分开处理": "Independent verification separated from module acceptance",
   "独立验证通过，结果已登记": "Independent verification passed and was recorded",
+  "Watcher 已安排补跑测试": "Watcher queued supplemental tests",
   "派单校验通过，即将开始执行": "Assignment validated and ready to run",
   "派单校验未通过，已退回 Reviewer": "Assignment returned to the Reviewer after validation failed",
   "根据停止原因补齐配置、授权或检查结果，再从原检查点恢复。": "Resolve the configuration, approval, or check results named in the stop reason, then resume from the saved checkpoint.",

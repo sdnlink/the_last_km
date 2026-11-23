@@ -572,6 +572,36 @@ class DispatchTests(unittest.TestCase):
             self.assertLess(names.index('function_dispatch_preflight_rejected'),
                             names.index('function_dispatch_validated'))
 
+    def test_supplemental_check_reuses_candidate_and_fixed_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            (root/'test_export.py').write_text(
+                'import unittest\n\nclass Export(unittest.TestCase):\n'
+                '    def test_value(self): self.assertEqual(42, 42)\n')
+            worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')])
+            requested = result('VERIFY', 'changes_required', gaps=['main/Need current export test evidence'])
+            requested['verdict']['supplemental_checks'] = [
+                {'path': 'test_export.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}]
+            approved = result('VERIFY', 'accepted', status='done')
+            approved['verdict']['issue_resolutions'] = [
+                {'id':'AUD-1', 'summary':'The exact candidate passed', 'evidence':['check:001-check-02.log']}]
+            reviewer = ScriptedProvider('reviewer', [plan(verification_task()), requested, approved])
+            monitor = Supervisor(RunConfig('Verify export', root, worker, reviewer=reviewer,
+                workflow='review-first', function_dispatch=True, git_history='off', run_dir=root/'run',
+                checks=['test -f app.py && echo fixed >> run/check-count'],
+                quality_policy={'protect_tests':True, 'verified_progress':False},
+                max_rounds=1, retry_delay_s=0), log=lambda _:None)
+            monitor.audit.record(['main/Need current export test evidence'], 1)
+            report = monitor.run()
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertEqual((root/'run/check-count').read_text(), 'fixed\n')
+            receipt = next(item for item in report.records if item.role == 'worker').watcher_result['candidate_checks']
+            self.assertTrue(receipt['passed'])
+            self.assertEqual(receipt['context']['supplemental_checks'][0]['audit_id'], 'AUD-1')
+            self.assertIn('001-check-02.log', reviewer.calls[-1]['prompt'])
+
     def test_verification_waits_for_an_external_prerequisite_without_redispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

@@ -80,6 +80,7 @@ EVENT_LABELS = {
     'function_accepted': '函数通过验收',
     'verification_scope_separated': '已将验证结果与模块验收分开处理',
     'verification_evidence_accepted': '独立验证通过，结果已登记',
+    'supplemental_checks_queued': 'Watcher 已安排补跑测试',
     'acceptance_checks_added': '已追加验收检查',
     'acceptance_checks_removed': '已撤回误录的验收检查',
     'maintenance_started': '部署维护，保存检查点后恢复',
@@ -204,6 +205,8 @@ class ActivityReader:
                 text += f"（退出码 {event.get('exit', '?')}）：{event.get('command', '')}"
             elif name == 'run_finished':
                 text += '：' + present_summary(event.get('summary') or event.get('status'))
+            elif name == 'supplemental_checks_queued':
+                text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('paths') or '')
             elif name == 'function_dispatch_preflight_rejected':
                 text += '：' + str(event.get('task_id') or '') + '\n' + present_summary(event.get('reason'))
             elif name == 'function_next_assignment_rejected':

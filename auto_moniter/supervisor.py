@@ -1249,7 +1249,16 @@ class Supervisor:
             if self.config.function_dispatch:
                 if self._verification_only() and review.task_status == 'changes_required':
                     if review.next_task is None:
-                        if self._separate_verification_milestone(records):
+                        if review.supplemental_checks:
+                            try:
+                                self._queue_supplemental_checks(record, review)
+                            except ValueError as exc:
+                                review.blockers.append(str(exc))
+                            else:
+                                review_record.watcher_result.update(status='blocked', reasons=['Supplemental checks queued'])
+                                self._write_state(records, 'running', 0, '', review_tree)
+                                continue
+                        elif self._separate_verification_milestone(records):
                             continue
                         reason = 'Verification needs an external prerequisite before it can continue.'
                         review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
@@ -3112,18 +3121,74 @@ class Supervisor:
             selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
             if task.get('kind') == 'verification':
                 selected.extend(self._acceptance_commands(final, ids))
+        supplemental = record.watcher_result.get('supplemental_checks', [])
+        commands = self._acceptance_commands(final, ids, selected)
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
                 'requirement_cycle':len(self.requirement_cycles)+1,
                 'business_update_count':self._business_update_count,
                 **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
                    if self.config.task_type == 'deployment' else {}),
-                'module_ids':sorted(ids), 'commands':self._acceptance_commands(final, ids, selected),
+                'module_ids':sorted(ids),
+                'commands':list(dict.fromkeys([*commands, *(item['command'] for item in supplemental)])),
+                **({'supplemental_checks': supplemental} if supplemental else {}),
                 'configured_checks':list(self.config.checks),
                 'check_timeout_s':self.config.check_timeout_s,
                 'provider_config':self._provider_config(), 'reviewer_model':self._reviewer_model(),
                 'worker_model':self.config.model, 'requirement':self.config.requirement,
                 'acceptance':self.config.acceptance, 'quality_policy':self.config.quality_policy,
                 'direction_ids':[message['id'] for message in self.directions.messages()]}
+
+    def _approved_supplemental_test(self, path, name, module_id):
+        from auto_moniter.workspace import _file_token
+        protected = self.quality.protected(self.config.cwd)
+        if str(path) in protected and _file_token(path) == protected[str(path)]:
+            return True
+        for record in reversed(self._records):
+            receipt = record.watcher_result.get('candidate_checks') or {}
+            context = receipt.get('context') or {}
+            task = context.get('task') or {}
+            authored = task.get('review_test') or {}
+            if (record.role == 'worker' and task.get('module_id') == module_id
+                    and authored.get('path') == name
+                    and path.stat().st_size <= 128 * 1024
+                    and path.read_bytes() == authored['source'].encode('utf-8')
+                    and candidate_checks.valid(receipt, self.run_dir, context)):
+                return True
+        return False
+
+    def _queue_supplemental_checks(self, record, review):
+        from auto_moniter.local_tests import command
+        task = self.function_tasks.current
+        context = self._candidate_check_context(record)
+        receipt = record.watcher_result.get('candidate_checks')
+        if (self._pending_directions() or self._business_head_changed()
+                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree
+                or not candidate_checks.valid(receipt, self.run_dir, context)
+                or not receipt['passed']):
+            raise ValueError('补跑前需要与当前候选一致的有效检查记录，且现有检查须先通过。')
+        pending = {item['id'] for item in self.audit.pending({task['module_id']})}
+        additions = []
+        commands = set(context['commands'])
+        for item in review.supplemental_checks:
+            name = item['path']
+            if item['criterion_id'] not in task['criterion_ids'] or item['audit_id'] not in pending:
+                raise ValueError('补跑请求必须关联当前派单的验收条目和未关闭的审核问题。')
+            try:
+                executable = command(self.config.cwd, name)
+                path = self.config.cwd / name
+                if not executable or not path.is_file() or not self._approved_supplemental_test(path, name, task['module_id']):
+                    raise ValueError('Test lacks approval')
+            except (OSError, ValueError) as exc:
+                raise ValueError('这个测试尚未获准由 Watcher 补跑：' + name) from exc
+            if executable not in commands:
+                additions.append({**item, 'command': executable})
+                commands.add(executable)
+        saved = record.watcher_result.get('supplemental_checks', [])
+        if not additions or len(saved) + len(additions) > 3:
+            raise ValueError('补跑没有新增检查，或已达到本轮的补跑上限。请核对现有结果。')
+        record.watcher_result['supplemental_checks'] = [*saved, *additions]
+        self._event('supplemental_checks_queued', round=record.index, task_id=task['id'],
+                    paths=[item['path'] for item in additions])
 
     def _repair_preflight(self, record, reviewer, last_review):
         """Reject an incomplete repair before repeating costly delivery checks.
@@ -3283,7 +3348,17 @@ class Supervisor:
             return
         if not previous and self._reuse_module_checks(record, context):
             return
+        prior_results = []
         if previous:
+            old = previous.get('context', {})
+            compare = lambda value: {key: item for key, item in value.items()
+                                     if key not in {'commands', 'supplemental_checks'}}
+            if (context.get('supplemental_checks') and previous.get('passed')
+                    and candidate_checks.valid(previous, self.run_dir, old)
+                    and compare(old) == compare(context)
+                    and len(old['commands']) < len(context['commands'])
+                    and old['commands'] == context['commands'][:len(old['commands'])]):
+                prior_results = previous['checks']
             archived = candidate_checks.archive(self.run_dir,previous)
             if archived:
                 record.watcher_result['candidate_checks_history'] = [
@@ -3307,7 +3382,8 @@ class Supervisor:
             else:
                 passed = self._delivery_checks(record.index, verdict, final=context['final'],
                     expected_tree=record.tree, module_ids=set(context['module_ids']),
-                    function_commands=context['commands'], pre_review=True, reusable=reusable)
+                    function_commands=context['commands'], pre_review=True, reusable=reusable,
+                    prior_results=prior_results)
         finally:
             # Budget and stop exceptions still keep the checks captured so far.
             path = self.run_dir/'acceptance-results.json'
@@ -3472,7 +3548,7 @@ class Supervisor:
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
-                         pre_review=False, reusable=None) -> bool:
+                         pre_review=False, reusable=None, prior_results=()) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
         if final and self.config.task_type == 'deployment':
             try:
@@ -3539,9 +3615,13 @@ class Supervisor:
         # final requirement delivery, never because a module was accepted.
         commands = self._acceptance_commands(final, verdict.module_ids if module_ids is None else module_ids, function_commands)
         failures = []
-        check_results = []
+        check_results = list(prior_results)
+        self._passed_function_checks.update({command: result['log']
+                                             for command, result in zip(commands, prior_results)})
         budget_stop = None
         for number, command in enumerate(dict.fromkeys(commands), 1):
+            if number <= len(prior_results):
+                continue
             # Read stop and the cumulative budget before Popen. A fingerprint
             # wait or a control.json stop must not launch a check that can finish
             # before the in-process should_stop poll notices.
@@ -4044,6 +4124,7 @@ class Supervisor:
             (verdict.task_id != task['id'], 'task_id must equal ' + task['id']),
             (verdict.task_status not in ('done', 'incomplete'), 'task_status must be done or incomplete'),
             (verdict.next_task is not None, 'next_task must be null; only the reviewer assigns the next task'),
+            (verdict.supplemental_checks, 'Only the reviewer may request supplemental checks'),
             (verdict.modules, 'modules must be []; the worker cannot redefine modules'),
             (set(verdict.module_ids) - set(delivery_modules), 'module_ids may contain only ' + ', '.join(delivery_modules)),
             (verdict.status == 'done' and (expected == 'function' or verdict.scope != expected
@@ -4189,13 +4270,16 @@ class Supervisor:
         task = self.function_tasks.current
         if not task or review.task_id != task['id'] or review.task_status not in ('accepted', 'changes_required'):
             return ['Reviewer must conclude on the dispatched function ID']
+        if review.supplemental_checks and (not self._verification_only()
+                or review.task_status != 'changes_required' or review.next_task is not None):
+            return ['Supplemental checks require a read-only verification request without a replacement assignment.']
         if review.task_status == 'changes_required':
             verification = task.get('kind') == 'verification'
             repair = (verification and review.next_task is not None and review.next_task.get('kind') != 'verification')
             if (self._review_approved(review) or (review.next_task is not None and not repair)
-                    or not (review.gaps or review.blockers)):
+                    or not (review.gaps or review.blockers or review.supplemental_checks)):
                 return ['Rejected function requires focused gaps and cannot dispatch another task']
-            if verification and not repair and not review.blockers:
+            if verification and not repair and not (review.blockers or review.supplemental_checks):
                 return ['Read-only verification cannot implement the reported fixes. Provide a bounded implementation '
                         'next_task, or identify the external prerequisite in blockers if no repair can run.']
             if repair:
@@ -5128,6 +5212,12 @@ class Supervisor:
                    'You own the delivery decision. Approve only after the required checks pass. '
                    'The watcher publishes the approved candidate without repeating the acceptance assessment.'] if receipt else []),
                 *([guidance('review-evidence')] if receipt and task and self.config.task_type == 'code' else []),
+                *(['If an approved existing test needs an independent execution record, request it in supplemental_checks '
+                   'with path, criterion_id and audit_id. Use task_status=changes_required, next_task=null and describe '
+                   'the missing evidence in gaps or blockers. Watcher derives the execution command. Do not request '
+                   'modified tests, arbitrary commands or a check already present in the current receipt. '
+                   'After the new receipt arrives, assess its result and continue. Use supplemental_checks=[] otherwise.']
+                  if task and self._verification_only() else []),
                 *([browser] if browser else []),
                 *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
                    function_tasks.verdict_contract('reviewer', self.function_tasks.current, module_ids=self.modules.items),
@@ -6301,6 +6391,7 @@ def _verdict_from_state(value: object) -> Verdict | None:
         modules=value.get("modules") or [],
         issue_resolutions=value.get("issue_resolutions") or [],
         task_id=value.get("task_id", ""), task_status=value.get("task_status", ""), next_task=value.get("next_task"),
+        supplemental_checks=value.get('supplemental_checks') or [],
     )
 
 

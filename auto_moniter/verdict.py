@@ -8,6 +8,12 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from auto_moniter.audit import resolutions
 
+SUPPLEMENTAL_CHECKS_SCHEMA = {
+    'type': 'array', 'maxItems': 3,
+    'items': {'type': 'object', 'additionalProperties': False,
+              'properties': {key: {'type': 'string'} for key in ('path', 'criterion_id', 'audit_id')},
+              'required': ['path', 'criterion_id', 'audit_id']},
+}
 
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -123,12 +129,15 @@ class Verdict:
     task_id: str = ""
     task_status: str = ""
     next_task: dict | None = None
+    supplemental_checks: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("raw", None)
         data.pop("parse_error", None)
         data.pop("structured", None)
+        if not self.supplemental_checks:
+            data.pop('supplemental_checks')
         if not self.task_id and not self.task_status and self.next_task is None:
             for key in ("task_id", "task_status", "next_task"):
                 data.pop(key)
@@ -181,6 +190,7 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
         modules=data.get("modules", []),
         issue_resolutions=data.get("issue_resolutions", []),
         task_id=data.get("task_id", ""), task_status=data.get("task_status", ""), next_task=data.get("next_task"),
+        supplemental_checks=data.get('supplemental_checks', []),
     )
     if isinstance(verdict.next_task, dict) and "review_test" in verdict.next_task and verdict.next_task["review_test"] is None:
         verdict.next_task = {key: value for key, value in verdict.next_task.items() if key != "review_test"}
@@ -188,7 +198,8 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
     invalid = [name for name in VERDICT_SCHEMA["required"] if name not in data and name != "issue_resolutions"]
     if function_gate:
         required = set(VERDICT_SCHEMA['required']) | {'task_id', 'task_status', 'next_task'}
-        invalid.extend(required ^ data.keys())
+        invalid.extend(required - data.keys())
+        invalid.extend(data.keys() - required - {'supplemental_checks'})
         if not isinstance(data.get('task_id'), str) or not data['task_id']:
             invalid.append('task_id')
         if data.get('task_status') not in ('done', 'incomplete', 'accepted', 'changes_required'):
@@ -199,6 +210,15 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
         name for name in ("done", "gaps", "next_actions", "evidence", "blockers", "module_ids")
         if name in data and (not isinstance(data[name], list) or not all(isinstance(item, str) for item in data[name]))
     )
+    requests = verdict.supplemental_checks
+    if (not isinstance(requests, list) or len(requests) > 3
+            or any(not isinstance(item, dict) or set(item) != {'path', 'criterion_id', 'audit_id'}
+                   or any(not isinstance(value, str) or not value.strip() or len(value) > 512
+                          or '\0' in value for value in item.values()) for item in requests)):
+        invalid.append('supplemental_checks')
+        verdict.supplemental_checks = []
+    elif requests and not function_gate:
+        invalid.append('supplemental_checks')
     if not isinstance(data.get("summary"), str) or not verdict.summary:
         invalid.append("summary")
     if verdict.scope not in {"module", "requirement"}:

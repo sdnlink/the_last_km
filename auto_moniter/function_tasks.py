@@ -272,6 +272,9 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
     else:
         additions={'task_id':{'type':'string'},'task_status':{'type':'string',
                    'enum':['done','incomplete','accepted','changes_required']},'next_task':next_schema}
+        if gate:
+            from auto_moniter.verdict import SUPPLEMENTAL_CHECKS_SCHEMA
+            additions['supplemental_checks'] = copy.deepcopy(SUPPLEMENTAL_CHECKS_SCHEMA)
     result['properties'].update(additions)
     result['required'].extend(additions)
     return result

@@ -58,6 +58,25 @@ struct Service { func run() -> Int { return 123 }; func other() -> Int { return 
 @unittest.skipUnless(importlib.util.find_spec('tree_sitter_language_pack'),
                      'Install auto-moniter[languages] to verify optional grammar rules')
 class LanguageScopeTests(unittest.TestCase):
+    def test_react_wrapped_tsx_implementation_preserves_outside_scope(self):
+        source = '''import {memo} from 'react'
+const Other = 123
+export const Table = memo(React.forwardRef<HTMLDivElement>((props, ref) => <div ref={ref}>123</div>))
+const Alias = memo(Table)
+const Factory = createTable(() => <div />)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'table.tsx'
+            path.write_text(source)
+            first = target_state(path, 'Table')
+            self.assertIsNotNone(first['body'])
+            self.assertIsNone(target_state(path, 'Alias')['body'])
+            self.assertIsNone(target_state(path, 'Factory')['body'])
+            path.write_text(source.replace('>123</div>', '>456</div>'))
+            second = target_state(path, 'Table')
+            self.assertNotEqual(first['body'], second['body'])
+            self.assertEqual(first['outside'], second['outside'])
+
     def test_rust_raw_identifier_reference_keeps_exact_scope_and_outside_changes(self):
         source = '// 中文 😀\nfn consume(_: &str) {}\nfn run() { let raw = "input"; consume(&raw); }\nfn other() { let raw = "other"; consume(&raw); }\n'
         with tempfile.TemporaryDirectory() as directory:

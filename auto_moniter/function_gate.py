@@ -353,10 +353,16 @@ def baseline(path, root, task, snapshot, *, missing_ok, historical_source=None):
     for name in task['test_files']:
         if _path(root, name).exists():
             raise ValueError('Function tasks may add focused tests; preserve existing test assets: ' + name)
-    saved = {'id': task['id'], 'files': snapshot,
-             'targets': {file: target_state(_path(root, file), symbol) for file, symbol in targets(task)}}
-    if task.get('kind') == 'verification' and any(t['body'] is None for t in saved['targets'].values()):
-        raise ValueError('Verification-only assignment must name an existing, unambiguous function')
+    measured = {}
+    for file, symbol in targets(task):
+        try:
+            measured[file] = target_state(_path(root, file), symbol)
+        except ValueError as exc:
+            raise ValueError(f"Assignment {task['id']}: {file}#{symbol}: {exc}") from exc
+        if task.get('kind') == 'verification' and measured[file]['body'] is None:
+            raise ValueError(f"Verification-only assignment {task['id']}: cannot locate function "
+                             f"{file}#{symbol}. Select an existing, unambiguous implementation.")
+    saved = {'id': task['id'], 'files': snapshot, 'targets': measured}
     _write_baseline(path, saved)
     return saved
 

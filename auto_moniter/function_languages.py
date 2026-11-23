@@ -83,6 +83,23 @@ def _names(name):
     return tuple(parts) if all(re.fullmatch(r'[\w$~]+[!?=]?', part) for part in parts) else ()
 
 
+def _typescript_function_value(value):
+    # React wrappers declare a component when their first argument is an
+    # inline implementation. A plain factory call or a memoized alias does not.
+    wrappers = {('memo',), ('React', 'memo'), ('forwardRef',), ('React', 'forwardRef')}
+    while value is not None:
+        if value.type in {'arrow_function', 'function_expression', 'generator_function'}:
+            return True
+        if value.type == 'parenthesized_expression':
+            value = next((child for child in value.named_children if child.type != 'comment'), None)
+        elif value.type == 'call_expression' and _names(_text(value.child_by_field_name('function'))) in wrappers:
+            arguments = value.child_by_field_name('arguments')
+            value = next((child for child in arguments.named_children if child.type != 'comment'), None)
+        else:
+            return False
+    return False
+
+
 def _type_name(node):
     while node is not None:
         if node.type in {'identifier', 'type_identifier', 'scoped_type_identifier', 'qualified_identifier'}:
@@ -219,7 +236,7 @@ def spans(source, symbol, name):
                 matches.append(definition)
         elif name in {'typescript', 'tsx'} and kind in {'variable_declarator', 'public_field_definition'}:
             value = node.child_by_field_name('value')
-            if declared and value is not None and value.type in {'arrow_function', 'function_expression', 'generator_function'}:
+            if declared and _typescript_function_value(value):
                 child_prefix = prefix + declared
                 parent = node.parent
                 if kind == 'variable_declarator' and sum(c.type == kind for c in parent.named_children) == 1:

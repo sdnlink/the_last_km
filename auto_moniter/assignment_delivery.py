@@ -71,33 +71,39 @@ def _recorded_approval(workspace, row, history):
     return (record.get('result') or {}).get('watcher_result', {}).get('candidate_approval')
 
 
-def _reverified(workspace, task, receipt, final_receipt, module, tree):
+def _reverified(workspace, delivered, receipt, final_receipt, module, tree, ledger, local_review):
     """Require the original behavioral check to pass again on the final candidate."""
     from auto_moniter.local_tests import command
     from auto_moniter.redaction import redact
 
-    test = task.get('review_test')
+    task = delivered['task']
     context = final_receipt['context']
-    if (task['delivery_scope'] != 'function' or task.get('kind') == 'verification' or not test
-            or module.get('status') != 'accepted' or module.get('tree') != tree
+    if (module.get('status') != 'accepted' or module.get('tree') != tree
             or not context.get('final') or context.get('tree') != tree):
         return False
-    path = workspace / test['path']
-    runner = command(workspace, test['path'])
-    if (not runner or path.resolve() != path or not path.is_file()
-            or path.stat().st_size != len(test['source'].encode())
-            or path.read_bytes() != test['source'].encode()):
+    original = {check['command'] for check in receipt['checks'] if check['status'] == 'passed'}
+    passing = {check['command'] for check in final_receipt['checks'] if check['status'] == 'passed'}
+    if not original <= passing:
         return False
     paths = function_tasks.writable_files(task)
-    if (not git(workspace, '--literal-pathspecs', 'ls-tree', 'HEAD', '--', test['path'])
-            or git(workspace, '--literal-pathspecs', 'diff', '--name-only', 'HEAD', '--', *paths)
+    if (git(workspace, '--literal-pathspecs', 'diff', '--name-only', 'HEAD', '--', *paths)
             or git(workspace, '--literal-pathspecs', 'ls-files', '--others', '--', *paths)):
         return False
-    original = {check['command'] for check in receipt['checks'] if check['status'] == 'passed'}
-    # Reused logs can prove the same candidate, but a receipt used to cover
-    # changed source must describe the rechecked final candidate.
-    passing = {check['command'] for check in final_receipt['checks'] if check['status'] == 'passed'}
-    return redact(runner) in original and original <= passing
+    baseline = local_review.get('git_checkpoint', {}).get('business_commit', {}).get('commit', '')
+    if not re.fullmatch(r'[0-9a-f]{40,64}', baseline):
+        return False
+    selected = {check['command'] for check in receipt['checks']
+                if check['log'] in delivered['verification'].values()}
+    related = [delivered] if task.get('kind') != 'verification' else [
+        item for item in ledger.accepted if item['round'] <= delivered['round']
+        and item['task']['module_id'] == task['module_id']]
+    tests = [item['task']['review_test']['path'] for item in related if item['task'].get('review_test')]
+    focused = [name for name in tests if (runner := command(workspace, name)) and redact(runner) in selected]
+    if not focused:
+        return False
+    return all(git(workspace, '--literal-pathspecs', 'ls-tree', baseline, '--', name)
+               and not git(workspace, '--literal-pathspecs', 'diff', '--name-only', baseline, '--', name)
+               for name in focused)
 
 
 def verified(run, workspace, assignment, module, brief):
@@ -177,7 +183,7 @@ def verified(run, workspace, assignment, module, brief):
             for file, symbol in function_tasks.targets(assignment))
             or any(file_hash(file) != digest
                    for file, digest in delivered.get('file_hashes', {}).items())):
-        if not _reverified(workspace, delivered['task'], receipt, final_receipt, child_module, tree):
+        if not _reverified(workspace, delivered, receipt, final_receipt, child_module, tree, ledger, local_review):
             raise ValueError('关联任务通过检查的代码与当前版本不一致，最终验收缺少对原专项测试的复验。')
     return {'run_dir': str(run), 'workspace': str(workspace), 'commit': commit,
             'tree': tree, 'checks_digest': receipt['digest']}

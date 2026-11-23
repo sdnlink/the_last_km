@@ -110,9 +110,12 @@ class DispatchTests(unittest.TestCase):
                            '    def test_model(self):\n        self.assertEqual(parse_input(), 42)\n')
             foreign = {**task('BACKEND', 'model.py'), 'test_files': [test_path], 'check_ids': ['auto:1'],
                        'review_test': {'path': test_path, 'source': test_source}}
-            repair = {**task('REPAIR', 'model.py', depends=['BACKEND']),
+            milestone = {**verification_task('MILESTONE', 'model.py', depends=['BACKEND']),
+                         'delivery_scope': 'module', 'check_ids': ['regression:1']}
+            repair = {**task('REPAIR', 'model.py', depends=['MILESTONE']),
                       'verification': ['The revised implementation still returns 42']}
-            backend_final = verification_task('DONE', 'model.py', depends=['REPAIR'])
+            refreshed = {**milestone, 'id': 'REFRESHED', 'depends_on': ['REPAIR']}
+            backend_final = verification_task('DONE', 'model.py', depends=['REFRESHED'])
             frontend_final = verification_task('FINAL', depends=['BACKEND'])
             candidate = result('BACKEND', 'done', file='model.py')
             candidate['touch'] = 'model.py'
@@ -127,13 +130,21 @@ class DispatchTests(unittest.TestCase):
 
             repair_candidate = {**result('REPAIR', 'done', file='model.py'), 'touch': 'model.py',
                                 'source': 'def parse_input():\n    return 40 + 2\n'}
-            worker = FunctionWorker('worker', [candidate, repair_candidate, verification])
+            verify_milestone = result('MILESTONE', 'done', status='done', file='model.py')
+            verify_milestone['verdict']['scope'] = 'module'
+            approve_milestone = result('MILESTONE', 'accepted', status='done', file='model.py', next_task=repair)
+            approve_milestone['verdict']['scope'] = 'module'
+            verify_refresh = result('REFRESHED', 'done', status='done', file='model.py')
+            verify_refresh['verdict']['scope'] = 'module'
+            approve_refresh = result('REFRESHED', 'accepted', status='done', file='model.py', next_task=backend_final)
+            approve_refresh['verdict']['scope'] = 'module'
+            worker = FunctionWorker('worker', [candidate, verify_milestone, repair_candidate, verify_refresh, verification])
             proposed = {**foreign, 'verification': ['Paraphrased by receiving reviewer']}
             child_plan = json.loads(plan(proposed)['text'])
-            child_plan['function_plan'] = [proposed, repair, backend_final]
+            child_plan['function_plan'] = [proposed, milestone, repair, refreshed, backend_final]
             reviewer = Reviewer('reviewer', [{'verdict':{}, 'text':json.dumps(child_plan)},
-                result('BACKEND', 'accepted', file='model.py', next_task=repair),
-                result('REPAIR', 'accepted', file='model.py', next_task=backend_final),
+                result('BACKEND', 'accepted', file='model.py', next_task=milestone), approve_milestone,
+                result('REPAIR', 'accepted', file='model.py', next_task=refreshed), approve_refresh,
                 result('DONE', 'accepted', status='done', file='model.py')])
             backend_run = backend/'run'
             from auto_moniter.assignment_delivery import contracts
@@ -174,7 +185,9 @@ class DispatchTests(unittest.TestCase):
             self.assertFalse((frontend/'model.py').exists())
             from auto_moniter.assignment_delivery import verified
             child_state = json.loads((backend_run/'state.json').read_text())
-            final = next(row for row in child_state['rounds'] if row['role']=='worker' and row['index']==3)
+            self.assertIsNotNone(verified(backend_run, backend, milestone, child_state['modules'][0],
+                                          child_state['requirements_review']))
+            final = next(row for row in reversed(child_state['rounds']) if row['role']=='worker')
             receipt = final['watcher_result']['candidate_checks']
             final_log = backend_run / next(check['log'] for check in receipt['checks']
                                            if test_path in check['command'])

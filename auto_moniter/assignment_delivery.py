@@ -10,6 +10,38 @@ from auto_moniter.project_workspace import git
 from auto_moniter.workspace import workspace_fingerprint
 
 
+CONTRACT_FIELDS = ('module_id', 'kind', 'delivery_scope', 'objective', 'inputs', 'outputs',
+                   'boundaries', 'verification', 'edit_files', 'test_files', 'review_test')
+
+
+def same_contract(approved, proposed):
+    return (all(approved.get(key) == proposed.get(key) for key in CONTRACT_FIELDS)
+            and function_tasks.targets(approved) == function_tasks.targets(proposed))
+
+
+def contracts(value):
+    if not isinstance(value, list) or len(value) > function_tasks.MAX_PLAN_TASKS:
+        raise ValueError('跨仓派单合同必须是有效的派单列表。')
+    tasks = [function_tasks.validate(item) for item in value]
+    result = {item['id']: item for item in tasks}
+    if len(result) != len(tasks) or any(item['delivery_scope'] == 'requirement' for item in tasks):
+        raise ValueError('跨仓派单合同必须使用唯一编号，需求总验收由原任务负责。')
+    return result
+
+
+def preserve(approved, proposed):
+    if not isinstance(proposed, dict):
+        return proposed
+    ident = proposed.get('id')
+    original = approved.get(ident) if isinstance(ident, str) else None
+    if original is None:
+        return proposed
+    # The receiving reviewer selects local checks and criterion IDs. The sender
+    # owns the exact scope, expected behavior and approved test bytes.
+    return {**original, **{key: proposed[key] for key in ('criterion_ids', 'check_ids', 'depends_on')
+                           if key in proposed}}
+
+
 def links(values):
     if not isinstance(values, list) or len(values) > 200:
         raise ValueError('跨仓关联须为列表，最多 200 条。')
@@ -62,10 +94,7 @@ def verified(run, workspace, assignment, module, brief):
     delivered = next((item for item in ledger.accepted if item['task']['id'] == assignment['id']), None)
     if not delivered or not delivered.get('verification'):
         raise ValueError('关联任务没有这个派单的验收记录。')
-    contract = ('module_id', 'kind', 'delivery_scope', 'objective', 'inputs', 'outputs',
-                'boundaries', 'verification', 'edit_files', 'test_files', 'review_test')
-    if (any(delivered['task'].get(key) != assignment.get(key) for key in contract)
-            or function_tasks.targets(delivered['task']) != function_tasks.targets(assignment)):
+    if not same_contract(assignment, delivered['task']):
         raise ValueError('关联任务的派单目标或验收要求与原派单不一致。')
     child_module = next((item for item in state.get('modules', []) if item['id'] == assignment['module_id']), {})
     if not child_module:

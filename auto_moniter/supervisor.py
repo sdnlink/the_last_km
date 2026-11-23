@@ -74,6 +74,7 @@ from auto_moniter.skills import browser_guidance, guidance
 from auto_moniter.requirement_queue import RequirementQueue, prompt_block as queued_requirement_prompt
 from auto_moniter import migration
 from auto_moniter import referee
+from auto_moniter import assignment_delivery
 
 
 LogFn = Callable[[str], None]
@@ -143,6 +144,7 @@ class RunConfig:
     referee_model: str = ''
     assignment_workspaces: list[str] | None = None
     assignment_deliveries: list[str] | None = None
+    assignment_contracts: dict[str, dict] | None = None
 
 
 @dataclass
@@ -1826,6 +1828,11 @@ class Supervisor:
     def _stage_requirement_plan(self, assignment, modules, backlog, brief, *, next_function=False):
         """Validate on cloned ledgers: no accepted state changes or worker dispatch."""
         from auto_moniter.modules import definitions
+        contracts = self.config.assignment_contracts or {}
+        if contracts:
+            assignment = assignment_delivery.preserve(contracts, assignment)
+            if isinstance(backlog, list):
+                backlog = [assignment_delivery.preserve(contracts, item) for item in backlog]
         proposed = definitions(modules)
         if any(m.get('files') or m.get('checks') for m in proposed):
             raise ValueError('Planning cannot supply executable checks or override fixed file scopes')
@@ -2119,6 +2126,10 @@ class Supervisor:
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
                 if self.config.full_function_plan and self.function_plan:
                     prompt += '\nPreviously approved function plan (revise remaining entries only with concrete findings):\n'+json.dumps(self.function_plan,ensure_ascii=False)
+                if self.config.assignment_contracts:
+                    prompt += ('\n以下派单来自原任务。按编号保留原始目标、边界、验收描述和测试源码，'
+                               '仅调整本仓库的验收编号、检查编号和依赖关系。\n'
+                               + json.dumps(list(self.config.assignment_contracts.values()), ensure_ascii=False))
                 if self._function_gate:
                     prompt += self._function_planning_contract()
                     browser = browser_guidance(self.config.requirement + '\n' + json.dumps(
@@ -3992,6 +4003,9 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
+        original = (self.config.assignment_contracts or {}).get(task['id'])
+        if original and not assignment_delivery.same_contract(original, task):
+            raise ValueError(f'派单 {task["id"]} 与原任务提供的合同不一致。')
         if task.get('kind') != 'verification':
             root = self.config.cwd
             protected = self.quality.protected(root)
@@ -4224,6 +4238,11 @@ class Supervisor:
             *(name for item in ledger.accepted for name in item['task'].get('test_files', [])),
         ]))
         problems = []
+        planned = {item['task']['id']: item['task'] for item in ledger.accepted}
+        planned.update((task['id'], task) for task in plan['tasks'])
+        for ident, original in (self.config.assignment_contracts or {}).items():
+            if ident not in planned or not assignment_delivery.same_contract(original, planned[ident]):
+                problems.append(f'派单计划须保留原任务提供的合同 {ident}。')
         accepted_modules = {key for key, item in modules.items() if item['status'] == 'accepted'}
         for task in plan['tasks']:
             if task.get('kind') != 'verification':
@@ -4823,6 +4842,7 @@ class Supervisor:
             "protect_paths": self.config.protect_paths,
             "assignment_workspaces": self.config.assignment_workspaces or [],
             "assignment_deliveries": self.config.assignment_deliveries or [],
+            "assignment_contracts": list((self.config.assignment_contracts or {}).values()),
             "recovery_note": self._recovery_note,
             "no_progress_turns": self._no_progress,
             "progress_pending": self._progress_reset,
@@ -5092,6 +5112,10 @@ class Supervisor:
         assignment_delivery.links(saved_deliveries)
         if self.config.assignment_deliveries is None:
             self.config.assignment_deliveries = saved_deliveries
+        saved_contracts = assignment_delivery.contracts(state.get('assignment_contracts', []))
+        if self.config.assignment_contracts not in (None, saved_contracts):
+            raise ValueError('恢复任务时须保留原任务提供的派单合同。')
+        self.config.assignment_contracts = saved_contracts
         self._check_changes = state.get('check_changes', [])
         check_history.configurations(saved_checks, self._check_changes)
         settings = state.get("execution_settings", {})

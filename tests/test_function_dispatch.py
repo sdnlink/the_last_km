@@ -95,13 +95,18 @@ class DispatchTests(unittest.TestCase):
                     return super()._command(session, prompt_file, read_only)
 
             worker = FunctionWorker('worker', [candidate, verification])
-            reviewer = Reviewer('reviewer', [plan(foreign),
+            proposed = {**foreign, 'verification': ['Paraphrased by receiving reviewer']}
+            child_plan = json.loads(plan(proposed)['text'])
+            child_plan['function_plan'] = [proposed, backend_final]
+            reviewer = Reviewer('reviewer', [{'verdict':{}, 'text':json.dumps(child_plan)},
                 result('BACKEND', 'accepted', file='model.py', next_task=backend_final),
                 result('DONE', 'accepted', status='done', file='model.py')])
             backend_run = backend/'run'
+            from auto_moniter.assignment_delivery import contracts
             child = Supervisor(RunConfig('Verify backend behavior', backend, worker, reviewer=reviewer,
-                workflow='review-first', function_dispatch=True, git_history='required', run_dir=backend_run,
-                checks=[CHECK], retry_delay_s=0), log=lambda _:None).run()
+                workflow='review-first', function_dispatch=True, full_function_plan=True, git_history='required',
+                run_dir=backend_run, checks=[CHECK], retry_delay_s=0, assignment_contracts=contracts([foreign])),
+                log=lambda _:None).run()
             self.assertEqual(child.status, 'done', child.summary)
 
             initial = json.loads(plan(foreign)['text'])

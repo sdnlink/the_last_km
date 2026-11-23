@@ -31,10 +31,10 @@ def instructions(role):
         )
     if role in ('worker', 'report_correction'):
         reporting = (
-            'When several modules share one report, a report edit may make a previously reviewed prerequisite pending again. '
-            'Recheck that prerequisite’s existing sections and cite them. If their evidence still holds, include the prerequisite '
-            'and the newly completed module in the same completion report for joint independent review. A pending ledger status '
-            'alone does not require another edit or prevent submitting both modules. '
+            'When several modules share one report, an edit can make earlier reviewed modules pending again. '
+            'Recheck existing sections for prior modules with recorded acceptance, including prerequisites, and cite those sections. '
+            'Include the rechecked modules whose evidence still holds alongside the newly completed module in the same submission '
+            'for joint independent review. A pending ledger status alone does not require another edit. '
         )
         if role == 'report_correction':
             return ('Report correction keeps the saved report unchanged. Product defects and faithfully recorded verification limits '

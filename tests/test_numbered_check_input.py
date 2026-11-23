@@ -31,6 +31,10 @@ class NumberedCheckInputTests(unittest.TestCase):
                 'modules':[{'id':'M1','title':'Behavior','acceptance':['Works'],
                             'checks':['2、按设备角色验收']}]})
 
+    def test_pasted_watcher_failure_is_not_an_acceptance_command(self):
+        with self.assertRaisesRegex(ValueError, '验收阻塞说明'):
+            validate_commands(['Verification needs an external prerequisite before it can continue. AUD-8'])
+
     def test_real_commands_with_unicode_paths_and_numbered_arguments_remain_unchanged(self):
         commands=['cargo test --workspace','python3 "测试/1、回归.py"','echo "2、说明"','./1、测试.sh','v1.2 --check']
         validate_commands(commands)

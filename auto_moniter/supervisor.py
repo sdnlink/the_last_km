@@ -56,7 +56,7 @@ from auto_moniter.history import prune_files
 from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
-from auto_moniter import candidate_checks, function_gate, function_tasks
+from auto_moniter import candidate_checks, check_history, function_gate, function_tasks
 from auto_moniter.live import LiveOutput
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
@@ -1625,13 +1625,8 @@ class Supervisor:
             raise RecoveryError('Published requirement does not match the saved direction history')
         old_checks = saved_context.get('configured_checks')
         current_checks = context['configured_checks']
-        if not isinstance(old_checks, list) or old_checks != current_checks[:len(old_checks)]:
+        if old_checks not in check_history.configurations(current_checks, self._check_changes):
             raise RecoveryError('Published requirement does not match the saved acceptance check history')
-        added_checks = current_checks[len(old_checks):]
-        if added_checks:
-            recorded_additions = [command for change in self._check_changes for command in change['added']]
-            if added_checks != recorded_additions[-len(added_checks):]:
-                raise RecoveryError('New acceptance checks are missing their saved addition record')
 
         # Git binds the receipt to the configuration used at publication.
         # Resume has already authorized any new role assignment independently.
@@ -1657,7 +1652,7 @@ class Supervisor:
         review.delivery = {'status': 'accepted', 'reasons': []}
         self.modules.accept(worker.verdict, approval, worker.index, worker.tree)
         if (direction_ids != context['direction_ids'] or self._pending_directions()
-                or added_checks or saved_context['commands'] != context['commands']
+                or old_checks != current_checks or saved_context['commands'] != context['commands']
                 or saved_context.get('check_timeout_s') != context['check_timeout_s']):
             return None
         return review
@@ -3059,6 +3054,9 @@ class Supervisor:
         if self._function_gate and task and task['delivery_scope'] == 'function':
             catalog = self._function_check_catalog(task)
             selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
+            if task.get('kind') == 'verification' and self._check_changes:
+                original = check_history.configurations(self.config.checks, self._check_changes)[0]
+                selected.extend(self.config.checks[len(original):])
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
                 'requirement_cycle':len(self.requirement_cycles)+1,
                 'business_update_count':self._business_update_count,
@@ -4687,15 +4685,7 @@ class Supervisor:
             raise ValueError("invalid saved review schedule")
         saved_checks = state.get("checks") or []
         self._check_changes = state.get('check_changes', [])
-        if (not isinstance(self._check_changes, list) or len(self._check_changes) > 20
-                or any(not isinstance(change, dict) or set(change) != {'at', 'added'}
-                       or not isinstance(change['at'], str) or len(change['at']) > 100
-                       or not isinstance(change['added'], list) or not change['added']
-                       or len(change['added']) > 20
-                       or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\0' in c
-                              or c not in saved_checks for c in change['added'])
-                       for change in self._check_changes)):
-            raise ValueError('Invalid saved acceptance check additions')
+        check_history.configurations(saved_checks, self._check_changes)
         settings = state.get("execution_settings", {})
         if not isinstance(settings, dict) or set(settings) - _EXECUTION_DEFAULTS.keys():
             raise ValueError("invalid saved execution settings")
@@ -4706,8 +4696,6 @@ class Supervisor:
                 raise ValueError(f"invalid saved execution setting: {key}")
             if key not in self._execution_overrides:
                 setattr(self.config, key, value)
-        if not isinstance(saved_checks, list) or not all(isinstance(item, str) for item in saved_checks):
-            raise ValueError("invalid saved acceptance checks")
         if self.config.checks and self.config.checks != saved_checks:
             raise ValueError("acceptance checks cannot change on resume; use the saved checks or a new run")
         self.config.checks = saved_checks

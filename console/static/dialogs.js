@@ -201,6 +201,13 @@ export async function openMigration(id){
   if(currentTaskDialog('migrate',sequence))toast(error.message,true);
  }
 }
+function showRemovableChecks(task){
+ const group=$('#resume-check-corrections'),list=$('#resume-removable-checks');
+ if(!group||!list)return;
+ const checks=Object.entries(task.removable_checks||{}).sort((a,b)=>a[1]-b[1]);
+ group.hidden=!checks.length;
+ list.innerHTML=checks.map(([token,index])=>`<label class="checkbox-label"><input type="checkbox" name="remove_checks" value="${escape(token)}"><code>${escape(task.checks[index])}</code></label>`).join('');
+}
 export async function openResume(id){
  const sequence=beginTaskDialog('resume');
  try{
@@ -208,7 +215,7 @@ export async function openResume(id){
   const task=await api(`/api/tasks/${id}`);if(!currentTaskDialog('resume',sequence))return;
   const u=task.usage||task.health?.usage||{};
   $('#resume-usage').textContent=i18n`累计运行 ${Math.ceil((u.elapsed_s||0)/60)} 分钟，已调用 ${u.agent_calls||0} 轮。`;
-  $('#resume-form').reset();$('#resume-error').hidden=true;showTaskDialog('resume',id);
+  $('#resume-form').reset();showRemovableChecks(task);$('#resume-error').hidden=true;showTaskDialog('resume',id);
   const cfg=await config();if(!currentTaskDialog('resume',sequence,id))return;
   modelChoices($('#resume-form'),cfg,{preserve:true,roles:['referee'],values:{reviewer:task.reviewer,reviewer_paseo_backend:task.reviewer_paseo_backend||'claude',referee_model:task.referee?.model||''}});
  }catch(error){if(currentTaskDialog('resume',sequence))toast(error.message,true);}
@@ -426,18 +433,31 @@ function bind(name){
   $('#resume-form').addEventListener('submit',async e=>{
    e.preventDefault();const view=taskDialogs.resume,{target:id,sequence}=view;if(!id||view.pending.has(id))return;
    let data;
-   try{data=selectedModels(e.target,Object.fromEntries(new FormData(e.target)));}
+   const fields=new FormData(e.target);
+   try{data=selectedModels(e.target,Object.fromEntries(fields));}
    catch(error){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;return;}
    const referee=data.referee,refereeModel=String(data.referee_model||'').trim();
    delete data.referee;delete data.referee_model;
    const additionalChecks=String(data.additional_checks||'').split(/\r?\n/).map(c=>c.trim()).filter(Boolean);
-   delete data.additional_checks;
+   const removeChecks=fields.getAll('remove_checks');
+   delete data.additional_checks;delete data.remove_checks;
    for(const key of Object.keys(data))data[key]=Number(data[key]);
    if(referee==='on'||referee==='off')data.referee=referee==='on';
    if(refereeModel)data.referee_model=refereeModel;
    view.pending.add(id);
    $('#resume-submit').disabled=true;$('#resume-error').hidden=true;
-   try{if(additionalChecks.length)await api(`/api/tasks/${id}/checks`,{additional_checks:additionalChecks});await api(`/api/tasks/${id}/resume`,data);if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();toast(i18n`任务 ${id} 已请求恢复`);await refresh();}
+   try{
+    if(additionalChecks.length||removeChecks.length){
+     const changes={};
+     if(additionalChecks.length)changes.additional_checks=additionalChecks;
+     if(removeChecks.length)changes.remove_checks=removeChecks;
+     const updated=await api(`/api/tasks/${id}/checks`,changes);
+     if(currentTaskDialog('resume',sequence,id))showRemovableChecks(updated);
+    }
+    await api(`/api/tasks/${id}/resume`,data);
+    if(currentTaskDialog('resume',sequence,id))$('#resume-dialog').close();
+    toast(i18n`任务 ${id} 已请求恢复`);await refresh();
+   }
    catch(error){if(currentTaskDialog('resume',sequence,id)){$('#resume-error').hidden=false;$('#resume-error').textContent=error.message;}else toast(i18n`任务 ${id} 恢复失败：${error.message}`,true);}
    finally{settleTaskDialog('resume',id);}
   });return;

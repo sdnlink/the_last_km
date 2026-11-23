@@ -16,6 +16,8 @@ KINDS = set(TASK_TYPES)
 def validate_commands(checks):
     """Reject pasted numbered instructions before approving them as shell checks."""
     for number, command in enumerate(checks, 1):
+        if command.strip().startswith('Verification needs an external prerequisite before it can continue.'):
+            raise ValueError(f'第 {number} 条是验收阻塞说明，请填写实际可执行的补充检查命令')
         if re.match(r'^\s*\d+(?:[、．]|\.\s)', command):
             raise ValueError(f'第 {number} 条验收命令含文字编号，请填写实际可执行命令；'
                              '测试环境和验收范围说明请填写到需求或补充要求中。')

@@ -76,6 +76,7 @@ EVENT_LABELS = {
     'function_assigned': '已下发函数任务',
     'function_accepted': '函数通过验收',
     'acceptance_checks_added': '已追加验收检查',
+    'acceptance_checks_removed': '已撤回误录的验收检查',
     'maintenance_started': '部署维护，保存检查点后恢复',
     'project_change_detected': '发现共享工程变化，等待当前调用结束后复核',
     'project_observation_failed': '共享工程状态暂时无法读取，需要重新核对',
@@ -204,9 +205,9 @@ class ActivityReader:
                 text += '：' + str(event.get('task_id') or '') + '\n' + str(event.get('reasons') or '')
             elif name in {'function_assigned', 'function_accepted'}:
                 text += '：' + str(event.get('task_id') or '')
-            elif name == 'acceptance_checks_added':
-                added = event.get('added')
-                text += '：' + ('\n'.join(added) if isinstance(added, list) else str(added or ''))
+            elif name in {'acceptance_checks_added', 'acceptance_checks_removed'}:
+                commands = event.get('added' if name == 'acceptance_checks_added' else 'removed')
+                text += '：' + ('\n'.join(commands) if isinstance(commands, list) else str(commands or ''))
             elif name == 'maintenance_started':
                 text += '：' + str(event.get('reason') or '')
             elif name == 'git_checkpoint':

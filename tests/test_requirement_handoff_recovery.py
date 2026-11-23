@@ -225,6 +225,23 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         self.assertEqual(receipt['context']['configured_checks'], updated['checks'])
         self.assertEqual(extra_counter.read_text().splitlines(), ['added'])
 
+    def test_corrected_acceptance_commands_require_a_new_receipt(self):
+        original = self.publish_then_interrupt()
+        head = _git(self.root, 'rev-parse', 'HEAD')
+        counter = self.run_dir / 'supplemental-check-count'
+        mistaken = 'mistaken-acceptance-note'
+        corrected = f'echo corrected >> {shlex.quote(str(counter))}'
+        updated = {**original, 'checks': [*original['checks'], corrected], 'check_changes': [
+            {'at': original['updated_at'], 'added': [mistaken]},
+            {'at': original['updated_at'], 'added': [corrected],
+             'removed': [{'index': len(original['checks']), 'command': mistaken}]},
+        ]}
+        write_json(self.run_dir / 'state.json', updated, durable=True)
+        worker, reviewer = self.revalidation_agents()
+        receipt = self.assert_revalidation(original, head, worker, reviewer)
+        self.assertEqual(receipt['context']['commands'], updated['checks'])
+        self.assertEqual(counter.read_text().splitlines(), ['corrected'])
+
     def publish_new_commit(self, *, requirement=FOLLOW, scope='requirement', max_agent_calls=0):
         base = _git(self.root, 'rev-parse', 'HEAD')
         worker = ScriptedProvider('worker', [

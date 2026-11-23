@@ -57,6 +57,7 @@ async function harness() {
   globalThis.FormData = class {
     constructor(form) { this.rows = Object.entries(form.elements).map(([key, field]) => [key, field.value]); }
     [Symbol.iterator]() { return this.rows[Symbol.iterator](); }
+    getAll(name) { return this.rows.filter(([key]) => key === name).map(([, value]) => value); }
   };
   // Toast timers are incidental UI expiry; request timers still use the real clock.
   globalThis.setTimeout = (callback, delay, ...args) => delay === 5000 ? -1 : originals.setTimeout(callback, delay, ...args);
@@ -99,6 +100,21 @@ test('resume appends approved checks before starting and leaves numeric budgets 
   assert.deepEqual(posts.map(r => r.url), ['/api/tasks/A/checks','/api/tasks/A/resume']);
   assert.deepEqual(JSON.parse(posts[0].options.body), {additional_checks:['python verify.py','git diff --check']});
   assert.deepEqual(JSON.parse(posts[1].options.body), {additional_runtime_minutes:5,additional_agent_calls:0});
+});
+
+test('resume saves withdrawals and replacements together before launching', async () => {
+  const h = await harness();
+  await h.dialogs.openResume('A');
+  const token = 'a'.repeat(64);
+  h.nodes['resume-form'].elements.remove_checks = element(token);
+  h.nodes['resume-form'].elements.additional_checks = element('node --test /tmp/browser.cjs');
+  await h.nodes['resume-form'].emit('submit');
+  const posts = h.requests.filter(r => r.options.method === 'POST');
+  assert.deepEqual(posts.map(r => r.url), ['/api/tasks/A/checks','/api/tasks/A/resume']);
+  assert.deepEqual(JSON.parse(posts[0].options.body), {
+    additional_checks:['node --test /tmp/browser.cjs'], remove_checks:[token],
+  });
+  assert.deepEqual(JSON.parse(posts[1].options.body), {additional_runtime_minutes:0,additional_agent_calls:0});
 });
 
 function edit(h, entry, marker) {

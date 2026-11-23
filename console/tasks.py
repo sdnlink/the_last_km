@@ -23,6 +23,7 @@ from auto_moniter.providers import discover_providers
 from auto_moniter.providers import DEFAULT_PASEO_BACKEND, ProviderError
 from auto_moniter.locking import workspaces_overlap
 from auto_moniter.workspace import LockError
+from auto_moniter.check_history import configurations
 from console.settings import settings, DEFAULTS
 from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
@@ -97,6 +98,31 @@ def _module_check_commands(modules) -> list[str]:
             if isinstance(command, str) and command.strip():
                 commands.append(command.strip())
     return commands
+
+
+def _check_references(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == 'check_ids' and isinstance(item, list):
+                for identifier in item:
+                    if isinstance(identifier, str) and re.fullmatch(r'check:[1-9][0-9]{0,3}', identifier):
+                        yield int(identifier.split(':')[1]) - 1
+            elif isinstance(item, (dict, list)):
+                yield from _check_references(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _check_references(item)
+
+
+def _removable_checks(state):
+    checks = state.get('checks') or []
+    original = configurations(checks, state.get('check_changes', []))[0]
+    references = _check_references([state.get(key) for key in (
+        'function_tasks', 'function_plan', 'quality_policy', 'requirements_review')])
+    # Positional check IDs in saved assignments must keep referring to the same commands.
+    start = max(len(original), max(references, default=-1) + 1)
+    return {hashlib.sha256(command.encode()).hexdigest(): index
+            for index, command in enumerate(checks) if index >= start}
 
 
 class TaskStore:
@@ -403,6 +429,12 @@ class TaskStore:
                 and failure and failure['code'] in {'runtime_budget','runtime_handoff'}):
             from auto_moniter.delivery_diagnosis import diagnose as diagnose_delivery
             delivery_diagnosis = diagnose_delivery(rounds, acceptance=acceptance_results)
+        removable_checks = {}
+        if include_details and 'checks' in actions:
+            try:
+                removable_checks = _removable_checks(state)
+            except ValueError:
+                pass
         return safe({'id': meta['id'], 'title': title[:160], 'requirement': requirement,
                      'cwd': meta.get('cwd') or state.get('cwd', ''), 'run_dir': str(run),
                      'project_cwd':meta.get('project_cwd',''), 'parallel_project':meta.get('parallel_project',False),
@@ -455,7 +487,8 @@ class TaskStore:
                      'can_queue_requirements': can_queue_requirements,
                      'direction_delivery': delivery, 'direction_error': direction_error,
                      'supervision_preferences': meta.get('supervision_preferences'),
-                     'actions': actions, 'checks': meta.get('checks', state.get('checks', []))})
+                     'actions': actions, 'checks': state.get('checks', meta.get('checks', [])),
+                     'removable_checks': removable_checks})
 
     @staticmethod
     def summary(view: dict) -> dict:
@@ -1088,10 +1121,15 @@ class TaskStore:
                 except (OSError, ValueError, TypeError, KeyError) as exc:
                     raise TaskError(redact(str(exc)), 409) from exc
             if action == 'checks':
-                additions = (data or {}).get('additional_checks')
-                if (not isinstance(additions, list) or not additions or len(additions) > 20
+                additions = (data or {}).get('additional_checks', [])
+                removals = (data or {}).get('remove_checks', [])
+                if (not isinstance(additions, list) or len(additions) > 20
                         or any(not isinstance(c, str) or not c.strip() or len(c) > 2000 or '\0' in c for c in additions)):
                     raise TaskError('请填写要追加的验收命令，每条最多 2000 字')
+                if (not isinstance(removals, list) or len(removals) > 20
+                        or any(not isinstance(token, str) or not re.fullmatch(r'[a-f0-9]{64}', token) for token in removals)
+                        or not (additions or removals)):
+                    raise TaskError('请选择要撤回的验收命令或填写追加命令')
                 try:
                     validate_commands(additions)
                 except ValueError as exc:
@@ -1101,7 +1139,13 @@ class TaskStore:
                         state = read_json(run / 'state.json')
                         arguments = self._resume_args(meta, state)
                         old = list(state.get('checks') or [])
-                        combined = list(old)
+                        removable = _removable_checks(state)
+                        if any(token not in removable for token in removals):
+                            raise ValueError('只可撤回未被派单引用且不影响已引用编号的追加检查，请刷新后重试')
+                        indices = sorted({removable[token] for token in removals})
+                        removed = [{'index': index, 'command': old[index]} for index in indices]
+                        combined = [command for index, command in enumerate(old) if index not in indices]
+                        retained = len(combined)
                         for command in additions:
                             if command.strip() not in combined:
                                 combined.append(command.strip())
@@ -1110,11 +1154,11 @@ class TaskStore:
                         if combined == old:
                             return self.detail(ident)
                         original = (run / 'state.json').read_bytes()
-                        changes = state.get('check_changes', [])
-                        if not isinstance(changes, list) or len(changes) >= 20:
-                            raise ValueError('验收检查追加记录无效或已达到上限')
-                        changes = list(changes)
-                        changes.append({'at': timestamp(), 'added': combined[len(old):]})
+                        change = {'at': timestamp(), 'added': combined[retained:]}
+                        if removed:
+                            change['removed'] = removed
+                        changes = [*state.get('check_changes', []), change]
+                        configurations(combined, changes)
                         state.update(checks=combined, check_changes=changes)
                         try:
                             write_json(run / 'state.json', state, durable=True)
@@ -1125,9 +1169,12 @@ class TaskStore:
                             temporary.replace(run / 'state.json')
                             raise
                     from auto_moniter.events import record
-                    record(run, 'acceptance_checks_added', added=combined[len(old):])
+                    if change['added']:
+                        record(run, 'acceptance_checks_added', added=change['added'])
+                    if removed:
+                        record(run, 'acceptance_checks_removed', removed=[item['command'] for item in removed])
                 except (OSError, ValueError) as exc:
-                    raise TaskError('追加验收检查失败：' + str(exc), 409) from exc
+                    raise TaskError('保存验收检查失败：' + str(exc), 409) from exc
                 return self.detail(ident)
             if action == 'roles':
                 from console.roles import prepare

@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from http.client import HTTPConnection
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -292,6 +293,37 @@ class ConsoleTests(unittest.TestCase):
             with self.assertRaises(TaskError):
                 self.store.action(task['id'],'checks',{'additional_checks':['python verify.py']})
         self.assertEqual((run/'state.json').read_bytes(),before)
+
+    def test_correct_checks_withdraws_only_unreferenced_additions_and_keeps_history(self):
+        fixed = 'git diff --check'
+        referenced = 'node --test tests/original.cjs'
+        mistaken = 'watcher 可调用chrome进行验收'
+        kept = 'node --test tests/layout.cjs'
+        replacement = 'node --test /tmp/aud-browser.cjs'
+        task = self.create(checks=[fixed])
+        run = Path(task['run_dir'])
+        run.mkdir()
+        (run/'requirement.md').write_text('saved original requirement')
+        saved = {'cwd': str(self.project), 'status': 'action_required', 'tree': 'candidate',
+                 'checks': [fixed], 'usage': {'elapsed_s': 42, 'agent_calls': 3},
+                 'function_tasks': {'current': {'check_ids': ['check:2']}}}
+        write_json(run/'state.json',saved)
+        with patch.object(self.store,'_resume_args',return_value=['run','--resume']):
+            self.store.action(task['id'],'checks',{'additional_checks':[referenced, mistaken, kept]})
+            view = self.store.detail(task['id'])
+            tokens = {index: token for token, index in view['removable_checks'].items()}
+            self.assertEqual(set(tokens), {2, 3})
+            for protected in (fixed, referenced):
+                with self.assertRaises(TaskError):
+                    self.store.action(task['id'],'checks',{'remove_checks':[sha256(protected.encode()).hexdigest()]})
+            updated = self.store.action(task['id'],'checks',{
+                'remove_checks':[tokens[2]], 'additional_checks':[replacement]})
+        self.assertEqual(updated['checks'], [fixed, referenced, kept, replacement])
+        state=json.loads((run/'state.json').read_text())
+        self.assertEqual({key:state[key] for key in ('tree', 'usage', 'function_tasks')},
+                         {key:saved[key] for key in ('tree', 'usage', 'function_tasks')})
+        self.assertEqual(state['check_changes'][-1]['removed'], [{'index': 2, 'command': mistaken}])
+        self.assertEqual(state['check_changes'][-1]['added'], [replacement])
 
     def test_logs_are_bounded_redacted_and_reject_paths_and_symlinks(self):
         task = self.create()

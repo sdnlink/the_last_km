@@ -169,15 +169,13 @@ class DispatchTests(unittest.TestCase):
             handoff = json.loads((run/'assignment-handoff-BACKEND.json').read_text())
             self.assertEqual(handoff['workspace'], str(backend))
             frontend_worker = FunctionWorker('worker', [result('FINAL', 'done', status='done')])
-            next_plan = json.loads(plan(frontend_final)['text'])
-            next_plan.update(function_plan=[frontend_final], modules=[])
-            reviewer = ScriptedProvider('reviewer', [{'verdict':{}, 'text':json.dumps(next_plan)},
-                result('FINAL', 'accepted', status='done')])
+            reviewer = ScriptedProvider('reviewer', [result('FINAL', 'accepted', status='done')])
             resumed = Supervisor(RunConfig('', frontend, frontend_worker, reviewer=reviewer,
                 workflow='review-first', resume=True, git_history='off', run_dir=run, retry_delay_s=0,
                 assignment_deliveries=['BACKEND=' + str(backend_run)]), log=lambda _:None).run()
             self.assertEqual(resumed.status, 'done', resumed.summary)
             self.assertEqual(len(frontend_worker.calls), 1)
+            self.assertEqual(len(reviewer.calls), 1)
             state = json.loads((run/'state.json').read_text())
             accepted = state['function_tasks']['accepted']
             self.assertEqual([item['task']['id'] for item in accepted], ['BACKEND', 'FINAL'])

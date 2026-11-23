@@ -4166,9 +4166,24 @@ class Supervisor:
             problems = self.modules.coverage(verdict, verdict)
             if problems and self.modules.items[task['module_id']]['status'] != 'accepted':
                 return '跨仓模块验收仍缺少前置模块。' + ' '.join(problems)
-        self.function_tasks = function_tasks.FunctionTasks(staged)
+        ledger = function_tasks.FunctionTasks(staged)
         if task['delivery_scope'] == 'module':
             self.modules.accept(verdict, verdict, index, workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
+        if self._complete_function_plan_ready():
+            waiting = function_plan.waiting(self.function_plan, ledger)
+            if waiting:
+                next_task = waiting[0]
+                try:
+                    ledger.assign(next_task, self.modules.items)
+                    self._validate_function_plan(ledger, self.modules.items, self.requirements_review)
+                    self._validate_new_assignment_tests(ledger.current)
+                except ValueError as exc:
+                    ledger.current = None
+                    self._planning_rejection = {'task_id': next_task['id'], 'reason': str(exc)[:2000]}
+                else:
+                    self._planning_rejection = None
+                    self._record_assignment(ledger.current)
+        self.function_tasks = ledger
         self._drop_worker_session = True
         self._event('external_assignment_accepted', task_id=task['id'], workspace=workspace,
                     commit=proof['commit'], checks_digest=proof['checks_digest'])

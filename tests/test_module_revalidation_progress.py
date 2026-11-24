@@ -9,7 +9,7 @@ from unittest.mock import patch
 from auto_moniter import candidate_checks, publication
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests import test_requirement_follow_up as follow_up
-from tests.test_review_first import BRIEF
+from tests.test_review_first import BRIEF, approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider, _verdict
 
 
@@ -57,7 +57,7 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
                  max_agent_calls=0, damage=None):
         self.worker = ScriptedProvider('worker', worker_scripts)
         self.reviewer = follow_up.CitingReviewer([
-            {'verdict': {}, 'text': json.dumps(BRIEF)}, *reviews,
+            {'verdict': {}, 'text': json.dumps(BRIEF)}, approve_requirement_coverage(), *reviews,
         ], self.root)
 
         def log(message):
@@ -146,7 +146,7 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual(self.published_rounds, [1, 3, 6, 9, 10])
         self.assertEqual(self.counter.read_text(), '2')
-        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (10, 6))
+        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (10, 7))
         self.assertTrue(all(call['read_only'] for call in self.reviewer.calls))
         self.assertEqual({index: reason for index, (_, reason) in self.pauses.items()},
                          {5: 'unchanged worker gaps', 8: 'unchanged worker gaps'})
@@ -186,10 +186,10 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
         self.assertEqual(follow_up._git(self.root, 'rev-list', '--count', f'{self.base}..HEAD'), '2')
 
     def test_only_existing_module_and_repeated_rejection_cannot_reset_progress_or_extend_budget(self):
-        self.assert_repeated_rejection(no_progress_limit=12, max_agent_calls=9, outcome='budget_exceeded')
+        self.assert_repeated_rejection(no_progress_limit=12, max_agent_calls=10, outcome='budget_exceeded')
 
     def test_repeated_rejection_reaches_the_verified_progress_limit(self):
-        self.assert_repeated_rejection(no_progress_limit=3, max_agent_calls=10, outcome='action_required')
+        self.assert_repeated_rejection(no_progress_limit=3, max_agent_calls=11, outcome='action_required')
 
     def assert_repeated_rejection(self, *, no_progress_limit, max_agent_calls, outcome):
         rejected = module_report('main', status='continue', gap='app.py: missing failure handling', cite=True)
@@ -207,9 +207,9 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
         self.assertEqual(report.status, outcome, report.summary)
         if outcome == 'action_required':
             self.assertIn('Verified progress limit reached', report.summary)
-        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (4, 5))
+        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (4, 6))
         state = self.state()
-        self.assertEqual((state['usage']['agent_calls'], state['no_progress_turns']), (9, 3))
+        self.assertEqual((state['usage']['agent_calls'], state['no_progress_turns']), (10, 3))
         self.assertEqual([self.retry_states[i]['no_progress_turns'] for i in (2, 3, 4)], [1, 2, 3])
         self.assertEqual(self.retry_states[4]['stall'], 1)
         self.assertEqual({index: reason for index, (_, reason) in self.pauses.items()},
@@ -252,7 +252,7 @@ class ModuleRevalidationProgressTests(unittest.TestCase):
         ], no_progress_limit=12, damage=damage)
 
         self.assertEqual(report.status, 'action_required', report.summary)
-        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (2, 3))
+        self.assertEqual((len(self.worker.calls), len(self.reviewer.calls)), (2, 4))
         self.assertEqual(self.published_rounds, [1])
         self.assertEqual([event['modules'] for event in self.events('module_accepted')], ["['seed']"])
         review = report.records[-1]

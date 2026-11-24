@@ -10,13 +10,16 @@ BRIEF={'status':'ready','summary':'Requirement clarified','refined_requirement':
        'acceptance_criteria':['valid input succeeds','invalid input rejected'],'constraints':['Preserve original scope'],
        'assumptions':['Use existing project conventions'],'blockers':[]}
 
+def approve_requirement_coverage():
+ return {'verdict':{},'text':json.dumps({'status':'pass','summary':'Source requirements covered','findings':[]})}
+
 class ReviewFirstTests(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
  def tearDown(self):self.temp.cleanup()
  def brief(self,value=None):return {'verdict':{},'text':json.dumps(value or BRIEF)}
- def run_loop(self,worker,reviewer,**kwargs):
-  return Supervisor(RunConfig('original functional request',self.root,worker,reviewer=reviewer,
+ def run_loop(self,worker,reviewer,*,requirement='original functional request',**kwargs):
+  return Supervisor(RunConfig(requirement,self.root,worker,reviewer=reviewer,
                workflow='review-first',run_dir=self.root/'run',git_history='off',retry_delay_s=0,max_rounds=3,**kwargs),log=lambda _:None).run()
  def test_requirement_review_precedes_implementation_and_rejection_returns_to_worker(self):
   worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'},
@@ -36,6 +39,78 @@ class ReviewFirstTests(unittest.TestCase):
     root=Path(d);worker=ScriptedProvider('worker',[]);reviewer=ScriptedProvider('reviewer',[self.brief(value),self.brief(value)] if value else [{'verdict':{},'text':'{}'}])
     result=Supervisor(RunConfig('task',root,worker,reviewer=reviewer,workflow='review-first',run_dir=root/'run',git_history='off'),log=lambda _:None).run()
     self.assertEqual(result.status,'action_required');self.assertEqual(worker.calls,[])
+ def test_complex_requirement_is_revised_and_independently_rechecked_before_dispatch(self):
+  requirement='逐页复查筛选，返回列表时恢复原筛选。'
+  gap='验收条件遗漏返回列表后恢复筛选的场景'
+  findings=[{'source_id':'original','quote':'返回列表时恢复原筛选','gap':gap}]
+  approved={'status':'pass','summary':'需求已覆盖','findings':[]}
+  revised={**BRIEF,'acceptance_criteria':[*BRIEF['acceptance_criteria'],'返回列表后恢复筛选']}
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  reviewer=ScriptedProvider('reviewer',[
+   self.brief(),self.brief({'status':'revise','summary':'发现漏项','findings':findings}),
+   self.brief(revised),self.brief(approved),{'verdict':_verdict('done',evidence=['app.py'])},
+  ])
+  result=self.run_loop(worker,reviewer,requirement=requirement,fresh_review=False)
+  self.assertEqual(result.status,'done',result.summary)
+  self.assertEqual(len(worker.calls),1)
+  self.assertIn('返回列表后恢复筛选',worker.calls[0]['prompt'])
+  self.assertIn(gap,reviewer.calls[2]['prompt'])
+  for call in (reviewer.calls[1],reviewer.calls[3]):
+   self.assertTrue(call['read_only'])
+   self.assertEqual(call['session_id'],'')
+   self.assertIn(requirement,call['prompt'])
+  receipts=sorted((self.root/'run').glob('*-requirement-coverage.json'))
+  self.assertEqual(len(receipts),2)
+  initial,final=[json.loads(p.read_text()) for p in receipts]
+  self.assertEqual((initial['status'],final['status']),('revise','pass'))
+  self.assertNotEqual(initial['plan_sha256'],final['plan_sha256'])
+
+ def test_invalid_coverage_review_cannot_approve_a_plan(self):
+  worker=ScriptedProvider('worker',[])
+  reviewer=ScriptedProvider('reviewer',[self.brief(),self.brief({
+   'status':'revise','summary':'引用无效','findings':[{
+    'source_id':'original','quote':'原文没有这个字句','gap':'缺少证据',
+   }],
+  })])
+  result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
+  self.assertEqual(result.status,'action_required',result.summary)
+  self.assertIn('用户原文',result.summary)
+  self.assertEqual(worker.calls,[])
+  self.assertFalse((self.root/'run'/'reviewed-requirement.json').exists())
+
+ def test_unresolved_coverage_gap_never_dispatches_the_plan(self):
+  rejected=self.brief({'status':'revise','summary':'仍有漏项','findings':[
+   {'source_id':'original','quote':'跨角色复查权限','gap':'缺少权限不足的验收场景'},
+  ]})
+  reviewer=ScriptedProvider('reviewer',[self.brief(),rejected,self.brief(),rejected])
+  worker=ScriptedProvider('worker',[])
+  result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
+  self.assertEqual(result.status,'action_required',result.summary)
+  self.assertIn('缺少权限不足的验收场景',result.summary)
+  self.assertEqual(len(reviewer.calls),4)
+  self.assertEqual(worker.calls,[])
+
+ def test_direction_arriving_during_coverage_review_forces_a_new_plan(self):
+  from auto_moniter.directions import Directions
+  run=self.root/'run'
+
+  class Reviewer(ScriptedProvider):
+   def _command(self,session,prompt_file,read_only):
+    if len(self.calls)==1:
+     Directions(run).append('新要求：返回列表时保留页码。')
+    return super()._command(session,prompt_file,read_only)
+
+  approved=self.brief({'status':'pass','summary':'需求已覆盖','findings':[]})
+  revised=self.brief({**BRIEF,'acceptance_criteria':['返回列表时保留页码']})
+  reviewer=Reviewer('reviewer',[
+   self.brief(),approved,revised,approved,{'verdict':_verdict('done',evidence=['app.py'])},
+  ])
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  result=self.run_loop(worker,reviewer,requirement='跨页面复查列表和详情。')
+  self.assertEqual(result.status,'done',result.summary)
+  self.assertIn('返回列表时保留页码',reviewer.calls[2]['prompt'])
+  self.assertIn('返回列表时保留页码',worker.calls[0]['prompt'])
+  self.assertEqual(len(list(run.glob('*-requirement-coverage.json'))),1)
  def test_resume_reuses_ready_requirement_and_rejects_workflow_change(self):
   worker=ScriptedProvider('worker',[{'verdict':_verdict('continue',['unfinished']),'touch':'app.py'}])
   reviewer=ScriptedProvider('reviewer',[self.brief(),{'verdict':_verdict('continue',['still unfinished'])}])

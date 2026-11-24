@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from auto_moniter.delivery_diagnosis import diagnose
 from auto_moniter.supervisor import RunConfig, Supervisor
-from tests.test_review_first import BRIEF
+from tests.test_review_first import BRIEF, approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider, _verdict
 
 
@@ -58,7 +58,6 @@ def result(ident, decision, *, status='continue', file='app.py', next_task=None,
 def plan(first):
     return {'verdict':{},'text':json.dumps({**BRIEF,'next_task':first,
             'modules':_verdict('continue')['modules']})}
-
 
 class DispatchTests(unittest.TestCase):
     def run_monitor(self, root, worker, reviewer, **kwargs):
@@ -161,7 +160,7 @@ class DispatchTests(unittest.TestCase):
             initial['function_plan'] = [foreign, milestone, frontend_final]
             frontend_worker = FunctionWorker('worker', [])
             stopped = self.run_monitor(frontend, frontend_worker, ScriptedProvider('reviewer', [
-                {'verdict':{}, 'text':json.dumps(initial)}]), full_function_plan=True,
+                {'verdict':{}, 'text':json.dumps(initial)}, approve_requirement_coverage()]), full_function_plan=True,
                 assignment_workspaces=['model.py=' + str(backend)])
             self.assertEqual(stopped.status, 'action_required', stopped.summary)
             self.assertFalse(frontend_worker.calls)
@@ -237,8 +236,11 @@ class DispatchTests(unittest.TestCase):
             paraphrased = {**foreign, 'verification': ['Paraphrased while replanning']}
             second = {**first, 'modules': [], 'next_task': local, 'function_plan': [local, paraphrased,
                 verification_task('FINAL', depends=['BACKEND', 'FRONTEND'])]}
-            reviewer = ScriptedProvider('reviewer', [{'verdict': {}, 'text': json.dumps(body)}
-                for body in (first, second)] + [result('FRONTEND', 'accepted', next_task=foreign)])
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(first)}, approve_requirement_coverage(),
+                {'verdict': {}, 'text': json.dumps(second)}, approve_requirement_coverage(),
+                result('FRONTEND', 'accepted', next_task=foreign),
+            ])
             worker = FunctionWorker('worker', [{**result('FRONTEND', 'done'), 'touch': 'app.py'}])
             marker = 'Repair the independent frontend behavior'
 
@@ -254,7 +256,7 @@ class DispatchTests(unittest.TestCase):
                     assignment_deliveries=['BACKEND=' + str(external)])
             self.assertEqual(report.status, 'action_required', report.summary)
             self.assertEqual(len(worker.calls), 1)
-            self.assertIn(marker, reviewer.calls[1]['prompt'])
+            self.assertIn(marker, reviewer.calls[2]['prompt'])
             self.assertNotIn(marker, worker.calls[0]['prompt'])
             self.assertIn('FRONTEND', worker.calls[0]['prompt'])
             state = json.loads((root/'run/state.json').read_text())
@@ -280,7 +282,9 @@ class DispatchTests(unittest.TestCase):
                 {**result('FRONTEND', 'done'), 'touch':'app.py'},
             ])
             reviewer = ScriptedProvider('reviewer', [
-                {'verdict':{}, 'text':json.dumps(initial)}, result('FRONTEND', 'accepted', next_task=foreign),
+                {'verdict':{}, 'text':json.dumps(initial)},
+                *([approve_requirement_coverage()] if explicit else []),
+                result('FRONTEND', 'accepted', next_task=foreign),
             ])
             bindings = ['model.py=' + str(backend)] if explicit else []
             report = self.run_monitor(root, worker, reviewer, max_rounds=3, full_function_plan=True,

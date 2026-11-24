@@ -41,8 +41,10 @@ def validate(config) -> None:
     if not isinstance(config.quality_policy, dict):
         raise ValueError('Quality policy must be an object')
     if config.quality_policy:
-        from auto_moniter.quality import policy
+        from auto_moniter.quality import policy, validate_check_inputs
         config.quality_policy = policy(config.quality_policy)
+        if not config.resume:
+            validate_check_inputs(config.quality_policy, config.checks)
         module_ids = {m['id'] for m in config.modules}
         scopes = config.quality_policy.get('integration_scopes', [])
         if scopes and not config.resume:

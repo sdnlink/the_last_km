@@ -64,7 +64,7 @@ from auto_moniter.publication import StagedChangesConflict, check_unborn_staging
 from auto_moniter.business_recovery import BusinessHeadChanged, validate_change
 from auto_moniter.project_workspace import ProjectInputsChanged
 from auto_moniter.locking import workspace_lease
-from auto_moniter.quality import Quality, test_asset
+from auto_moniter.quality import Quality, test_asset, validate_check_inputs
 from auto_moniter.metering import UsageMeter
 from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
@@ -684,6 +684,14 @@ class Supervisor:
                                 self._stop_event.wait(5)
                             continue
                         return self._finish('action_required', problem or outside, records, last_worker)
+                    missing = self._missing_dispatch_inputs(task)
+                    if missing:
+                        self._event('function_check_inputs_missing', task_id=task['id'], inputs=missing)
+                        if self._advance_local_assignment(records, missing_inputs=True):
+                            continue
+                        return self._finish('action_required',
+                            f'派单 {task["id"]} 的验收检查缺少工作区输入。'
+                            + '、'.join(missing) + '。补齐输入后可从原任务恢复。', records, last_worker)
                 self._check_budget(new_call=True)
                 outside_check = self._assignment_whitespace_preflight()
                 self._process_control()
@@ -3294,14 +3302,9 @@ class Supervisor:
         task = self.function_tasks.current if self.config.function_dispatch else None
         final = task['delivery_scope'] == 'requirement' if task else record.verdict.scope == 'requirement'
         ids = [task['module_id']] if task else record.verdict.module_ids
-        selected = None
-        if self._function_gate and task and task['delivery_scope'] == 'function':
-            catalog = self._function_check_catalog(task)
-            selected = [*[catalog[key] for key in task['check_ids']], *self._local_test_commands(task['test_files'])]
-            if task.get('kind') == 'verification':
-                selected.extend(self._acceptance_commands(final, ids))
         supplemental = record.watcher_result.get('supplemental_checks', [])
-        commands = self._acceptance_commands(final, ids, selected)
+        commands = (self._assignment_check_commands(task) if self._function_gate and task
+                    else self._acceptance_commands(final, ids))
         publication = getattr(self.git_history, 'candidate', {})
         return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
                 **({'publication_tree': publication['business_tree']} if publication.get('round') == record.index
@@ -3721,7 +3724,7 @@ class Supervisor:
     def _cached_function_report_valid(self, review):
         return not self.config.function_dispatch or not self._function_reviewer_report_errors(review)
 
-    def _acceptance_commands(self, final, module_ids, function_commands=None):
+    def _acceptance_commands(self, final, module_ids, function_commands=None, *, task=None):
         commands = list(self.config.checks) if final or self.config.workflow == 'review-first' else []
         ids = set(module_ids)
         if final:
@@ -3729,9 +3732,48 @@ class Supervisor:
         commands.extend(self.modules.checks_for(ids))
         if self._function_gate:
             commands.extend(self._local_test_commands(self._local_test_paths))
-            if self.function_tasks.current:
-                commands.extend(self._local_test_commands(self.function_tasks.current.get('test_files',[])))
+            task = task or self.function_tasks.current
+            if task:
+                commands.extend(self._local_test_commands(task.get('test_files', [])))
         return list(dict.fromkeys(commands if function_commands is None else function_commands))
+
+    def _assignment_check_commands(self, task):
+        final = task['delivery_scope'] == 'requirement'
+        modules = [task['module_id']]
+        if task['delivery_scope'] != 'function' or task.get('kind') == 'verification':
+            fixed = self._acceptance_commands(final, modules, task=task)
+        else:
+            fixed = []
+        if task['delivery_scope'] != 'function':
+            return fixed
+        catalog = self._function_check_catalog(task)
+        return list(dict.fromkeys([*(catalog[key] for key in task['check_ids']),
+                                    *self._local_test_commands(task['test_files']), *fixed]))
+
+    def _missing_dispatch_inputs(self, task):
+        bindings = self.config.quality_policy.get('check_inputs', {})
+        if not bindings:
+            return []
+        try:
+            commands = self._assignment_check_commands(task)
+        except KeyError:
+            # The existing dispatch validator reports unknown check IDs.
+            return []
+        missing = []
+        root = self.config.cwd
+        for key, paths in bindings.items():
+            index = int(key.split(':')[1]) - 1
+            if self.config.checks[index] not in commands:
+                continue
+            for name in paths:
+                try:
+                    path = (root / name).resolve()
+                    available = path.is_relative_to(root) and path.exists()
+                except (OSError, RuntimeError):
+                    available = False
+                if not available:
+                    missing.append(f'{key} {name}')
+        return missing
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
@@ -4074,6 +4116,12 @@ class Supervisor:
                 'the reviewer-authored test and can provide additional focused regressions within its scope. '
                 'Watcher rejects missing, empty or entirely skipped test suites and reruns accepted regressions at delivery. '
                 'Select behavioral checks relevant to the target; git diff --check alone is insufficient. '
+                'Operator preflights listed in quality_policy.operator_preflights stay outside next_task and function_plan. '
+                'Use their candidate-bound evidence as context; only Watcher registers formal acceptance. '
+                'For verification assignments and module or requirement delivery, Watcher also runs fixed checks. '
+                'Plan independent runnable work ahead of checks with unavailable configured check_inputs. '
+                'For page workflows touched by shared filters, tables or navigation, include the affected roles, '
+                'entry points and behaviors in final-candidate verification. Record each missing final receipt as pending. '
                 'Missing native tools are verification limitations, not a request for the person to invent check IDs. '
                 'Plan independent authorized increments first; stop for an unavailable indispensable gate only when no such work remains. '
                 'Do not substitute unrelated checks, claim unavailable tests passed or generate executable commands. '
@@ -4333,6 +4381,8 @@ class Supervisor:
 
     def _validate_function_plan(self, ledger, modules, brief, *, provisional=None):
         task = ledger.current
+        if task['id'] in self.config.quality_policy.get('operator_preflights', []):
+            raise ValueError(f'{task["id"]} 是管理端预检，不能作为正式派单。')
         original = (self.config.assignment_contracts or {}).get(task['id'])
         if original and not assignment_delivery.same_contract(original, task):
             raise ValueError(f'派单 {task["id"]} 与原任务提供的合同不一致。')
@@ -4499,7 +4549,7 @@ class Supervisor:
             return False
         return run_health(run)['health'] in {'active', 'recovering'}
 
-    def _advance_local_assignment(self, records):
+    def _advance_local_assignment(self, records, *, missing_inputs=False):
         if not self._complete_function_plan_ready() or self._unplanned_directions():
             return False
         blocked = self.function_tasks.current
@@ -4520,6 +4570,8 @@ class Supervisor:
                 staged.assign(task, self.modules.items)
                 self._validate_function_plan(staged, self.modules.items, self.requirements_review)
                 self._validate_new_assignment_tests(task)
+                if self._missing_dispatch_inputs(task):
+                    continue
                 plan = self._validate_complete_function_plan(
                     [task, blocked, *(item for item in waiting if item['id'] != task['id'])],
                     staged, self.modules.items, self.requirements_review)
@@ -4528,7 +4580,8 @@ class Supervisor:
             self.function_tasks, self.function_plan = staged, plan
             self._drop_worker_session = True
             self._record_assignment(task)
-            self._event('function_workspace_deferred', task_id=blocked['id'], next_task_id=task['id'])
+            event = 'function_check_inputs_deferred' if missing_inputs else 'function_workspace_deferred'
+            self._event(event, task_id=blocked['id'], next_task_id=task['id'])
             self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, snapshot))
             return True
         return False
@@ -4596,6 +4649,8 @@ class Supervisor:
                 problems.append(f'派单计划须保留原任务提供的合同 {ident}。')
         accepted_modules = {key for key, item in modules.items() if item['status'] == 'accepted'}
         for task in plan['tasks']:
+            if task['id'] in self.config.quality_policy.get('operator_preflights', []):
+                problems.append(f'{task["id"]} 是管理端预检，不能进入正式派单计划。')
             if task.get('kind') != 'verification':
                 accepted_modules.difference_update(impact.affected(function_tasks.writable_files(task)))
             if task['delivery_scope'] == 'module':
@@ -5503,6 +5558,7 @@ class Supervisor:
         if self.config.checks and self.config.checks != saved_checks:
             raise ValueError("acceptance checks cannot change on resume; use the saved checks or a new run")
         self.config.checks = saved_checks
+        validate_check_inputs(self.config.quality_policy, saved_checks)
         self._recovery_note = str(state.get("recovery_note") or "")
         usage = state.get("usage") or {}
         self.meter = UsageMeter(usage.get('provider_reported'))
@@ -5816,7 +5872,11 @@ class Supervisor:
                 *([self._function_test_scope(self.function_tasks.current)]
                   if self._function_gate and self.function_tasks.current else []),
                 *(['In module review reports, list exact source and test paths that the accepted behavior depends on. '
-                   'Use directory-wide patterns only when the entire directory is demonstrably part of that behavior.']
+                   'Use directory-wide patterns only when the entire directory is demonstrably part of that behavior. '
+                   'For page workflows, compare earlier checked inputs with this candidate. Require current-candidate evidence '
+                   'for affected roles, page entries and user operations, including shared filter and table behavior. '
+                   'Reuse earlier evidence only with a reason the operation is unaffected. List each missing required receipt '
+                   'as pending and do not approve the affected delivery.']
                   if task and task['delivery_scope'] != 'function' else []),
                 "You are an independent reviewer in an unattended development loop.",
                 "You are read-only. Do not edit files, commit, push, or change configuration.",

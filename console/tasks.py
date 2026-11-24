@@ -852,6 +852,11 @@ class TaskStore:
                 if len(checks)>20:
                     raise TaskError('最多选择或填写 20 条验收检查')
             scopes = execution.get('quality_policy', {}).get('integration_scopes', [])
+            from auto_moniter.quality import validate_check_inputs
+            try:
+                validate_check_inputs(execution.get('quality_policy', {}), checks)
+            except ValueError as exc:
+                raise TaskError(str(exc)) from exc
             if scopes:
                 if not function_dispatch:
                     raise TaskError('集成任务需要开启逐函数派单与执行验收')

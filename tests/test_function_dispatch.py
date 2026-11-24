@@ -67,6 +67,55 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_missing_input_for_implicit_fixed_check_defers_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            verify = {**verification_task('VERIFY'), 'delivery_scope': 'function', 'check_ids': ['check:2']}
+            build = {**task('BUILD', 'build.py'), 'check_ids': ['check:2']}
+            final = verification_task('FINAL', depends=['VERIFY', 'BUILD'])
+            initial = json.loads(plan(verify)['text'])
+            initial['function_plan'] = [verify, build, final]
+            worker = FunctionWorker('worker', [{**result('BUILD', 'done', file='build.py'), 'touch': 'build.py'}])
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(initial)}, result('BUILD', 'accepted', file='build.py'),
+            ])
+            report = self.run_monitor(root, worker, reviewer, full_function_plan=True,
+                checks=['test -f backend/input.json', CHECK],
+                quality_policy={'check_inputs': {'check:1': ['backend/input.json']}})
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('check:1 backend/input.json', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertEqual(state['function_tasks']['current']['id'], 'VERIFY')
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['BUILD'])
+            self.assertEqual(state['checks'][0], 'test -f backend/input.json')
+
+            (root/'backend').mkdir()
+            (root/'backend/input.json').write_text('{}\n')
+            worker = FunctionWorker('worker', [result('VERIFY', 'done')])
+            reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted')])
+            resumed = self.run_monitor(root, worker, reviewer, resume=True, full_function_plan=True,
+                                       checks=[], max_rounds=2)
+            self.assertEqual(resumed.status, 'max_rounds', resumed.summary)
+            self.assertEqual(len(worker.calls), 1)
+            record = next(row for row in resumed.records if row.role == 'worker' and row.index == 2)
+            receipt = record.watcher_result['candidate_checks']
+            self.assertTrue(receipt['passed'])
+            self.assertIn('test -f backend/input.json', receipt['context']['commands'])
+
+    def test_operator_preflight_cannot_enter_formal_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preflight = task('MANUAL-PREFLIGHT', 'app.py')
+            worker = FunctionWorker('worker', [])
+            reviewer = ScriptedProvider('reviewer', [plan(preflight), plan(preflight)])
+            report = self.run_monitor(root, worker, reviewer,
+                quality_policy={'operator_preflights': ['MANUAL-PREFLIGHT']})
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('MANUAL-PREFLIGHT 是管理端预检', report.summary)
+            self.assertFalse(worker.calls)
+
     def test_declaration_only_change_requires_primary_file_in_edit_scope(self):
         from auto_moniter.function_gate import baseline, scope_problems
         from auto_moniter.workspace import file_snapshot

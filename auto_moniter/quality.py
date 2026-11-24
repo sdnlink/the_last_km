@@ -16,7 +16,7 @@ DEFAULTS = {'protect_tests': True, 'verified_progress': True, 'no_progress_limit
 
 
 def policy(value):
-    if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {'integration_scopes'}):
+    if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {'integration_scopes', 'check_inputs', 'operator_preflights'}):
         raise ValueError('Unknown or invalid quality policy field')
     result = {**DEFAULTS, **value}
     if len(json.dumps(result, ensure_ascii=False).encode()) > 128 * 1024:
@@ -53,6 +53,25 @@ def policy(value):
         for path in req['evidence_paths']:
             relative_path(path)
         seen.add(req['id'])
+    if 'check_inputs' in result:
+        inputs = result['check_inputs']
+        if (not isinstance(inputs, dict) or len(inputs) > 100
+                or any(not isinstance(key, str) or not re.fullmatch(r'check:[1-9][0-9]{0,3}', key)
+                       for key in inputs)):
+            raise ValueError('检查输入须按固定检查编号配置，例如 check:1。')
+        for paths in inputs.values():
+            if not isinstance(paths, list) or not 1 <= len(paths) <= 30:
+                raise ValueError('每项检查输入须列出 1 至 30 个工作区内的路径。')
+            for path in paths:
+                relative_path(path)
+                if len(path) > 2000 or not Path(path).parts:
+                    raise ValueError('检查输入须指向工作区内的具体路径。')
+    if 'operator_preflights' in result:
+        from auto_moniter.function_tasks import identifier
+        names = result['operator_preflights']
+        if (not isinstance(names, list) or len(names) > 100
+                or not all(identifier(name) for name in names) or len(set(names)) != len(names)):
+            raise ValueError('管理端预检须使用互不重复的有效编号。')
     if 'integration_scopes' in result:
         from auto_moniter.function_tasks import identifier, validate_targets
         scopes = result['integration_scopes']
@@ -77,6 +96,12 @@ def policy(value):
 def relative_path(value):
     if not isinstance(value, str) or not value or '\0' in value or Path(value).is_absolute() or '..' in Path(value).parts:
         raise ValueError('Policy paths must stay inside the project')
+
+
+def validate_check_inputs(config, checks):
+    for key in config.get('check_inputs', {}):
+        if int(key.split(':')[1]) > len(checks):
+            raise ValueError(f'检查输入绑定引用了不存在的固定检查 {key}。')
 
 
 def test_asset(relative):

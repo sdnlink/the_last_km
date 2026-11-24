@@ -228,6 +228,7 @@ class Supervisor:
             config.referee = False
         self._referee_decision = None
         self._referee_replan = False
+        self._deferred_replan = ''
         self._execution_overrides = {key for key in _EXECUTION_DEFAULTS if getattr(config, key) is not None}
         for key, value in _EXECUTION_DEFAULTS.items():
             if getattr(config, key) is None:
@@ -531,10 +532,15 @@ class Supervisor:
         self._wait_project_dependencies()
         if self.project and not self._stop:
             self._sync_business_head(records)
+        if not self._stop:
+            problem = self._repair_reviewer_test(records, stall, previous_gap_key)
+            if problem:
+                return self._finish('stopped' if self._stop_requested else 'action_required',
+                                    problem, records, last_worker)
         if self.config.workflow=='review-first' and not self._stop and (
                 self.requirements_review.get('status')!='ready'
                 or self.requirements_review.get('cycle', 1) != len(self.requirement_cycles) + 1
-                or self._referee_replan):
+                or self._referee_replan and not self._deferred_replan_applies()):
             if not self._elaborate_requirement(records, next_function=bool(self._referee_replan or
                     self.config.function_dispatch and (self.function_tasks.current or self.function_tasks.accepted))):
                 return self._finish('stopped' if self._stop_requested else 'action_required',
@@ -553,7 +559,7 @@ class Supervisor:
             if problem:
                 return self._finish('action_required', problem, records, last_worker)
             self._check_budget()
-            if self._referee_replan:
+            if self._referee_replan and not self._deferred_replan_applies():
                 if not self._elaborate_requirement(records, next_function=True):
                     return self._finish('stopped' if self._stop_requested else 'action_required',
                         self.requirements_review.get('summary', 'Referee-directed replanning did not complete'), records, last_worker)
@@ -686,6 +692,10 @@ class Supervisor:
                 self._check_budget(new_call=True)
                 if outside_check:
                     return self._finish('action_required', outside_check, records, last_worker)
+                problem = self._repair_reviewer_test(records, stall, previous_gap_key)
+                if problem:
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                                        problem, records, last_worker)
                 dispatch_preflight = (self._function_gate
                                       and not self._assignment_worker_started(self.function_tasks.current))
                 if dispatch_preflight:
@@ -760,7 +770,7 @@ class Supervisor:
                         continue
                 elif self.config.function_dispatch:
                     worker_directions = self.directions.messages()
-                    if any(item['id'] not in self._dispatch_directions for item in worker_directions):
+                    if self._unplanned_directions(worker_directions):
                         continue
                     if dispatch_preflight:
                         self._event('function_dispatch_validated', task_id=self.function_tasks.current['id'],
@@ -2407,7 +2417,9 @@ class Supervisor:
                 # The run checkpoint is authoritative on resume. Save it before
                 # publishing the separate brief so a ready plan is not reviewed twice.
                 self._write_state(records, 'running', 0, '', before)
-            write_json(self.run_dir/'reviewed-requirement.json',safe(brief),durable=True)
+            approved_path = self.run_dir / 'reviewed-requirement.json'
+            if brief['status'] == 'ready' or not approved_path.exists():
+                write_json(approved_path, safe(brief), durable=True)
             self._event('requirements_reviewed',status=brief['status'])
             return brief['status']=='ready'
         except ValueError as exc:
@@ -3941,10 +3953,28 @@ class Supervisor:
             'note':'This is a check snapshot, not final delivery approval. Unexecuted behavior remains unverified.'}, durable=True)
 
     def _pending_directions(self) -> bool:
-        return any(item['id'] not in self._direction_ids['worker'] for item in self.directions.messages())
+        messages = self.directions.messages()
+        if self._deferred_replan_applies(messages):
+            messages = [item for item in messages if item['id'] in self._dispatch_directions]
+        return any(item['id'] not in self._direction_ids['worker'] for item in messages)
 
-    def _unplanned_directions(self) -> bool:
-        return any(item['id'] not in self._dispatch_directions for item in self.directions.messages())
+    def _unplanned_directions(self, messages=None) -> bool:
+        if messages is None:
+            messages = self.directions.messages()
+        return (not self._deferred_replan_applies(messages)
+                and any(item['id'] not in self._dispatch_directions for item in messages))
+
+    def _replan_binding(self, task, messages):
+        return referee.fingerprint({
+            'assignment': task, 'decision': self._referee_decision, 'checks': self.config.checks,
+            'requirements': self.directions.revision(self.config.requirement, messages)['sha256'],
+        })
+
+    def _deferred_replan_applies(self, messages=None):
+        task = self.function_tasks.current
+        return bool(self._referee_replan and self._deferred_replan and task
+                    and self._deferred_replan == self._replan_binding(
+                        task, self.directions.messages() if messages is None else messages))
 
     def _integration_scopes(self):
         return self.config.quality_policy.get('integration_scopes', []) if self._function_gate else []
@@ -4073,6 +4103,170 @@ class Supervisor:
             self.run_dir / 'function-baseline.json.gz', self.config.cwd, task, snapshot,
             missing_ok=not self._assignment_worker_started(task), historical_source=self._historical_function_source)
         return self._function_baseline
+
+    def _repair_reviewer_test(self, records, stall, gap_key):
+        """Approve the exact revised test without reopening the requirement plan."""
+        task = self.function_tasks.current
+        test = (task or {}).get('review_test')
+        defer = bool(self._referee_replan and task and task['delivery_scope'] == 'function'
+                     and (self._referee_decision or {}).get('action') == 'replan')
+        if (not self._function_gate or not test or not self._assignment_worker_started(task)
+                or self.config.max_rounds and self._next_round > self.config.max_rounds
+                or not defer and (self._referee_replan or self._unplanned_directions())
+                or self.project and (self.project.needs_review or self._project_replan)
+                or task['id'] in (self.config.assignment_contracts or {})
+                or self.config.full_function_plan and not self._complete_function_plan_ready()
+                or self._assignment_repository_conflict(task) or self._business_head_changed()):
+            return ''
+        root = self.config.cwd
+        path = root / test['path']
+        if path.resolve() != path or not path.is_file():
+            return ''
+        try:
+            with path.open('rb') as stream:
+                contents = stream.read(function_gate.MAX_SOURCE + 1)
+            if contents == test['source'].encode():
+                return ''
+            return self._review_revised_test(records, task, path, contents, stall, gap_key, defer=defer)
+        except (OSError, ValueError) as exc:
+            return '当前派单的验收测试未能恢复。' + redact(str(exc))
+
+    def _review_revised_test(self, records, task, path, contents, stall, gap_key, *, defer):
+        test = task['review_test']
+        if not contents or len(contents) > function_gate.MAX_SOURCE:
+            raise ValueError(f'{test["path"]} 的内容为空或超过复核限制。')
+        brief = self.requirements_review
+        if brief.get('status') != 'ready':
+            saved = self.run_dir / 'reviewed-requirement.json'
+            brief = requirement_context.read(saved) if saved.is_file() and not saved.is_symlink() else {}
+            if brief.get('status') != 'ready':
+                brief = self._recover_approved_function_brief(task)
+        if (brief.get('status') != 'ready' or brief.get('cycle', 1) != len(self.requirement_cycles) + 1
+                or brief.get('original_sha256') != requirements_review.requirement_hash(self.config.requirement)):
+            return ''
+        requirements_review.parse(json.dumps({key: brief.get(key) for key in requirements_review.SCHEMA['required']}))
+        baseline = self._prepare_function_baseline()
+        if str(path) in baseline['files']:
+            raise ValueError(f'{test["path"]} 是派单前已存在的测试。')
+        source = contents.decode('utf-8')
+        revised = {**task, 'review_test': {**test, 'source': source}}
+        revised = function_tasks.validate(revised, self.modules.items)
+        dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
+        dispatch.current = revised
+        self._validate_function_plan(dispatch, self.modules.items, brief)
+        tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        directions = self.directions.messages()
+        if not defer and [item['id'] for item in directions] != self._dispatch_directions:
+            return ''
+        self._process_control()
+        if self._stop:
+            return self._stop_reason
+        index = 2200000 + self._agent_calls
+        schema = self.schema_path
+        self.schema_path = self.run_dir / 'reviewer-test-repair.schema.json'
+        try:
+            properties = {'approved': {'type': 'boolean'}, 'summary': {'type': 'string'}}
+            if defer:
+                properties['finish_current_first'] = {'type': 'boolean'}
+            write_json(self.schema_path, {
+                'type': 'object', 'additionalProperties': False,
+                'properties': properties, 'required': list(properties),
+            })
+            prompt = ('只读复核当前派单的验收测试改动。比较锁定源码和当前文件内容，判断改动是否只修正测试准备或模拟逻辑，'
+                      '并保留全部原验收场景、有效断言和原预期。只有满足这些条件才填写 approved=true。'
+                      '报告具体判断依据。不得编辑文件、修改派单、调整需求计划或提前批准业务候选。\n'
+                      + json.dumps({'assignment': task, 'revised_test_source': source}, ensure_ascii=False))
+            if defer:
+                prompt += ('\n还须核对已保存的裁判决定和所有追加要求。仅当当前派单的目标、范围和验收条件'
+                           '均可按原批准方案继续，且裁判未要求先改变或替换当前派单时，填写 finish_current_first=true。'
+                           '后续派单的调整会在本项验收后处理。有冲突或无法确认时填写 false。\n'
+                           + json.dumps(self._referee_decision, ensure_ascii=False))
+            self._event('reviewer_test_repair_started', task_id=task['id'], round=index)
+            turn = self._invoke(self.config.reviewer, prompt, '', role='reviewer', index=index,
+                model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args,
+                read_only=True, direction_snapshot=directions)
+            self._active_reviewer_id = turn.session_id
+        finally:
+            self.schema_path = schema
+            self._close_requirement_reviewer()
+        self._process_control()
+        if self._stop:
+            return self._stop_reason
+        with self.directions.lock():
+            if (self.directions.messages() != directions or self._business_head_changed()
+                    or self.project and (self.project.needs_review or self._project_replan)
+                    or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree
+                    or path.resolve() != path or not path.is_file() or path.read_bytes() != contents):
+                raise ValueError('复核期间工作区或用户要求发生变化，请从原任务恢复。')
+            if turn.exit_code or turn.interruption or turn.timed_out:
+                raise ValueError(f'专项复核未完成，请查看 {turn.output_path.name}。')
+            try:
+                result = json.loads(turn.text)
+            except ValueError:
+                result = None
+            if (not isinstance(result, dict) or set(result) != properties.keys()
+                    or type(result['approved']) is not bool or not isinstance(result['summary'], str)
+                    or defer and type(result['finish_current_first']) is not bool
+                    or not result['summary'].strip() or len(result['summary']) > 2000):
+                raise ValueError(f'专项复核未返回有效结论，请查看 {turn.output_path.name}。')
+            if not result['approved']:
+                raise ValueError(f'{result["summary"]} 请查看 {turn.output_path.name}。')
+            self.function_tasks = dispatch
+            if self.function_plan:
+                self.function_plan = {**self.function_plan, 'tasks': [
+                    revised if item == task else item for item in self.function_plan['tasks']]}
+            self.requirements_review = brief
+            if defer and result['finish_current_first']:
+                self._deferred_replan = self._replan_binding(revised, directions)
+            else:
+                self._deferred_replan = ''
+            self._write_state(records, 'running', stall, gap_key, tree)
+            write_json(self.run_dir / 'reviewed-requirement.json', safe(brief), durable=True)
+            self._event('reviewer_test_repair_approved', task_id=task['id'], tree=tree,
+                        log=turn.output_path.name, summary=result['summary'])
+            if defer and not self._deferred_replan:
+                self._event('reviewer_test_replan_required', task_id=task['id'], log=turn.output_path.name)
+        return ''
+
+    def _recover_approved_function_brief(self, task):
+        """Recover older checkpoints whose approved brief was overwritten by a blocked replanning result."""
+        if not self._complete_function_plan_ready():
+            return {}
+        sources = {'original': self.config.requirement, 'acceptance': self.config.acceptance}
+        if self.active_queued_requirement:
+            sources['queued'] = self.active_queued_requirement['text']
+        sources.update({item['id']: item['text'] for item in self.directions.messages()
+                        if item['id'] in self._dispatch_directions})
+        source_digest = requirement_coverage.digest(sources)
+        checks_digest = requirement_context.checks_digest(self.config.checks)
+        digests = set()
+        for path in self.run_dir.glob('*-requirement-coverage.json'):
+            try:
+                value = requirement_context.read(path, limit=128 * 1024)
+            except (OSError, ValueError, RecursionError):
+                continue
+            if (isinstance(value, dict) and value.get('status') == 'pass'
+                    and value.get('sources_sha256') == source_digest and value.get('checks_sha256') == checks_digest
+                    and isinstance(value.get('plan_sha256'), str)):
+                digests.add(value['plan_sha256'])
+        if not digests:
+            return {}
+        for path in sorted(self.run_dir.glob('*-reviewer-text.md'), reverse=True):
+            try:
+                plan = requirement_context.parsed_response(requirement_context.read(path))
+                if plan['status'] != 'ready' or plan.get('next_task') != task:
+                    continue
+                normalized = {**plan, 'function_plan': self.function_plan['tasks']}
+                if requirement_coverage.digest(normalized) not in digests:
+                    continue
+                brief = {key: plan[key] for key in requirements_review.SCHEMA['required']}
+                requirements_review.parse(json.dumps(brief))
+            except (OSError, ValueError, RecursionError):
+                continue
+            self._event('approved_function_brief_recovered', task_id=task['id'], output_file=path.name)
+            return {**brief, 'cycle': self.function_plan['cycle'],
+                    'original_sha256': requirements_review.requirement_hash(self.config.requirement)}
+        return {}
 
     def _assignment_worker_started(self, task):
         # Verification can be reassigned under the same ID after an accepted
@@ -4684,6 +4878,8 @@ class Supervisor:
             raise ValueError('Function review is stale because the workspace changed')
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
         staged.accept(worker, review, index, tree)
+        if self._deferred_replan_applies():
+            return staged  # Apply the saved replan before selecting a successor.
         if expected == 'requirement' and review.next_task is not None:
             raise ValueError('Final delivery cannot include another implementation assignment')
         candidate = review.next_task
@@ -4742,7 +4938,10 @@ class Supervisor:
             self._local_test_paths = list(dict.fromkeys([*self._local_test_paths, *task.get('test_files', [])]))
         self.function_tasks = staged
         self._function_issue_ids = []
-        self._dispatch_directions = list(self._direction_ids['reviewer'])
+        if self._deferred_replan:
+            self._deferred_replan = ''
+        else:
+            self._dispatch_directions = list(self._direction_ids['reviewer'])
         review_record.watcher_result['function'] = {'status': 'accepted', 'task_id': task['id'],
                                                      'tree': review_record.tree}
         self._progress_reset |= self.quality.milestone('function:' + task['id'])
@@ -4979,6 +5178,7 @@ class Supervisor:
             "function_plan": self.function_plan,
             "full_function_plan": self.config.full_function_plan,
             "referee": self._referee_snapshot(),
+            "deferred_replan": self._deferred_replan,
             "dispatch_directions": self._dispatch_directions,
             "function_issue_ids": self._function_issue_ids,
             "planning_rejection": self._planning_rejection,
@@ -5175,6 +5375,10 @@ class Supervisor:
             raise ValueError('Referee replanning lacks a saved decision')
         self._referee_decision = decision
         self._referee_replan = bool(self.config.referee and saved_referee['replan'])
+        self._deferred_replan = state.get('deferred_replan', '')
+        if not isinstance(self._deferred_replan, str) or (self._deferred_replan
+                and not re.fullmatch(r'[a-f0-9]{64}', self._deferred_replan)):
+            raise ValueError('保存的派单恢复记录无效')
         self.active_queued_requirement = state.get('active_queued_requirement') or None
         self.requirement_queue.snapshot(self._requirement_queue_state())
         # read_text normalizes CRLF, which would invalidate legacy hashes made
@@ -6187,6 +6391,7 @@ class Supervisor:
         self._agent_calls += 1
         messages = self.directions.messages() if direction_snapshot is None else direction_snapshot
         revision = self.directions.revision(self.config.requirement, messages)
+        deferred_replan = self._deferred_replan_applies(messages)
         if re.search(r'[\u3400-\u9fff]', self.config.requirement):
             prompt += ('\n请用自然、准确的中文写用户可见的摘要和停止原因。先说明具体步骤和实际结果，再说明如何继续。'
                        '按实际情况写「测试数据」「测试准备」「模拟逻辑」或「断言」，避免使用「夹具」。'
@@ -6223,7 +6428,12 @@ class Supervisor:
                 prompt += 'When blocked, continue independent modules before repeating the same dependency. '
             prompt += 'Never modify existing protected test assertions.\n'
         if role != 'referee' and self._referee_decision:
-            prompt += ('\nReferee scheduling decision: follow these recovery instructions ahead of conflicting '
+            if deferred_replan:
+                prompt += ('\nWatcher has deferred the remaining plan changes until this assignment is accepted. '
+                           'Only implement or review the current assignment against its approved scope and checks. '
+                           'Do not apply pending amendments to this assignment or select its successor.\n')
+            else:
+                prompt += ('\nReferee scheduling decision: follow these recovery instructions ahead of conflicting '
                        'worker/reviewer recommendations. Preserve user amendments, original scope, fixed checks '
                        'and independent final acceptance. This is a scheduling decision, not delivery approval.\n'
                        + json.dumps(self._referee_decision, ensure_ascii=False))
@@ -6276,6 +6486,8 @@ class Supervisor:
                        'The watcher merges committed shared inputs; do not stage, commit, merge or alter Git refs. '
                        'If integration was refused, inspect the conflicting delta, adapt the scoped implementation, '
                        'and obtain review before the watcher retries integration.\n')
+        if deferred_replan and role == 'reviewer':
+            messages = [item for item in messages if item['id'] in self._dispatch_directions]
         if role=='worker' and self.config.function_dispatch:
             # Reviewer already received these instructions when defining the
             # assignment. Keep the worker input limited to the approved task.

@@ -353,8 +353,12 @@ class DispatchTests(unittest.TestCase):
                 'writes': {'app.py': 'def parse_input(): return 42\n', test_file: 'assert True\n'}}])
             reviewer = ScriptedProvider('reviewer', [
                 plan(assignment), result('F1', 'changes_required', gaps=['Original test was changed']),
+                {'verdict': {}, 'text': json.dumps({'approved': False, 'summary': '原断言已被放宽'})},
             ])
-            report = self.run_monitor(root, worker, reviewer, max_rounds=1, review_every=1)
+            report = self.run_monitor(root, worker, reviewer, max_rounds=2, review_every=1)
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertIn('原断言已被放宽', report.summary)
+            self.assertEqual(len(worker.calls), 1)
             candidate = next(record for record in report.records if record.role == 'worker')
             receipt = candidate.watcher_result['candidate_checks']
             self.assertFalse(receipt['passed'])
@@ -362,6 +366,119 @@ class DispatchTests(unittest.TestCase):
             self.assertIn(test_file, receipt['scope_gaps'][0])
             state = json.loads((root / 'run/state.json').read_text())
             self.assertFalse(state['function_tasks']['accepted'])
+            self.assertEqual(state['function_tasks']['current']['review_test'], assignment['review_test'])
+
+    def test_resumed_test_setup_repair_keeps_the_approved_plan_and_reruns_checks(self):
+        self.assert_resumed_test_setup_repair(pending_replan=False)
+
+    def test_pending_referee_replan_runs_after_the_current_test_repair_is_accepted(self):
+        self.assert_resumed_test_setup_repair(pending_replan=True)
+
+    def test_approved_test_repair_is_preserved_when_replanning_must_happen_first(self):
+        self.assert_resumed_test_setup_repair(pending_replan=True, scope_conflict=True)
+
+    def assert_resumed_test_setup_repair(self, *, pending_replan, scope_conflict=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_file = 'test_parse_input.py'
+            original = ('import unittest\nfrom app import parse_input\n'
+                        'class TestBehavior(unittest.TestCase):\n'
+                        '    def test_result(self): self.assertEqual(parse_input(), 42)\n')
+            revised = original.replace('import unittest', 'import unittest\n# Keep setup in this test module.')
+            assignment = {**task('F1', 'app.py'), 'test_files': [test_file],
+                          'review_test': {'path': test_file, 'source': original}}
+            initial = json.loads(plan(assignment)['text'])
+            final = verification_task('FINAL', depends=['F1'])
+            initial['function_plan'] = [assignment, final]
+            first_worker = FunctionWorker('worker', [{**result('F1', 'done'),
+                'writes': {'app.py': 'def parse_input(): return 0\n', test_file: revised}}])
+            initial_reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(initial)},
+                result('F1', 'changes_required', gaps=['Repair the implementation and verify the reviewed test setup.']),
+            ])
+            self.assertEqual(self.run_monitor(root, first_worker, initial_reviewer,
+                max_rounds=1, full_function_plan=True).status, 'max_rounds')
+            checkpoint = root/'run/state.json'
+            state = json.loads(checkpoint.read_text())
+            saved_plan = state['function_plan']
+            state['requirements_review'] = {'status': 'reviewing', 'cycle': 1}
+            approval = {'approved': True, 'summary': 'Same assertion retained'}
+            later_reviews = []
+            if pending_replan:
+                from auto_moniter import requirement_context, requirement_coverage
+                from auto_moniter.directions import Directions
+                run = root/'run'
+                approved_file = run/'reviewed-requirement.json'
+                saved_brief = json.loads(approved_file.read_text())
+                saved_brief.update(status='needs_input', blockers=['Other work awaits a prerequisite'])
+                approved_file.write_text(json.dumps(saved_brief))
+                (run/'2000001-requirement-coverage.json').write_text(json.dumps({
+                    'status': 'pass',
+                    'sources_sha256': requirement_coverage.digest({
+                        'original': 'ORIGINAL BACKLOG MUST NOT REACH WORKER', 'acceptance': '',
+                    }),
+                    'checks_sha256': requirement_context.checks_digest([CHECK]),
+                    'plan_sha256': requirement_coverage.digest({**initial, 'function_plan': saved_plan['tasks']}),
+                }))
+                state['status'] = 'action_required'
+                checkpoint.write_text(json.dumps(state))
+                state['referee'] = {'enabled': True, 'model': '', 'replan': True, 'decision': {
+                    'action': 'replan', 'summary': 'Review the verification plan',
+                    'instructions': 'Keep F1. Revise the remaining verification after F1.',
+                    'evidence': ['The final verification needs review'], 'id': 1, 'cycle': 1,
+                    'incident': 'planning', 'task_id': 'F1',
+                }}
+                approval['finish_current_first'] = not scope_conflict
+                Directions(root/'run').append('After F1, review the remaining verification.')
+                later_plan = {**BRIEF, 'modules': [], 'next_task': final, 'function_plan': [final]}
+                later_reviews.append({'verdict': {}, 'text': json.dumps(later_plan)})
+            checkpoint.write_text(json.dumps(state))
+            accepted = result('F1', 'accepted')
+            accepted['verdict']['issue_resolutions'] = [
+                {'id': 'AUD-1', 'summary': 'Behavior verified', 'evidence': ['check:002-check-02.log']},
+            ]
+            worker = FunctionWorker('worker', [{**result('F1', 'done'), 'touch': 'app.py'}])
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(approval)}, accepted, *later_reviews,
+            ])
+            if scope_conflict:
+                def stop_at_replan(supervisor, records, *, next_function=False):
+                    self.assertTrue(next_function)
+                    self.assertTrue(supervisor._referee_replan)
+                    supervisor.request_stop()
+                    return False
+
+                with patch.object(Supervisor, '_elaborate_requirement', stop_at_replan):
+                    report = self.run_monitor(root, worker, reviewer, resume=True,
+                                              max_rounds=2, full_function_plan=True)
+                self.assertEqual(report.status, 'stopped', report.summary)
+                self.assertTrue((state := json.loads(checkpoint.read_text()))['referee']['replan'])
+                self.assertFalse(state['deferred_replan'])
+                self.assertEqual(state['function_tasks']['current']['review_test']['source'], revised)
+                self.assertEqual(worker.calls, [])
+                return
+
+            report = self.run_monitor(root, worker, reviewer, resume=True,
+                                      max_rounds=2, full_function_plan=True)
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            self.assertIn('只读复核当前派单的验收测试改动', reviewer.calls[0]['prompt'])
+            self.assertTrue(reviewer.calls[0]['read_only'])
+            self.assertEqual(len(reviewer.calls), 3 if pending_replan else 2)
+            self.assertEqual((root/test_file).read_text(), revised)
+            state = json.loads(checkpoint.read_text())
+            if pending_replan:
+                self.assertIn('After F1, review the remaining verification.', reviewer.calls[0]['prompt'])
+                self.assertNotIn('Revise the remaining verification after F1.', worker.calls[0]['prompt'])
+                self.assertIn('The Referee has directed replanning', reviewer.calls[2]['prompt'])
+                self.assertEqual(state['function_tasks']['current']['id'], 'FINAL')
+                self.assertFalse(state['referee']['replan'])
+                self.assertFalse(state['deferred_replan'])
+                self.assertIn('approved_function_brief_recovered', (root/'run/events.jsonl').read_text())
+            else:
+                self.assertEqual(state['function_plan']['tasks'][1:], saved_plan['tasks'][1:])
+            self.assertEqual(state['function_tasks']['accepted'][0]['task']['review_test']['source'], revised)
+            worker_record = next(row for row in report.records if row.role == 'worker' and row.index == 2)
+            self.assertEqual(worker_record.watcher_result['candidate_checks']['checks'][1]['status'], 'passed')
 
     def test_unchanged_function_failure_does_not_repeat_independent_review(self):
         with tempfile.TemporaryDirectory() as directory:

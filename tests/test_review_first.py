@@ -67,16 +67,38 @@ class ReviewFirstTests(unittest.TestCase):
 
  def test_invalid_coverage_review_cannot_approve_a_plan(self):
   worker=ScriptedProvider('worker',[])
-  reviewer=ScriptedProvider('reviewer',[self.brief(),self.brief({
+  invalid=self.brief({
    'status':'revise','summary':'引用无效','findings':[{
     'source_id':'original','quote':'原文没有这个字句','gap':'缺少证据',
    }],
-  })])
+  })
+  reviewer=ScriptedProvider('reviewer',[self.brief(),invalid,invalid])
   result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
   self.assertEqual(result.status,'action_required',result.summary)
   self.assertIn('用户原文',result.summary)
+  self.assertIn('2000002-reviewer.log',result.summary)
   self.assertEqual(worker.calls,[])
   self.assertFalse((self.root/'run'/'reviewed-requirement.json').exists())
+
+ def test_invalid_coverage_source_is_rechecked_without_replanning(self):
+  invalid=self.brief({
+   'status':'revise','summary':'引用了裁判意见','findings':[
+    {'source_id':'referee.instructions','quote':'额外建议','gap':'超出本次检查范围'},
+   ],
+  })
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  reviewer=ScriptedProvider('reviewer',[
+   self.brief(),invalid,approve_requirement_coverage(),{'verdict':_verdict('done',evidence=['app.py'])},
+  ])
+  result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
+  self.assertEqual(result.status,'done',result.summary)
+  initial,correction=reviewer.calls[1:3]
+  self.assertTrue(correction['read_only'])
+  self.assertIn('修正以下缺项的引用',correction['prompt'])
+  self.assertIn('撤回该项',correction['prompt'])
+  for call in (initial,correction):
+   self.assertIn(BRIEF['refined_requirement'],call['prompt'])
+  self.assertEqual(len(list((self.root/'run').glob('*-requirement-coverage.json'))),1)
 
  def test_unresolved_coverage_gap_never_dispatches_the_plan(self):
   rejected=self.brief({'status':'revise','summary':'仍有漏项','findings':[

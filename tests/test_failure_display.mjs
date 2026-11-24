@@ -15,3 +15,8 @@ test('diagnostic fields are escaped and missing diagnostics render nothing',()=>
  assert.doesNotMatch(html,/<script>|<img>|<svg>|<iframe>|<button>/);
  assert.match(html,/&lt;script&gt;/);assert.equal(failureHTML({status:'running'}),'');
 });
+test('the saved failure log is clickable inside the original reason',()=>{
+ const html=failureHTML({id:'run-1',failure:{raw_summary:'请查看 2000009-reviewer.log 和 missing.log。',reason_files:['2000009-reviewer.log']}});
+ assert.match(html, /href="\/api\/tasks\/run-1\/logs\?file=2000009-reviewer\.log&amp;full=1"[^>]*>2000009-reviewer\.log<\/a>/);
+ assert.doesNotMatch(html,/href="[^"]*missing/);
+});

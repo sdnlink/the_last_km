@@ -4,6 +4,12 @@ import {paginate,pagedList} from './pagination.js';
 function fullLogURL(id,file){
  return `/api/tasks/${encodeURIComponent(id)}/logs?file=${encodeURIComponent(file)}&full=1`;
 }
+function failureReasonHTML(task){
+ const {raw_summary,reason_files}=task.failure;
+ const files=new Set(task.id?reason_files:[]);
+ return raw_summary.split(/([A-Za-z0-9_.-]+)/).map(text=>files.has(text)?
+   `<a href="${escape(fullLogURL(task.id,text))}" target="_blank" rel="noopener">${escape(text)}</a>`:escape(text)).join('');
+}
 function activityLabelHTML(t,item,label,options){
   const state=activityState(t,item,options);
   const text=item.status==='completed'?(state==='error'?i18n('执行失败'):options?.plan?i18n('已完成'):i18n('已结束')):
@@ -27,7 +33,7 @@ function failureHTML(task){
  const changes=f.workspace_changes;
  const changedHTML=changes?i18nHTML`<details open data-key="requirement-workspace-changes"><summary>审查期间变化文件 · ${escape(changes.count)} 项</summary><ul>${(changes.files||[]).map(item=>`<li>${escape(({added:i18n('新增'),removed:i18n('删除'),modified:i18n('修改')})[item.change]||item.change)} · ${escape(item.file)}</li>`).join('')}</ul>${changes.report_file?i18nHTML`<a href="${escape(fullLogURL(task.id,changes.report_file))}" target="_blank" rel="noopener">查看完整变化记录</a>`:''}</details>`:'';
  const reviewHTML=f.review_output_file?i18nHTML`<p><a href="${escape(fullLogURL(task.id,f.review_output_file))}" target="_blank" rel="noopener">查看 reviewer 完整原始结果（未获 watcher 接受）</a></p>`:'';
- return i18nHTML`<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · '+i18n`第 ${escape(f.round)} 轮`:''} · ${escape(f.role||'watcher')}${f.exit_code!=null?i18n(' · 监督进程退出码 ')+escape(f.exit_code):''}</p>${f.expected_commit?i18nHTML`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?i18nHTML`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?i18nHTML`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||i18n('运行记录'))}</summary><pre>${escape(f.raw_summary)}</pre></details>`:''}${f.recent_failures?.length?i18nHTML`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>i18nHTML`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
+ return i18nHTML`<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · '+i18n`第 ${escape(f.round)} 轮`:''} · ${escape(f.role||'watcher')}${f.exit_code!=null?i18n(' · 监督进程退出码 ')+escape(f.exit_code):''}</p>${f.expected_commit?i18nHTML`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?i18nHTML`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?i18nHTML`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||i18n('运行记录'))}</summary><pre>${failureReasonHTML(task)}</pre></details>`:''}${f.recent_failures?.length?i18nHTML`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>i18nHTML`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
 }
 function checkpointHTML(id, c) {
   const cp=c.git_checkpoint||c;

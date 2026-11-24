@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from auto_moniter.redaction import redact, safe
+from console.logs import PUBLIC_LOG_NAME
 
 TERMINAL = {'failed','invalid','action_required','budget_exceeded','recovery_failed',
             'interrupted','stopped','stalled','max_rounds','blocked','locked'}
@@ -197,6 +198,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     elif status=='stopped':
         title='任务已停止';reason='监督器收到停止请求或信号，当前成果尚未完整验收。'
         actions=['查看停止前记录；需要继续时使用原检查点和累计预算恢复。']
+    elif '需求覆盖缺项须附可核对的用户原文' in text:
+        code='requirement_coverage_source_invalid';title='需求覆盖复核的引用未通过校验'
+        role='reviewer';phase='需求覆盖复核'
+        reason='复核意见缺少可核对的需求出处，Watcher 已保留方案并停止派单。'
+        actions=['打开下方复核日志，核对缺项是否属于用户要求，再从原任务恢复。']
     elif status=='max_rounds':
         title='开发轮次上限已达到';reason='任务已达到 worker 轮次限制，最后一轮结论不代表整份需求已交付。'
         actions=['核对剩余审核问题和检查结果，在恢复窗口追加 Worker 执行轮次。']
@@ -209,7 +215,7 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     else:
         reason='监督器或执行器异常结束，具体原始原因见下方记录。'
         actions=['核对原始原因及对应日志，修复指定问题后再安排恢复或后续任务。']
-    if 'requirement reviewer' in text or (not records and isinstance(brief,dict) and brief.get('status') in {'reviewing','failed','needs_input'}):
+    if code != 'requirement_coverage_source_invalid' and ('requirement reviewer' in text or (not records and isinstance(brief,dict) and brief.get('status') in {'reviewing','failed','needs_input'})):
         role='reviewer';phase='需求完善'
     elif role in {'worker', 'reviewer', 'referee'} and phase == '监督器结束任务':
         phase = {'worker': 'worker 实现', 'reviewer': '独立审核', 'referee': '裁判诊断'}[role]
@@ -222,6 +228,10 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
                                 'reason':str(r.get('failure') or r.get('interruption'))[:1000],
                                 'exit_code':r.get('exit_code')}
                                for r in records if r.get('failure') or r.get('interruption')][-3:]}
+    if details:
+        names = dict.fromkeys(re.findall(r'[A-Za-z0-9_.-]+', result['raw_summary']))
+        result['reason_files'] = [name for name in names if PUBLIC_LOG_NAME.fullmatch(name)
+                                  and not (Path(run)/name).is_symlink() and (Path(run)/name).is_file()]
     if code=='requirement_workspace_changed':
         changes=brief.get('workspace_changes') if isinstance(brief,dict) else None
         if isinstance(changes,dict):

@@ -4,9 +4,17 @@ from array import array
 from collections import OrderedDict
 from pathlib import Path
 import os
+import re
 import threading
 
 from auto_moniter.redaction import redactor
+
+PUBLIC_LOG_NAME = re.compile(
+    r'console\.log|monitor\.log|events(?:\.previous)?\.jsonl|referee-decisions\.json'
+    r'|requirements-workspace-change\.json|assignment-preflight\.log'
+    r'|\d+-(?:(?:worker|referee|reviewer(?:-repair-\d+|-preflight)?)(?:-text)?\.(?:log|md)'
+    r'|check-\d+(?:-attempt-\d+)?\.log)'
+)
 
 
 class LogReader:

@@ -52,13 +52,31 @@ def prompt(sources, plan, *, modules, checks, accepted):
         '缺少可观察验收结果、跨页或跨角色交接的缺口。仅报告当前授权范围内的实质缺项。'
         '后发的明确要求优先，保留未受影响的约束和已验收事项。'
         '如果没有实际环境，将未完成的验证作为交付约束登记，仍可先执行独立工作。'
-        '每个缺项必须引用下方来源中的原文，填写 source_id、逐字引用 quote 和具体 gap。'
+        '每个缺项必须从下方「用户要求和受保护的验收来源」选择 source_id，填写逐字引用 quote 和具体 gap。'
+        '裁判建议、待复核方案和源码只用于理解背景，不能作为 source_id。'
         '存在实质缺项时返回 revise，否则返回 pass 和空 findings。'
         '你只能给出复核结论，不得编辑文件、改写方案、执行部署或自行派单。\n\n'
         '用户要求和受保护的验收来源：\n' + json.dumps(sources, ensure_ascii=False)
         + '\n\n待复核方案：\n' + json.dumps(plan, ensure_ascii=False)
         + '\n\n固定模块、已批准的检查和已验收派单：\n'
         + json.dumps({'modules': modules, 'checks': checks, 'accepted': accepted}, ensure_ascii=False)
+    )
+
+
+class InvalidSource(ValueError):
+    def __init__(self, findings):
+        super().__init__('需求覆盖缺项须附可核对的用户原文')
+        self.findings = findings
+
+
+def source_repair_prompt(error, previous):
+    return (
+        '\n\n请在同一份方案上只修正以下缺项的引用，并重新提交完整复核结论。'
+        '逐项判断所述问题是否属于用户授权范围。属于时填写上面列出的来源编号及逐字引用，'
+        '无法从用户要求或验收条件推导时撤回该项。保留其他已经有有效引用的意见。'
+        '不要修改方案、增加新缺项或把裁判建议当成用户要求。'
+        '\n引用错误的缺项序号（从 1 开始）：' + json.dumps(error.findings)
+        + '\n上次结论：\n' + previous
     )
 
 
@@ -76,10 +94,14 @@ def parse(text, sources):
     if (not isinstance(findings, list) or len(findings) > 24
             or (result['status'] == 'revise') != bool(findings)):
         raise ValueError('需求覆盖复核结论与缺项清单不一致')
-    for item in findings:
+    invalid_sources = []
+    for index, item in enumerate(findings, 1):
         if (not isinstance(item, dict) or set(item) != {'source_id', 'quote', 'gap'}
                 or any(not isinstance(value, str) or not value.strip() or len(value) > 1000
-                       for value in item.values())
-                or item['quote'] not in sources.get(item['source_id'], '')):
-            raise ValueError('需求覆盖缺项须附可核对的用户原文')
+                       for value in item.values())):
+            raise ValueError('需求覆盖缺项格式有误')
+        if item['quote'] not in sources.get(item['source_id'], ''):
+            invalid_sources.append(index)
+    if invalid_sources:
+        raise InvalidSource(invalid_sources)
     return result

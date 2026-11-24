@@ -13,6 +13,20 @@ from tests.test_supervisor import ScriptedProvider, _verdict
 
 
 class FailureDiagnosticTests(unittest.TestCase):
+    def test_coverage_failure_links_only_existing_public_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            name = '2000009-reviewer.log'
+            (run/name).write_text('review details')
+            (run/'2000010-reviewer.log').symlink_to(run/name)
+            (run/'private.log').write_text('private')
+            summary = ('需求覆盖缺项须附可核对的用户原文。请查看 '
+                       f'{name}、2000010-reviewer.log、private.log、2000011-reviewer.log。')
+            state = {'summary': summary, 'requirements_review': {'status': 'failed'}}
+            result = diagnose('action_required', state, {}, {'health': 'finished'}, {}, run)
+            self.assertEqual(result['phase'], '需求覆盖复核')
+            self.assertEqual(result['reason_files'], [name])
+
     def test_duplicate_worker_audit_closures_show_report_failure_not_application_failure(self):
         result = self.diagnostic('action_required',
             'Module report correction failed: invalid issue_resolutions: Issue resolution IDs must be unique monitor-assigned AUD numbers')

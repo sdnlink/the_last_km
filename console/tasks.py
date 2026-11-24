@@ -38,7 +38,7 @@ from console.recovery import resume_arguments
 from console.workflow import work_details
 from console.git_records import read_git_record, GitRecordError
 from console.conclusions import present_conclusion
-from console.logs import LogReader
+from console.logs import LogReader, PUBLIC_LOG_NAME
 from console.task_timing import estimate as estimate_task_time
 from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
@@ -1374,8 +1374,7 @@ class TaskStore:
         for path in run.glob('*'):
             if path.is_symlink() or not path.is_file():
                 continue
-            if path.name not in {'console.log', 'monitor.log', 'events.jsonl', 'events.previous.jsonl', 'referee-decisions.json',
-                                 'requirements-workspace-change.json', 'assignment-preflight.log'} and not re.fullmatch(r'\d+-(?:(worker|referee|reviewer(?:-repair-\d+|-preflight)?)(-text)?\.(log|md)|check-\d+(?:-attempt-\d+)?\.log)', path.name):
+            if not PUBLIC_LOG_NAME.fullmatch(path.name):
                 continue
             try:
                 files.append((path.stat().st_mtime, path.name))

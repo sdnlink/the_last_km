@@ -1956,31 +1956,38 @@ class Supervisor:
         return artifact + '-text.md'
 
     def _requirement_coverage_review(self, sources, plan, *, modules, checks, directions, tree):
-        self._close_requirement_reviewer()
-        index = 2000000 + self._agent_calls
+        prompt = requirement_coverage.prompt(
+            sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted)
         schema = self.schema_path
         self.schema_path = self.run_dir / 'requirement-coverage.schema.json'
         try:
             write_json(self.schema_path, requirement_coverage.SCHEMA)
-            self._event('requirement_coverage_started', round=index)
-            turn = self._invoke(self.config.reviewer, requirement_coverage.prompt(
-                sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted),
-                '', role='reviewer', index=index, model=self._reviewer_model(),
-                extra_args=self.config.reviewer_extra_args, read_only=True, direction_snapshot=directions)
-            self._active_reviewer_id = turn.session_id
+            for attempt in range(2):
+                self._close_requirement_reviewer()
+                index = 2000000 + self._agent_calls
+                self._event('requirement_coverage_started', round=index)
+                turn = self._invoke(self.config.reviewer, prompt, '', role='reviewer', index=index,
+                    model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args,
+                    read_only=True, direction_snapshot=directions)
+                self._active_reviewer_id = turn.session_id
+                self._process_control()
+                if (self._stop or self.directions.messages() != directions
+                        or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
+                    return None
+                if turn.exit_code or turn.timed_out or turn.interruption:
+                    detail = turn.interruption or turn.stderr or str(turn.exit_code)
+                    raise ValueError(f'需求覆盖复核未完成。请查看 {turn.output_path.name} 后恢复任务。{detail}')
+                try:
+                    result = requirement_coverage.parse(turn.text, sources)
+                except ValueError as exc:
+                    if attempt == 0 and isinstance(exc, requirement_coverage.InvalidSource):
+                        self._event('requirement_coverage_source_repair', round=index, log=turn.output_path.name)
+                        prompt += requirement_coverage.source_repair_prompt(exc, turn.text)
+                        continue
+                    raise ValueError(f'{exc}。请查看 {turn.output_path.name} 后恢复任务。') from exc
+                break
         finally:
             self.schema_path = schema
-        self._process_control()
-        if (self._stop or self.directions.messages() != directions
-                or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
-            return None
-        if turn.exit_code or turn.timed_out or turn.interruption:
-            detail = turn.interruption or turn.stderr or str(turn.exit_code)
-            raise ValueError(f'需求覆盖复核未完成。请查看 {turn.output_path.name} 后恢复任务。{detail}')
-        try:
-            result = requirement_coverage.parse(turn.text, sources)
-        except ValueError as exc:
-            raise ValueError(f'{exc}。请查看 {turn.output_path.name} 后恢复任务。') from exc
         receipt = f'{index:03d}-requirement-coverage.json'
         write_json(self.run_dir / receipt, safe({
             **result, 'plan_sha256': requirement_coverage.digest(plan),

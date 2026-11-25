@@ -2305,12 +2305,6 @@ class Supervisor:
         continuation = requirement_context.load(self.run_dir,self.config.cwd,self.config.requirement,
             len(self.requirement_cycles)+1,before_files,review_checks,directions,
             previous=previous_result,output_file=f'{review_index:03d}-reviewer-text.md')
-        saved_revision = self._saved_coverage_revision(continuation, checks=review_checks, tree=before,
-            sources=self._coverage_sources(directions), next_function=next_function)
-        if saved_revision:
-            continuation = {key: value for key, value in continuation.items() if key != 'previous_response'}
-            continuation['response_file'] = str(self.run_dir / 'requirement-review-context.json')
-            self._archive_requirement_review(review_index)
         if not continuation and next_function and previous_brief.get('status') == 'ready':
             continuation = {'previous_response':previous_brief,'source':'approved requirement brief',
                             'workspace_changed':True,'changed_files':None,
@@ -2340,6 +2334,18 @@ class Supervisor:
         try:
             if self._stop:
                 return False
+            latest_directions = self.directions.messages()
+            if latest_directions != directions:
+                directions = latest_directions
+                continuation = requirement_context.load(self.run_dir, self.config.cwd, self.config.requirement,
+                    len(self.requirement_cycles)+1, before_files, review_checks, directions,
+                    previous=previous_result, output_file=f'{review_index:03d}-reviewer-text.md') or continuation
+            saved_revision = self._saved_coverage_revision(continuation, checks=review_checks, tree=before,
+                sources=self._coverage_sources(directions), next_function=next_function)
+            if saved_revision:
+                continuation = {key: value for key, value in continuation.items() if key != 'previous_response'}
+                continuation['response_file'] = str(self.run_dir / 'requirement-review-context.json')
+                self._archive_requirement_review(review_index)
             prompt = requirements_review.prompt(
                 self.config, self.modules.export(), follow_up=follow_up or None,
                 continuation=continuation, queued_requirement=self.active_queued_requirement,

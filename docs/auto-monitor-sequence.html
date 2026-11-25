@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto Monitor 角色协作时序图</title>
+<style>
+* {box-sizing:border-box}
+body {margin:0;background:#f3f6f7;color:#20343b;font-family:system-ui,"Noto Sans CJK SC",sans-serif}
+main {max-width:1360px;margin:auto;padding:32px clamp(12px,2vw,24px)}
+h1 {font-size:clamp(25px,4vw,40px);margin:0 0 20px;line-height:1.2}
+h2 {font-size:22px;margin:0 0 8px}
+section+section {margin-top:32px}
+p {margin:8px 0;color:#516773;font-size:15px;line-height:1.6}
+.viewport {max-width:100%;overflow-x:auto;border:1px solid #bccbd0;border-radius:8px}
+svg {display:block;width:1280px;height:720px}
+.actor,.scope,.op,.message {text-anchor:middle}
+.actor {font-size:19px;font-weight:650;fill:#20343b}
+.scope,.guard {font-size:13px;fill:#516773}
+.start {text-anchor:start}
+.message {font-size:15px;font-weight:500}
+.op {font:11px ui-monospace,monospace;fill:#20343b}
+a {color:#08716d}
+</style>
+</head>
+<body><main>
+<h1>Auto Monitor 角色协作时序图</h1>
+<section aria-labelledby="main-heading">
+<h2 id="main-heading">从需求到交付</h2>
+<p>覆盖复核在复杂需求中按需启动。审核和固定检查都通过后，Watcher 登记验收并推进派单。当前需求交付后再领取下一条需求。</p>
+<div class="viewport" tabindex="0" aria-label="主流程时序图，可横向滚动"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="auto-monitor-sequence-main-title auto-monitor-sequence-main-desc" viewBox="0 0 1280 720" style="min-width:1280px">
+<title id="auto-monitor-sequence-main-title">从需求到交付</title><desc id="auto-monitor-sequence-main-desc">用户提交需求，Reviewer 规划和审核，Watcher 调度并决定验收，Worker 提交候选。</desc>
+<defs>
+<marker id="auto-monitor-sequence-main-message" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 4 L0 8 Z" fill="#516773"/></marker>
+<marker id="auto-monitor-sequence-main-success" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 4 L0 8 Z" fill="#08716d"/></marker>
+</defs>
+<rect width="1280" height="720" fill="#f3f6f7"/>
+<line x1="112" y1="88" x2="112" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="332" y1="88" x2="332" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="572" y1="88" x2="572" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="848" y1="88" x2="848" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="1144" y1="88" x2="1144" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<rect x="568" y="172" width="8" height="44" fill="#fff" stroke="#516773"/>
+<rect x="844" y="260" width="8" height="44" fill="#fff" stroke="#516773"/>
+<rect x="1140" y="348" width="8" height="44" fill="#fff" stroke="#516773"/>
+<rect x="568" y="484" width="8" height="44" fill="#fff" stroke="#516773"/>
+<line x1="117" y1="128" x2="327" y2="128" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="146.5" y="103" width="151" height="18" fill="#f3f6f7"/>
+<text x="222.0" y="118" class="message" fill="#516773">提交需求与验收条件</text>
+<line x1="337" y1="172" x2="567" y2="172" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="369.0" y="147" width="166" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="162" class="message" fill="#516773">交由 Reviewer 拆分</text>
+<line x1="567" y1="216" x2="337" y2="216" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="391.5" y="191" width="121" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="206" class="message" fill="#516773">返回方案与依赖</text>
+<line x1="337" y1="260" x2="843" y2="260" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="384.0" y="235" width="136" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="250" class="message" fill="#516773">按需核对需求覆盖</text>
+<line x1="843" y1="304" x2="337" y2="304" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="384.0" y="279" width="136" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="294" class="message" fill="#516773">返回覆盖复核意见</text>
+<line x1="337" y1="348" x2="1139" y2="348" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="677.5" y="323" width="121" height="18" fill="#f3f6f7"/>
+<text x="738.0" y="338" class="message" fill="#516773">核对依赖后派发</text>
+<line x1="1139" y1="392" x2="337" y2="392" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="662.5" y="367" width="151" height="18" fill="#f3f6f7"/>
+<text x="738.0" y="382" class="message" fill="#516773">提交候选与执行报告</text>
+<path d="M332 428 h32 q8 0 8 8 v8 q0 8 -8 8 h-32" fill="none" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="388.0" y="429" width="151" height="18" fill="#f3f6f7"/>
+<text x="463.5" y="444" class="message" fill="#516773">运行固定检查并存证</text>
+<line x1="337" y1="484" x2="567" y2="484" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="376.5" y="459" width="151" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="474" class="message" fill="#516773">送审候选与检查回执</text>
+<line x1="567" y1="528" x2="337" y2="528" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="384.0" y="503" width="136" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="518" class="message" fill="#516773">返回独立审核结论</text>
+<path d="M332 564 h32 q8 0 8 8 v8 q0 8 -8 8 h-32" fill="none" stroke="#08716d" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-main-success)"/>
+<rect x="388.0" y="565" width="151" height="18" fill="#f3f6f7"/>
+<text x="463.5" y="580" class="message" fill="#08716d">验收并按需本地提交</text>
+<line x1="327" y1="632" x2="117" y2="632" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-main-message)"/>
+<rect x="169.0" y="607" width="106" height="18" fill="#f3f6f7"/>
+<text x="222.0" y="622" class="message" fill="#516773">回报交付结果</text>
+<rect x="24" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="112" y="51" class="actor">用户</text><text x="112" y="73" class="scope">提交需求</text>
+<rect x="244" y="24" width="176" height="64" rx="6" fill="#edf7f6" stroke="#08716d"/>
+<text x="332" y="51" class="actor">Watcher</text><text x="332" y="73" class="scope">调度与验收</text>
+<rect x="484" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="572" y="51" class="actor">Reviewer</text><text x="572" y="73" class="scope">需求规划与审核</text>
+<rect x="760" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="848" y="51" class="actor">覆盖复核</text><text x="848" y="73" class="scope">复杂需求的独立会话</text>
+<rect x="1056" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="1144" y="51" class="actor">Worker</text><text x="1144" y="73" class="scope">执行当前派单</text>
+<line x1="28" y1="676" x2="1252" y2="676" stroke="#bccbd0"/>
+<line x1="32" y1="697" x2="68" y2="697" stroke="#516773" stroke-width="2"/><text x="80" y="702" class="scope start">请求或执行</text>
+<line x1="228" y1="697" x2="264" y2="697" stroke="#516773" stroke-width="2" stroke-dasharray="5 4"/><text x="276" y="702" class="scope start">返回结果</text>
+<line x1="424" y1="697" x2="460" y2="697" stroke="#08716d" stroke-width="2"/><text x="472" y="702" class="scope start">验收或续审</text>
+</svg></div>
+</section>
+<section aria-labelledby="recovery-heading">
+<h2 id="recovery-heading">现场补证与异常接续</h2>
+<p>Reviewer 核对现场证据。裁判在启用后负责恢复路径，Guardian 处理 Watcher 进程意外退出。</p>
+<div class="viewport" tabindex="0" aria-label="补证与接续时序图，可横向滚动"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="auto-monitor-sequence-recovery-title auto-monitor-sequence-recovery-desc" viewBox="0 0 1280 720" style="min-width:1280px">
+<title id="auto-monitor-sequence-recovery-title">现场补证与异常接续</title><desc id="auto-monitor-sequence-recovery-desc">现场执行器返回与候选绑定的结果，失败时由 Reviewer 或裁判决定补证路径，Guardian 处理进程退出。</desc>
+<defs>
+<marker id="auto-monitor-sequence-recovery-message" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 4 L0 8 Z" fill="#516773"/></marker>
+<marker id="auto-monitor-sequence-recovery-success" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 4 L0 8 Z" fill="#08716d"/></marker>
+</defs>
+<rect width="1280" height="720" fill="#f3f6f7"/>
+<rect x="28" y="198" width="900" height="382" rx="4" fill="none" stroke="#bccbd0"/>
+<line x1="36" y1="376" x2="920" y2="376" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<rect x="28" y="198" width="44" height="20" rx="2" fill="#f3f6f7" stroke="#bccbd0"/><text x="50" y="212" class="op">ALT</text>
+<text x="136" y="214" class="guard">[回执通过核对]</text>
+<text x="136" y="396" class="guard">[自动取证失败或缺少证据]</text>
+<line x1="112" y1="88" x2="112" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="332" y1="88" x2="332" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="572" y1="88" x2="572" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="848" y1="88" x2="848" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<line x1="1144" y1="88" x2="1144" y2="656" stroke="#bccbd0" stroke-dasharray="4 4"/>
+<rect x="108" y="172" width="8" height="80" fill="#fff" stroke="#516773"/>
+<rect x="568" y="296" width="8" height="44" fill="#fff" stroke="#516773"/>
+<rect x="844" y="516" width="8" height="44" fill="#fff" stroke="#516773"/>
+<line x1="567" y1="128" x2="337" y2="128" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="376.5" y="103" width="151" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="118" class="message" fill="#516773">登记缺证与验证用例</text>
+<line x1="327" y1="172" x2="117" y2="172" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="154.0" y="147" width="136" height="18" fill="#f3f6f7"/>
+<text x="222.0" y="162" class="message" fill="#516773">启动获准的执行器</text>
+<line x1="117" y1="252" x2="327" y2="252" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="154.0" y="227" width="136" height="18" fill="#f3f6f7"/>
+<text x="222.0" y="242" class="message" fill="#516773">回传候选绑定证据</text>
+<line x1="337" y1="296" x2="567" y2="296" stroke="#08716d" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-success)"/>
+<rect x="376.5" y="271" width="151" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="286" class="message" fill="#08716d">核对回执后续审原轮</text>
+<line x1="567" y1="340" x2="337" y2="340" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="399.0" y="315" width="106" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="330" class="message" fill="#516773">返回验收结论</text>
+<line x1="117" y1="424" x2="327" y2="424" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="154.0" y="399" width="136" height="18" fill="#f3f6f7"/>
+<text x="222.0" y="414" class="message" fill="#516773">记录实际失败原因</text>
+<line x1="337" y1="468" x2="567" y2="468" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="361.5" y="443" width="181" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="458" class="message" fill="#516773">默认交 Reviewer 复核</text>
+<line x1="337" y1="516" x2="843" y2="516" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="384.0" y="491" width="136" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="506" class="message" fill="#516773">或按配置交由裁判</text>
+<line x1="843" y1="560" x2="337" y2="560" stroke="#516773" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="376.5" y="535" width="151" height="18" fill="#f3f6f7"/>
+<text x="452.0" y="550" class="message" fill="#516773">返回重试或重排决定</text>
+<line x1="1139" y1="632" x2="337" y2="632" stroke="#516773" stroke-width="1.5" marker-end="url(#auto-monitor-sequence-recovery-message)"/>
+<rect x="647.5" y="607" width="181" height="18" fill="#f3f6f7"/>
+<text x="738.0" y="622" class="message" fill="#516773">意外退出时按检查点恢复</text>
+<rect x="24" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="112" y="51" class="actor">现场执行器</text><text x="112" y="73" class="scope">部署或现场浏览器验证</text>
+<rect x="244" y="24" width="176" height="64" rx="6" fill="#edf7f6" stroke="#08716d"/>
+<text x="332" y="51" class="actor">Watcher</text><text x="332" y="73" class="scope">交接与原轮次恢复</text>
+<rect x="484" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="572" y="51" class="actor">Reviewer</text><text x="572" y="73" class="scope">独立复核</text>
+<rect x="760" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="848" y="51" class="actor">裁判</text><text x="848" y="73" class="scope">恢复路径决策</text>
+<rect x="1056" y="24" width="176" height="64" rx="6" fill="#ffffff" stroke="#bccbd0"/>
+<text x="1144" y="51" class="actor">Guardian</text><text x="1144" y="73" class="scope">守护进程</text>
+<line x1="28" y1="676" x2="1252" y2="676" stroke="#bccbd0"/>
+<line x1="32" y1="697" x2="68" y2="697" stroke="#516773" stroke-width="2"/><text x="80" y="702" class="scope start">请求或执行</text>
+<line x1="228" y1="697" x2="264" y2="697" stroke="#516773" stroke-width="2" stroke-dasharray="5 4"/><text x="276" y="702" class="scope start">返回结果</text>
+<line x1="424" y1="697" x2="460" y2="697" stroke="#08716d" stroke-width="2"/><text x="472" y="702" class="scope start">验收或续审</text>
+</svg></div>
+</section>
+<p><a href="../WORKFLOW.md">执行流程与角色分工</a></p>
+</main></body></html>

@@ -13,6 +13,7 @@ from auto_moniter.storage import write_json
 
 FILE = 'field-handoff.json'
 EXECUTOR_RESULT = 'field-handoff-result.json'
+EXECUTOR_REQUEST = 'field-handoff-request.json'
 SHA256 = re.compile(r'[a-f0-9]{64}')
 FIELDS = {
     'observation': ('result',),
@@ -89,14 +90,71 @@ def matches(value, *, task, round_index, tree, checks_digest, directions):
 
 
 def citations(value):
-    return {f"handoff:{value['revision']}:{item['id']}" for item in value['items']}
+    return {row['citation'] for row in review_evidence(value)}
 
 
-def reopen(run, value, blockers):
+def review_evidence(value):
+    return [*value.get('retained_evidence', []),
+            *[{**item, 'citation': f"handoff:{value['revision']}:{item['id']}"}
+              for item in public(value)['items'] if item.get('receipt')]]
+
+
+def prepare_executor(run, parent_id, value, item):
+    """Persist the immutable request before launching its assigned executor."""
+    request = {
+        'parent_task': parent_id, 'binding': value['binding'], 'revision': value['revision'],
+        'item': {key: item[key] for key in (
+            'id', 'kind', 'title', 'evidence_needed', 'url', 'expected_target',
+            'expected_version', 'expected_manifest_sha256', 'artifact_manifest', 'browser_proof'
+        ) if key in item},
+    }
+    existing = Directions(run).read(EXECUTOR_REQUEST)
+    if existing and existing != request:
+        raise ValueError('执行任务已绑定另一份现场交接，请为新交接关联独立执行任务。')
+    if not existing:
+        run.mkdir(parents=True, mode=0o700, exist_ok=True)
+        write_json(run / EXECUTOR_REQUEST, request, durable=True)
+
+
+def executor_prompt(cwd, run):
+    import json
+
+    request = Directions(run).read(EXECUTOR_REQUEST)
+    if not request:
+        return ''
+    item = request['item']
+    path = cwd / EXECUTOR_RESULT
+    extra = ''
+    if item['kind'] == 'deployment':
+        from auto_moniter.deployment import evidence_path
+
+        path = evidence_path(cwd, run).with_name(EXECUTOR_RESULT)
+        extra = '由部署报告的 verify 阶段在 evidence 中引用此文件。proof 填实际 target 和资源路径到 SHA-256 的映射。'
+    elif item['kind'] == 'browser':
+        extra = ('保留原标签页，proof 填同源 url、带时区的 observed_at 和 session_reference。'
+                 '只有既有运行环境确实需要人工完成的操作才报告具体阻塞。')
+    envelope = {key: request[key] for key in ('binding', 'revision')}
+    envelope['id'] = item['id']
+    return ('\n\nWatcher 已登记的现场交接输入如下。在原任务的授权范围内执行，并独立核对现场证据。'
+            '恢复时优先核对已有结果，避免重复部署或覆盖原浏览器会话。'
+            f'执行任务须将真实回执写入 {path}。{extra}'
+            '保留以下 JSON 外层字段，在 receipt 填入所列字段。缺少证据时报告实际阻塞。\n'
+            + json.dumps({'request': item, 'result_binding': envelope, 'receipt_fields': FIELDS[item['kind']]},
+                         ensure_ascii=False))
+
+
+def reopen(run, value, blockers, requests=()):
     write_json(run / f"field-handoff-{value['revision']}.json", value, durable=True)
-    updated = {**{key: field for key, field in value.items() if key != 'resume'},
+    items = requests or [
+        {'kind': 'observation', 'title': reason[:300], 'owner': '现场执行器'}
+        for reason in blockers[:12]
+    ]
+    updated = {**{key: field for key, field in value.items()
+                  if key not in ('resume', 'dispatch', 'executor_status')},
                'revision': uuid.uuid4().hex, 'review_feedback': safe(blockers),
-               'items': [{key: field for key, field in row.items() if key != 'receipt'} for row in value['items']]}
+               'retained_evidence': review_evidence(value)[-12:],
+               'automatic': True,
+               'items': [dict(safe(row), id=str(index)) for index, row in enumerate(items, 1)]}
     write_json(run / FILE, updated, durable=True)
 
 
@@ -134,11 +192,14 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
                'owner': _text(item.get('owner'), 200)}
         if 'evidence_needed' in item:
             row['evidence_needed'] = _text(item['evidence_needed'], 300)
-        for key in ('url', 'expected_version', 'expected_manifest_sha256', 'expected_target', 'executor_task'):
+        for key in ('url', 'expected_version', 'expected_manifest_sha256', 'expected_target', 'executor_task',
+                    'artifact_manifest'):
             if key in item:
                 row[key] = _text(item[key], 500)
         if 'executor_task' in row and not re.fullmatch(r'[a-f0-9]{32}', row['executor_task']):
             raise ValueError('请指定有效的已登记执行任务编号。')
+        if 'artifact_manifest' in row and (kind != 'deployment' or not row['artifact_manifest'].startswith('/')):
+            raise ValueError('归档清单须使用部署交接的绝对路径。')
         if item.get('allow_manual') is True:
             row['allow_manual'] = True
         if 'url' in row:
@@ -162,6 +223,8 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
         rows.append(row)
     value = safe({'binding': checkpoint, 'items': rows, 'automatic': automatic, 'revision': uuid.uuid4().hex,
                   'independent_tasks': list(independent)})
+    if existing.get('binding') == checkpoint and existing.get('retained_evidence'):
+        value['retained_evidence'] = existing['retained_evidence']
     write_json(run / FILE, value, durable=True)
     return value
 

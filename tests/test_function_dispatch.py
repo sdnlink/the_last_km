@@ -101,6 +101,25 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('approved', reviewer.calls[2]['prompt'].lower())
             self.assertIn('构建记录', reviewer.calls[3]['prompt'])
 
+    def test_field_handoff_reopens_only_missing_evidence(self):
+        from auto_moniter import field_handoff
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            original = {'revision':'first', 'binding':{'round':6}, 'resume':{'status':'launched'},
+                        'items':[{'id':'1', 'kind':'deployment', 'receipt':{'version':'1.2.3'}}]}
+            field_handoff.reopen(run, original, ['缺少缓存读数'], [{
+                'kind':'observation', 'title':'读取原标签页缓存',
+                'owner':'浏览器执行器', 'evidence_needed':'保存实际版本读数',
+            }])
+            current = field_handoff.read(run)
+            self.assertFalse(field_handoff.ready(current))
+            self.assertEqual([item['kind'] for item in current['items']], ['observation'])
+            self.assertNotIn('resume', current)
+            self.assertEqual(current['retained_evidence'][0]['receipt']['version'], '1.2.3')
+            self.assertIn('handoff:first:1', field_handoff.citations(current))
+            self.assertTrue((run/'field-handoff-first.json').is_file())
+
     def test_missing_input_for_implicit_fixed_check_defers_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1223,15 +1242,18 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual([item['task']['id'] for item in resumed['function_tasks']['accepted']], ['VERIFY'])
 
     def test_waiting_handoff_dispatches_only_explicitly_linked_tasks_once(self):
+        from auto_moniter import field_handoff
         from console.tasks import TaskError, TaskStore
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             parent = {'id':'parent','cwd':str(root/'parent'),'run_dir':str(root)}
             children = {
-                'build': {'id':'build','cwd':str(root/'build'),'managed':True,'task_type':'deployment'},
+                'build': {'id':'build','cwd':str(root/'build'),'run_dir':str(root/'build-run'),
+                          'managed':True,'task_type':'deployment'},
                 'local': {'id':'local','cwd':str(root/'local'),'managed':True,'task_type':'code'},
-                'browser': {'id':'browser','cwd':str(root/'browser'),'managed':True,'task_type':'documentation'},
+                'browser': {'id':'browser','cwd':str(root/'browser'),'run_dir':str(root/'browser-run'),
+                            'managed':True,'task_type':'documentation'},
                 'overlap': {'id':'overlap','cwd':str(root/'parent'/'child'),'managed':True,'task_type':'code'},
             }
             store = object.__new__(TaskStore)
@@ -1239,17 +1261,27 @@ class DispatchTests(unittest.TestCase):
             store._view = lambda *args, **kwargs: {'status':'queued'}
             with self.assertRaisesRegex(TaskError, '独立工作区'):
                 store._validate_handoff_task(parent, 'overlap', deployment=False)
-            handoff = {'items':[{'kind':'deployment','executor_task':'build'},
-                                {'kind':'browser','executor_task':'browser'}],
+            handoff = {'binding':{'round':6},'revision':'current',
+                       'items':[{'id':'1','kind':'deployment','executor_task':'build',
+                                 'artifact_manifest':'/approved/inputs.json'},
+                                {'id':'2','kind':'browser','executor_task':'browser'}],
                        'independent_tasks':['local']}
             with patch.object(store, 'action') as start:
                 first = store._dispatch_handoff_tasks(parent, handoff)
                 store._dispatch_handoff_tasks(parent, first)
                 self.assertEqual([(call.args) for call in start.call_args_list],
                                  [('local','start'),('build','start')])
+                prompt = field_handoff.executor_prompt(root/'build',root/'build-run')
+                self.assertIn('/approved/inputs.json',prompt)
+                self.assertIn('verify',prompt)
+                self.assertFalse((root/'browser-run'/field_handoff.EXECUTOR_REQUEST).exists())
+                with self.assertRaisesRegex(ValueError, '已绑定另一份'):
+                    field_handoff.prepare_executor(root/'build-run','parent',
+                        {**handoff,'revision':'other'},handoff['items'][0])
                 first['items'][0]['receipt'] = {'version':'123'}
                 store._dispatch_handoff_tasks(parent, first)
                 self.assertEqual(start.call_args.args, ('browser','start'))
+                self.assertIn('session_reference',field_handoff.executor_prompt(root/'browser',root/'browser-run'))
 
     def test_field_result_collection_rejects_stale_executor_output_and_resumes_once(self):
         from auto_moniter import field_handoff

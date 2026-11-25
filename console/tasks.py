@@ -743,19 +743,21 @@ class TaskStore:
         if field_handoff.ready(value):
             return field_handoff.public(value)
         run = Path(meta['run_dir'])
-        targets = {ident: False for ident in value.get('independent_tasks', [])}
+        targets = dict.fromkeys(value.get('independent_tasks', []))
         deployment_pending = any(item['kind'] == 'deployment' and not item.get('receipt') for item in value['items'])
-        targets.update((item['executor_task'], item['kind'] == 'deployment') for item in value['items']
+        targets.update((item['executor_task'], item) for item in value['items']
                        if item.get('executor_task') and not item.get('receipt')
                        and not (item['kind'] == 'browser' and deployment_pending))
         dispatch = dict(value.get('dispatch') or {})
-        for ident, deployment in targets.items():
+        for ident, item in targets.items():
             if dispatch.get(ident, {}).get('status') == 'dispatched':
                 continue
             try:
-                child = self._validate_handoff_task(meta, ident, deployment=deployment)
+                child = self._validate_handoff_task(meta, ident, deployment=bool(item and item['kind'] == 'deployment'))
                 status = self._view(child, {}, include_details=False)['status']
                 if status == 'queued':
+                    if item:
+                        field_handoff.prepare_executor(Path(child['run_dir']), meta['id'], value, item)
                     self.action(ident, 'start')
                 elif status not in {'starting', 'running', 'paused', 'done'}:
                     raise TaskError('关联执行任务未就绪，请核对其状态。', 409)

@@ -3767,8 +3767,16 @@ class Supervisor:
         if not previous and self._reuse_module_checks(record, context):
             return
         prior_results = []
+        same_checked_candidate = None
         if previous:
             old = previous.get('context', {})
+            if (old == context and not previous.get('source_changed')
+                    and candidate_checks.valid(previous, self.run_dir, context)):
+                same_checked_candidate = previous
+                for command, result in zip(context['commands'], previous['checks']):
+                    if result.get('status') != 'passed' or result.get('command') != command:
+                        break
+                    prior_results.append(result)
             compare = lambda value: {key: item for key, item in value.items()
                                      if key not in {'commands', 'supplemental_checks'}}
             if (context.get('supplemental_checks') and previous.get('passed')
@@ -3815,6 +3823,9 @@ class Supervisor:
             receipt['failures'] = list(verdict.gaps[len(record.verdict.gaps):])
             receipt['digest'] = candidate_checks.digest({key:value for key,value in receipt.items() if key!='digest'})
             record.watcher_result['candidate_checks'] = receipt
+            if same_checked_candidate and self._verification_only():
+                from auto_moniter.field_handoff import rebind_after_check_retry
+                rebind_after_check_retry(self.run_dir, same_checked_candidate, receipt, context)
             if (local_keys and passed and candidate_checks.valid(receipt, self.run_dir, context)
                     and local_keys == self._local_check_keys(context)):
                 self._local_check_receipt = (receipt, local_keys)
@@ -6726,7 +6737,7 @@ class Supervisor:
             from auto_moniter.browser_execution import reviewer_cases
 
             try:
-                prompt += reviewer_cases(self.config.cwd)
+                prompt += reviewer_cases(self.config.cwd, self.function_tasks.current['id'], self.run_dir)
             except (OSError, ValueError, TypeError):
                 pass
         schema_path = self.schema_path

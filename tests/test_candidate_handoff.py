@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from auto_moniter import candidate_checks
+from auto_moniter import candidate_checks, field_handoff
+from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_assignment_ids import final_task
 from tests.test_function_dispatch import FunctionWorker, plan, result, task
@@ -36,6 +37,33 @@ class CheckedReviewer(ScriptedProvider):
 
 
 class CandidateHandoffTests(unittest.TestCase):
+    def test_passing_retry_preserves_submitted_field_receipts(self):
+        run = self.parent
+        task = {'id': 'LOGIN-ROUTES'}
+        context = {'task': task, 'round': 9, 'tree': 'a' * 64,
+                   'direction_ids': [], 'commands': ['fixed-check']}
+        log = run / '009-check-01.log'
+        log.write_text('fixed check passed', encoding='utf-8')
+        receipt = candidate_checks.create(run, context, {'checks': [
+            {'command': 'fixed-check', 'status': 'passed', 'log': log.name}
+        ]}, True)
+        previous = {'digest': 'previous', 'passed': False, 'context': context}
+        value = {'revision': 'same', 'binding': {
+            'task_sha256': candidate_checks.digest(task), 'round': 9,
+            'tree': context['tree'], 'checks_digest': previous['digest'], 'directions': [],
+        }, 'items': [{'kind': 'observation', 'receipt': {'result': 'observed'}},
+                     {'kind': 'browser'}], 'fallback': {'role': 'reviewer', 'status': 'launched'}}
+        write_json(run / field_handoff.FILE, value)
+        field_handoff.rebind_after_check_retry(run, previous, receipt, {**context, 'direction_ids': ['changed']})
+        self.assertEqual(field_handoff.read(run), value)
+        field_handoff.rebind_after_check_retry(run, previous, receipt, context)
+        updated = field_handoff.read(run)
+        self.assertEqual(updated['binding']['checks_digest'], receipt['digest'])
+        self.assertEqual(updated['submitted_checks_digest'], previous['digest'])
+        self.assertEqual(updated['items'], value['items'])
+        self.assertEqual(updated['revision'], value['revision'])
+        self.assertEqual(updated['fallback'], value['fallback'])
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.parent=Path(self.temp.name);self.root=self.parent/'project';self.root.mkdir()

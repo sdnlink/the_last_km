@@ -105,24 +105,32 @@ Watcher 用同一套命令选择规则核对派单和正式验收，包括只读
 
 管理端登记交接时可指定已有的 `executor_task`，并通过 `independent_tasks` 指定可先执行的已有任务。关联任务须使用独立工作区并通过原启动检查。浏览器任务在部署回执通过核对后启动。执行任务将同样包含 `id`、`binding`、`revision`、`receipt` 和适用 `proof` 的结果写入 `field-handoff-result.json`。部署任务将该文件放入自己的部署证据目录，并从验收阶段引用。浏览器及观察任务将该文件作为已验收的工作区文件交付。控制台核对执行任务和回执版本后自动收取。
 
-浏览器交接也可使用 `case_id` 自动调度。管理员在控制台数据目录创建权限为 `0600` 的 `browser-cases.json`。只需登记用例一次，Reviewer 在交接中引用用例编号，Watcher 按工作区和编号匹配已批准的命令。配置示例：
+浏览器交接可自动调度。管理员在控制台数据目录创建权限为 `0600` 的 `browser-cases.json`。对于已登记 `task_id` 和 `candidate_tree` 的用例，Watcher 核对工作区、派单和候选指纹。只有一个浏览器待办且只有一个用例匹配时，Watcher 自动绑定。多个待办由 Reviewer 在交接中分别引用 `case_id`；两种方式都校验实际部署版本。现有使用 `argv` 登记的用例仍可按编号调用。
+
+一套用例涵盖多个待办时，可同时登记 `handoff_revision`（现场交接版本）和 `handoff_ids`（待办编号列表）。Watcher 对这些待办共用一次浏览器执行。交接内容重新生成后，需要核对新待办并更新这两项绑定。
+
+以下配置让 Watcher 为 `LOGIN-ROUTES` 执行内置 TIG 路由用例。
 
 ```json
 {
   "cases": [
     {
       "workspace": "/absolute/project",
-      "case_id": "role-login",
+      "case_id": "login-routes",
+      "task_id": "LOGIN-ROUTES",
+      "candidate_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "url": "https://test.example/login",
       "expected_version": "1.4.4.123",
-      "argv": ["/absolute/venv/bin/python", "-m", "auto_moniter.tig_browser_case", "/private/tig-browser.json"],
+      "tig_settings": "/private/tig-browser.json",
       "fallback": "reviewer"
     }
   ]
 }
 ```
 
-TIG 提供 `role-login` 和 `login-audit`。为两项分别登记编号，安装项目的 `browser` 可选依赖，并为测试站点配置受信任证书。私有用例配置包含 `origin`、`chrome`、`device_timezone`、`accounts` 和 `captcha_command`。账号按 `member`、`system`、`security`、`audit` 配置，每项包含 `username` 和 `password`。验证码程序应为该测试环境获准的输入程序，命令使用绝对路径，接收角色参数和标准输入的 PNG，输出当前验证码。凭据留在私有配置中。用例失败时只记录脱敏原因。将 `fallback` 设为 `referee` 且任务启用裁判时，由裁判确定可执行的补证路径。其他情况由 Reviewer 核对现有证据。重启后继续收取已有执行结果。
+TIG 提供 `role-login`、`login-audit` 和 `login-routes`。路由用例核对封禁历史、两条白名单入口的点击和刷新，以及四个隔离会话下的直达结果。内置用例使用控制台的 Python 环境，需要安装项目的 `browser` 可选依赖。权限为 `0600` 的私有配置包含 `origin`、`chrome`、`accounts` 和 `captcha_command`，登录审计用例还需要 `device_timezone`。账号按 `member`、`system`、`security`、`audit` 配置，每项包含 `username` 和 `password`。验证码程序由测试环境授权，命令使用绝对路径，接收角色参数和标准输入的 PNG，输出当前验证码。修正私有配置后，Watcher 按新配置启动用例。用例失败时只记录脱敏原因。将 `fallback` 设为 `referee` 且任务启用裁判时，由裁判确定可执行的补证路径。其他情况由 Reviewer 核对现有证据。重启后继续收取已有结果，所有回执齐备后自动续审。
+
+当测试站点使用私有证书且测试 IP 不在证书域名中时，可在私有用例配置中登记 `tls_public_key_sha256`。它是已从可信部署来源核对的证书公钥 SHA-256 摘要，采用 Base64 编码。该设置随 TIG 用例的独立 Chrome 进程生效。
 
 逐函数、集成以及模块和最终验收均使用“Worker 候选 → Watcher 检查并保存结果 → Reviewer 独立审核 → Watcher 核对并登记验收 → 下一派单”。有可发布改动的函数派单通过后可单独形成业务提交。函数、模块和整个需求的完成状态分别记录。Reviewer 接收后，有效证据和固定检查可沿用到 Watcher 的发布校验。
 

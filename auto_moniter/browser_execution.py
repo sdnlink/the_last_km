@@ -1,6 +1,8 @@
 """Run explicitly configured browser cases and bind their reports to a handoff."""
 
 import fcntl
+import hashlib
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,22 @@ from auto_moniter.storage import write_json
 CONFIG = 'browser-cases.json'
 ENV = 'AUTO_MONITER_BROWSER_CASES'
 CASE_ID = re.compile(r'[a-z][a-z0-9-]{0,63}')
+TIG_CASES = {'role-login', 'login-audit', 'login-routes'}
+
+
+def matches(config, binding):
+    return (not config.get('task_id') or
+            (config['task_id'], config['candidate_tree']) == (binding.get('task_id'), binding.get('tree')))
+
+
+def matches_item(config, value, item):
+    if not matches(config, value.get('binding', {})):
+        return False
+    if not config.get('handoff_ids'):
+        return True
+    browser_ids = {row['id'] for row in value.get('items', []) if row['kind'] == 'browser'}
+    return (config['handoff_revision'] == value.get('revision') and item.get('id') in config['handoff_ids']
+            and set(config['handoff_ids']) <= browser_ids)
 
 
 def cases(path, workspace):
@@ -39,25 +57,84 @@ def cases(path, workspace):
         address = entry.get('url')
         url = urlsplit(address if isinstance(address, str) else '')
         version = entry.get('expected_version')
+        task_id, tree = entry.get('task_id'), entry.get('candidate_tree')
+        settings = entry.get('tig_settings')
+        handoff_ids, revision = entry.get('handoff_ids'), entry.get('handoff_revision')
+        scoped = task_id is not None or tree is not None
         if (not isinstance(case, str) or not CASE_ID.fullmatch(case) or case in result
-                or not isinstance(argv, list) or not argv
-                or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in argv)
-                or not Path(argv[0]).is_absolute()
                 or url.scheme not in ('https', 'http') or not url.hostname or url.username or url.password
-                or url.query or url.fragment or '\\' in address
+                or url.query or url.fragment or '\\' in address or any(ch.isspace() for ch in address)
                 or not isinstance(version, str) or not version.strip() or len(version) > 500
+                or scoped and (
+                    not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 100
+                    or not isinstance(tree, str) or not field_handoff.SHA256.fullmatch(tree))
                 or entry.get('fallback', 'reviewer') not in ('reviewer', 'referee')):
             raise ValueError('浏览器用例配置无效或编号重复。')
-        result[case] = {key: entry[key] for key in ('argv', 'url', 'expected_version')}
-        result[case]['fallback'] = entry.get('fallback', 'reviewer')
+        config = {'url': address, 'expected_version': version, 'fallback': entry.get('fallback', 'reviewer')}
+        if task_id is not None:
+            config.update(task_id=task_id, candidate_tree=tree)
+        if handoff_ids is not None or revision is not None:
+            if (not scoped or not isinstance(handoff_ids, list) or not 1 <= len(handoff_ids) <= 12
+                    or any(not isinstance(item, str) or not re.fullmatch(r'(?:[1-9]|1[0-2])', item)
+                           for item in handoff_ids)
+                    or len(set(handoff_ids)) != len(handoff_ids)
+                    or not isinstance(revision, str) or not re.fullmatch(r'[a-f0-9]{32}', revision)):
+                raise ValueError('批量浏览器用例须绑定交接版本和待办编号。')
+            config.update(handoff_ids=handoff_ids, handoff_revision=revision)
+        if settings is not None:
+            if (argv is not None or case not in TIG_CASES or not isinstance(settings, str)
+                    or '\0' in settings or not Path(settings).is_absolute()):
+                raise ValueError('TIG 用例须指定私有配置的绝对路径。')
+            config['argv'] = [sys.executable, '-m', 'auto_moniter.tig_browser_case', settings]
+            config.update(_tig_settings_revision(Path(settings)))
+        elif (not isinstance(argv, list) or not argv
+              or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in argv)
+              or not Path(argv[0]).is_absolute()):
+            raise ValueError('浏览器用例须登记可执行文件的绝对路径。')
+        else:
+            config['argv'] = argv
+        result[case] = config
     return result
 
 
-def reviewer_cases(workspace):
+def _tig_settings_revision(path):
+    from auto_moniter.tig_browser_case import CaptchaAdapterRequired, captcha_command
+
+    try:
+        info = path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            return {'execution_error': 'TIG 账号和验证码配置须保存在当前用户的私有文件中。'}
+        with path.open('rb') as handle:
+            content = handle.read(64 * 1024 + 1)
+        if len(content) > 64 * 1024:
+            return {'execution_error': 'TIG 私有配置文件超过 64 KiB。'}
+        settings = json.loads(content)
+        if not isinstance(settings, dict):
+            raise ValueError()
+        adapter = Path(captcha_command(settings)[0]).stat()
+        if find_spec('playwright') is None:
+            return {'execution_error': '无头浏览器依赖未安装。'}
+        return {'settings_digest': hashlib.sha256(content).hexdigest(),
+                'adapter_revision': [adapter.st_dev, adapter.st_ino, adapter.st_mtime_ns, adapter.st_size]}
+    except CaptchaAdapterRequired:
+        return {'execution_error': '测试环境需要获准的验证码输入程序，请核对配置和执行权限。'}
+    except FileNotFoundError:
+        return {'execution_error': '找不到已登记的 TIG 私有配置文件。'}
+    except ValueError:
+        return {'execution_error': 'TIG 私有配置须使用 JSON 对象。'}
+
+
+def reviewer_cases(workspace, task_id, run):
     name = os.environ.get(ENV)
     if not name:
         return ''
-    available = cases(Path(name), workspace)
+    registered = cases(Path(name), workspace)
+    binding = {'task_id': task_id}
+    if any(config.get('task_id') == task_id for config in registered.values()):
+        from auto_moniter.workspace import workspace_fingerprint
+
+        binding['tree'] = workspace_fingerprint(workspace, ignore_dir=run)
+    available = [case for case, config in registered.items() if not config.get('handoff_ids') and matches(config, binding)]
     if not available:
         return ''
     return ('\n现场浏览器交接可在 field_handoffs 的 case_id 标注以下已配置用例。'
@@ -68,8 +145,13 @@ def reviewer_cases(workspace):
 
 def poll(run, value, item, config):
     """One detached execution per case, binding and config; read durable results on restart."""
-    request = {'binding': value['binding'], 'revision': value['revision'], 'id': item['id'],
+    if config.get('execution_error'):
+        return {'status': 'failed', 'reason': config['execution_error']}
+    item_ids = config.get('handoff_ids') or [item['id']]
+    request = {'binding': value['binding'], 'revision': value['revision'], 'id': item_ids[0],
                'case_id': item['case_id'], 'url': config['url'], 'expected_version': config['expected_version']}
+    if config.get('handoff_ids'):
+        request['item_ids'] = item_ids
     key = candidate_checks.digest([request, config])
     job = run / 'browser-executions' / key
     job.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -109,7 +191,10 @@ def run_case(job):
                        job, timeout_s=240, detect_input_requests=False, max_output_bytes=64 * 1024)
     reason = {3: '测试环境需要验证码输入程序，当前未配置。',
               4: '无头浏览器依赖未安装。',
-              5: '浏览器账号配置须保存在当前用户的私有文件中。'}.get(turn.exit_code)
+              5: '浏览器账号配置须保存在当前用户的私有文件中。',
+              6: 'Chrome 无法验证测试站点的证书，请核对站点和已登记的证书公钥指纹。'}.get(turn.exit_code)
+    if turn.timed_out:
+        reason = '无头浏览器用例超时，已回收执行进程。'
     result = {'status': 'failed', 'reason': reason or f'浏览器用例未完成（退出码 {turn.exit_code}）。'}
     if not (turn.exit_code or turn.timed_out or turn.interruption):
         try:

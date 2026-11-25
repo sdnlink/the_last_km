@@ -99,6 +99,23 @@ def matches_checkpoint(value, *, task, round_index, tree, checks_digest, directi
             and checkpoint.get('directions') == directions)
 
 
+def rebind_after_check_retry(run, previous, current, context):
+    """Keep submitted field evidence when only a failed check's result changes."""
+    if (not previous or previous.get('passed') or previous.get('context') != context
+            or previous.get('source_changed') or current.get('source_changed') or not current.get('complete')
+            or not candidate_checks.valid(current, run, context)):
+        return
+    value = read(run)
+    if not matches_checkpoint(
+            value, task=context['task'], round_index=context['round'], tree=context['tree'],
+            checks_digest=previous['digest'], directions=context['direction_ids']):
+        return
+    binding = value['binding']
+    write_json(run / FILE, {**value,
+               'submitted_checks_digest': value.get('submitted_checks_digest', binding['checks_digest']),
+               'binding': {**binding, 'checks_digest': current['digest']}}, durable=True)
+
+
 def citations(value):
     return {row['citation'] for row in review_evidence(value)}
 
@@ -264,6 +281,21 @@ def claim(run, state, data):
                      'key_sha256': hashlib.sha256(key.encode()).hexdigest()}
     write_json(run / FILE, value, durable=True)
     return {**public(value), 'claim_key': key}
+
+
+def bind_browser_case(run, state, data, config):
+    value, item = _select(run, state, data)
+    case_id = data['case_id']
+    if (item['kind'] != 'browser' or item.get('receipt') or item.get('claim')
+            or item.get('executor_task') or item.get('case_id', case_id) != case_id):
+        raise ValueError('只可为尚未认领或提交的浏览器待办绑定用例。')
+    if (item.get('url', config['url']) != config['url']
+            or item.get('expected_version', config['expected_version']) != config['expected_version']):
+        raise ValueError('浏览器用例的现场入口或版本与原待办不一致。')
+    item.update(case_id=case_id, url=config['url'], expected_version=config['expected_version'],
+                browser_proof=True)
+    write_json(run / FILE, value, durable=True)
+    return value
 
 
 def release(run, state, data):

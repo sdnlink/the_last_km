@@ -721,6 +721,15 @@ class TaskStore:
                     return field_handoff.claim(run, state, data)
                 if data.get('action') == 'release':
                     return field_handoff.release(run, state, data)
+                if data.get('action') == 'bind_browser_case':
+                    case_id = data.get('case_id')
+                    cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
+                    if not isinstance(case_id, str) or case_id not in cases:
+                        raise ValueError('当前工作区尚未登记此浏览器用例。')
+                    handoff = field_handoff.read(run)
+                    if not browser_execution.matches_item(cases[case_id], handoff, data):
+                        raise ValueError('浏览器用例与当前派单、候选或交接待办不一致。')
+                    return field_handoff.public(field_handoff.bind_browser_case(run, state, data, cases[case_id]))
                 current_handoff = field_handoff.read(run)
                 item = next((row for row in current_handoff.get('items', []) if row['id'] == data.get('id')), {})
                 if item.get('executor_task'):
@@ -806,6 +815,8 @@ class TaskStore:
     def _collect_field_results(self, meta, run, state, value):
         errors = {}
         failed_cases = {}
+        browser_items = [item for item in value['items'] if item['kind'] == 'browser']
+        cases = None
         for item in value['items']:
             if item.get('receipt'):
                 continue
@@ -816,17 +827,48 @@ class TaskStore:
                 continue
             try:
                 if not ident:
+                    if item['kind'] != 'browser':
+                        errors[item['id']] = '尚未关联获准的执行任务。'
+                        continue
+                    if item.get('claim'):
+                        errors[item['id']] = '等待认领人提交现场回执。'
+                        continue
+                    if cases is None:
+                        cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
                     case_id = item.get('case_id')
+                    binding = value['binding']
+                    if not case_id:
+                        matching = [key for key, config in cases.items()
+                                    if config.get('task_id') and (config.get('handoff_ids') or len(browser_items) == 1)
+                                    and browser_execution.matches_item(config, value, item)]
+                        if len(matching) == 1:
+                            case_id = matching[0]
                     if not case_id:
                         errors[item['id']] = '尚未关联获准的执行任务。'
-                        if item['kind'] == 'browser' and not item.get('allow_manual'):
+                        if not item.get('allow_manual'):
                             failed_cases[item['id']] = {'case_id':'', 'reason':errors[item['id']], 'role':'reviewer'}
                         continue
-                    config = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd'])).get(case_id)
-                    result = (browser_execution.poll(run, value, item, config) if config else
-                              {'status':'failed', 'reason':'当前工作区未配置所请求的浏览器用例。'})
+                    config = cases.get(case_id)
+                    if not config:
+                        result = {'status':'failed', 'reason':'当前工作区未配置所请求的浏览器用例。'}
+                    elif not browser_execution.matches_item(config, value, item):
+                        result = {'status':'failed', 'reason':'浏览器用例与当前派单、候选或交接待办不一致。'}
+                    elif (item.get('url', config['url']) != config['url']
+                          or item.get('expected_version', config['expected_version']) != config['expected_version']):
+                        result = {'status':'failed', 'reason':'浏览器用例的现场入口或版本与原待办不一致。'}
+                    else:
+                        if config.get('task_id') and (not item.get('case_id') or not item.get('browser_proof')):
+                            value = field_handoff.bind_browser_case(run, state, {
+                                'id': item['id'], 'case_id': case_id, 'binding': binding,
+                                'revision': value['revision'],
+                            }, config)
+                            item = next(row for row in value['items'] if row['id'] == item['id'])
+                        result = browser_execution.poll(run, value, item, config)
                     if result['status'] == 'ready':
-                        value = field_handoff.submit(run, state, result['submission'], executor='browser:'+case_id)
+                        submission = result['submission']
+                        if config.get('handoff_ids'):
+                            submission = {**submission, 'id': item['id']}
+                        value = field_handoff.submit(run, state, submission, executor='browser:'+case_id)
                     else:
                         errors[item['id']] = result.get('reason', '已启动无头浏览器，等待执行结果。')
                         if result['status'] == 'failed':
@@ -845,8 +887,9 @@ class TaskStore:
                 value = field_handoff.submit(run, state, result, executor=ident)
             except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
                 errors[item['id']] = redact(str(exc))
-                if not ident and item.get('case_id'):
-                    failed_cases[item['id']] = {'case_id':item['case_id'], 'reason':errors[item['id']], 'role':'reviewer'}
+                if not ident and item['kind'] == 'browser' and not item.get('allow_manual'):
+                    failed_cases[item['id']] = {'case_id':item.get('case_id', ''),
+                                               'reason':errors[item['id']], 'role':'reviewer'}
         if errors != value.get('executor_status', {}) or failed_cases != value.get('failed_cases', {}):
             value = {**value, 'executor_status': errors, 'failed_cases': failed_cases}
             write_json(run / field_handoff.FILE, value, durable=True)

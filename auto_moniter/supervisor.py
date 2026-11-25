@@ -664,6 +664,18 @@ class Supervisor:
                         break
                 task = self.function_tasks.current
                 if self._function_gate and task:
+                    limited = self.requirements_review.get('limited_dispatch')
+                    if limited and (requirement_coverage.digest(task) != limited['task_sha256']
+                            or limited['checks'] != requirement_context.checks_digest(self.config.checks)
+                            or self._assignment_repository_conflict(task)
+                            or not self._assignment_worker_started(task)
+                            and limited['tree'] != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)):
+                        self._planning_rejection = {'task_id': task['id'],
+                            'reason': '独立派单的内容、工作区版本或固定检查发生变化，须重新复核。'}
+                        if not self._elaborate_requirement(records, next_function=True):
+                            return self._finish('stopped' if self._stop_requested else 'action_required',
+                                self.requirements_review.get('summary', self._planning_rejection['reason']), records, last_worker)
+                        continue
                     outside = self._assignment_repository_conflict(task)
                     if outside:
                         self._event('function_workspace_mismatch', task_id=task['id'], reason=outside)
@@ -2010,12 +2022,14 @@ class Supervisor:
             self._retry_pause(attempt + 1, 'Reviewer 模型服务连接中断')
 
     def _requirement_coverage_review(self, sources, plan, *, modules, checks, directions, tree):
+        scoped_dispatch = self._function_gate and self.config.full_function_plan
         prompt = requirement_coverage.prompt(
-            sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted)
+            sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted,
+            scoped_dispatch=scoped_dispatch)
         schema = self.schema_path
         self.schema_path = self.run_dir / 'requirement-coverage.schema.json'
         try:
-            write_json(self.schema_path, requirement_coverage.SCHEMA)
+            write_json(self.schema_path, requirement_coverage.DISPATCH_SCHEMA if scoped_dispatch else requirement_coverage.SCHEMA)
             for attempt in range(2):
                 self._close_requirement_reviewer()
                 index = 2000000 + self._agent_calls
@@ -2046,7 +2060,7 @@ class Supervisor:
             'modules_sha256': requirement_coverage.digest(modules),
         }), durable=True)
         self._event('requirement_coverage_reviewed', status=result['status'], receipt=receipt)
-        return result
+        return result, receipt
 
     def _coverage_sources(self, directions):
         sources = {'original': self.config.requirement, 'acceptance': self.config.acceptance}
@@ -2095,8 +2109,10 @@ class Supervisor:
                 record = requirement_context.read(path, limit=128 * 1024)
                 if not isinstance(record, dict) or any(record.get(k) != v for k, v in binding.items()):
                     continue
+                schema = (requirement_coverage.DISPATCH_SCHEMA if 'independent_next_task' in record
+                          else requirement_coverage.SCHEMA)
                 review = requirement_coverage.parse(json.dumps(
-                    {key: record[key] for key in requirement_coverage.SCHEMA['required']}), sources)
+                    {key: record[key] for key in schema['required']}), sources)
             except (OSError, KeyError, ValueError, RecursionError):
                 continue
             return (review, path.name) if review['status'] == 'revise' else None
@@ -2107,7 +2123,8 @@ class Supervisor:
                 '读取 ' + str(self.run_dir / 'requirement-review-context.json') + ' 中的 response 作为待修订方案。'
                 '仅修订缺项及其直接关联的验收与依赖条目，照录其他条目并返回完整方案。'
                 '仅在缺项需要新证据时查看对应文件。\n'
-                + json.dumps(review['findings'], ensure_ascii=False))
+                + json.dumps({'findings': review['findings'], 'affected_tasks': review.get('affected_tasks', [])},
+                             ensure_ascii=False))
 
     def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None,
                                    directions, saved_revision=None):
@@ -2124,7 +2141,7 @@ class Supervisor:
         except (OSError, ValueError):
             pass  # Advisory history cannot prevent an otherwise valid review.
         base_prompt = prompt
-        coverage_required = saved_revision is not None
+        coverage_required = saved_revision is not None or bool((previous_brief or {}).get('limited_dispatch'))
         if saved_revision:
             review, receipt = saved_revision
             prompt = self._coverage_revision_prompt(base_prompt, review)
@@ -2261,12 +2278,24 @@ class Supervisor:
                         requirement_context.save(self.run_dir, self.config.cwd, self.config.requirement,
                             len(self.requirement_cycles) + 1, plan, snapshot, checks, directions)
                         reviewed_plan, modules, _ = self._coverage_inputs(plan, staged_plan, sources, checks, tree)
-                        review = self._requirement_coverage_review(
+                        outcome = self._requirement_coverage_review(
                             sources, reviewed_plan, modules=modules, checks=checks,
                             directions=directions, tree=tree)
-                        if review is None:
+                        if outcome is None:
                             return None
+                        review, receipt = outcome
                         if review['status'] == 'revise':
+                            task = reviewed_plan.get('next_task')
+                            if (self._function_gate and self.config.full_function_plan
+                                    and requirement_coverage.independent_dispatch(
+                                        review, reviewed_plan, self.function_tasks.accepted)
+                                    and not self._assignment_repository_conflict(task)
+                                    and not self._missing_dispatch_inputs(task)):
+                                self._limited_coverage_dispatch = {'task_id': task['id'], 'receipt': receipt,
+                                    'task_sha256': requirement_coverage.digest(task), 'tree': tree,
+                                    'checks': requirement_context.checks_digest(checks),
+                                    'affected_tasks': review['affected_tasks']}
+                                return turn
                             missing = '\n'.join(item['gap'] for item in review['findings'])[:1800]
                             if attempt >= 4 or not journal.admit(recovery_context, missing):
                                 raise ValueError('需求覆盖复核仍有缺项，派单尚未开始。' + missing)
@@ -2282,6 +2311,7 @@ class Supervisor:
                 return turn
 
     def _elaborate_requirement_once(self,records, *, next_function=False):
+        self._limited_coverage_dispatch = None
         follow_up = [item['handoff'] for item in self.requirement_cycles]
         review_checks = list(self.config.checks)
         previous_brief = self.requirements_review
@@ -2372,6 +2402,10 @@ class Supervisor:
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
                 if self.config.full_function_plan and self.function_plan and not saved_revision:
                     prompt += '\nPreviously approved function plan (revise remaining entries only with concrete findings):\n'+json.dumps(self.function_plan,ensure_ascii=False)
+                if previous_brief.get('limited_dispatch'):
+                    prompt += ('\n上一轮仅批准了一个独立派单。根据下列未关闭缺项及原始复核记录重新安排后续任务，'
+                               '保留已验收工作及所有验收要求。\n'
+                               + json.dumps(previous_brief['limited_dispatch'], ensure_ascii=False))
                 if self.config.assignment_contracts:
                     prompt += ('\n以下派单来自原任务。按编号保留原始目标、边界、验收描述和测试源码，'
                                '仅调整本仓库的验收编号、检查编号和依赖关系。\n'
@@ -2515,6 +2549,9 @@ class Supervisor:
             brief['cycle']=len(self.requirement_cycles) + 1
             brief['session_id']=turn.session_id
             brief['original_sha256']=requirements_review.requirement_hash(self.config.requirement)
+            if self._limited_coverage_dispatch:
+                brief['limited_dispatch'] = self._limited_coverage_dispatch
+                self._event('coverage_independent_dispatch', **self._limited_coverage_dispatch)
             if not self.config.function_dispatch and brief['status'] == 'ready':
                 brief['reviewed_direction_sha256'] = self._last_invocation['requirement_revision']['sha256']
                 brief['reviewed_checks_sha256'] = requirement_context.checks_digest(review_checks)
@@ -4655,7 +4692,8 @@ class Supervisor:
         return run_health(run)['health'] in {'active', 'recovering'}
 
     def _advance_local_assignment(self, records, *, missing_inputs=False):
-        if not self._complete_function_plan_ready() or self._unplanned_directions():
+        if (self.requirements_review.get('limited_dispatch') or not self._complete_function_plan_ready()
+                or self._unplanned_directions()):
             return False
         blocked = self.function_tasks.current
         snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
@@ -4966,6 +5004,8 @@ class Supervisor:
         return turn
 
     def _stage_verification_repair(self, review):
+        if self.requirements_review.get('limited_dispatch'):
+            raise ValueError('独立派单的后续修复须重新经过需求覆盖复核。')
         if not (review.gaps or review.blockers) or review.next_task.get('kind') == 'verification':
             raise ValueError('Failed verification requires concrete findings and an implementation assignment')
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
@@ -5038,6 +5078,8 @@ class Supervisor:
             raise ValueError('Function review is stale because the workspace changed')
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
         staged.accept(worker, review, index, tree)
+        if self.requirements_review.get('limited_dispatch'):
+            return staged
         if self._deferred_replan_applies():
             return staged  # Apply the saved replan before selecting a successor.
         if expected == 'requirement' and review.next_task is not None:
@@ -6629,6 +6671,8 @@ class Supervisor:
         if (role == 'reviewer' and self.config.full_function_plan and self.function_tasks.current
                 and self.requirements_review.get('status') == 'ready'):
             remaining = function_plan.waiting(self.function_plan, self.function_tasks)
+            if self.requirements_review.get('limited_dispatch'):
+                remaining = []
             prompt += ('\nApproved next assignment after the current one passes watcher acceptance:\n'
                        +json.dumps(remaining[0] if remaining else None,ensure_ascii=False)
                        +'\nFor an accepted result, use this exact next_task or null. '

@@ -33,6 +33,43 @@ SCHEMA = {
     'required': ['status', 'summary', 'findings'],
 }
 
+DISPATCH_SCHEMA = {
+    **SCHEMA,
+    'properties': {
+        **SCHEMA['properties'],
+        'independent_next_task': {
+            'type': 'string',
+            'description': 'Exact next_task ID approved to run independently, or empty.',
+        },
+        'affected_tasks': {
+            'type': 'array',
+            'items': {
+                'type': 'object', 'additionalProperties': False,
+                'properties': {
+                    'task_ids': {'type': 'array', 'items': {'type': 'string'}},
+                    'evidence_needed': {'type': 'string'},
+                    'owner': {'type': 'string'},
+                },
+                'required': ['task_ids', 'evidence_needed', 'owner'],
+            },
+        },
+    },
+    'required': [*SCHEMA['required'], 'independent_next_task', 'affected_tasks'],
+}
+
+
+def independent_dispatch(review, plan, accepted):
+    """An explicit exception for the exact reviewed next function only."""
+    task = plan.get('next_task') or {}
+    if (review['status'] != 'revise' or not task
+            or review.get('independent_next_task') != task['id']
+            or task['delivery_scope'] != 'function'
+            or not set(task['depends_on']) <= {item['task']['id'] for item in accepted}):
+        return False
+    planned = {item['id'] for item in plan.get('function_plan', [])}
+    affected = {ident for item in review['affected_tasks'] for ident in item['task_ids']}
+    return bool(affected and affected <= planned and task['id'] not in affected)
+
 
 def requires_review(sources, modules, workspace_bindings):
     return (sum(module['status'] != 'accepted' for module in modules) >= 3 or bool(workspace_bindings)
@@ -44,7 +81,7 @@ def digest(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def prompt(sources, plan, *, modules, checks, accepted):
+def prompt(sources, plan, *, modules, checks, accepted, scoped_dispatch=False):
     return (
         '独立复核需求覆盖范围。你处于独立只读会话，没有参与原方案制定。'
         '先从用户原文、验收要求和追加要求列出必须覆盖的条款，再逐项对照待复核方案。'
@@ -60,6 +97,12 @@ def prompt(sources, plan, *, modules, checks, accepted):
         + '\n\n待复核方案：\n' + json.dumps(plan, ensure_ascii=False)
         + '\n\n固定模块、已批准的检查和已验收派单：\n'
         + json.dumps({'modules': modules, 'checks': checks, 'accepted': accepted}, ensure_ascii=False)
+        + ('\n对 revise 的每条缺项，在 affected_tasks 按相同顺序填写受影响的正式派单编号、'
+           '需要补齐的证据和责任方。涉及整份方案时，task_ids 填空数组。'
+           '只有已逐项核对首个 next_task 的原文覆盖、真实检查输入和前置依赖，确认该任务与所有缺项独立、'
+           '不会改变缺项所需的条件或证据，并且只交付单个功能时，才在 independent_next_task 写其编号。'
+           '任何缺项无法定位或首项无法独立执行时填空字符串。pass 时两个字段分别填空字符串和空数组。'
+           if scoped_dispatch else '')
     )
 
 
@@ -85,7 +128,8 @@ def parse(text, sources):
         result = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError('需求覆盖复核未返回有效的 JSON 结论') from exc
-    if (not isinstance(result, dict) or set(result) != set(SCHEMA['required'])
+    if (not isinstance(result, dict) or set(result) not in (
+            set(SCHEMA['required']), set(DISPATCH_SCHEMA['required']))
             or result['status'] not in ('pass', 'revise')
             or not isinstance(result['summary'], str) or not result['summary'].strip()
             or len(result['summary']) > 2000):
@@ -104,4 +148,17 @@ def parse(text, sources):
             invalid_sources.append(index)
     if invalid_sources:
         raise InvalidSource(invalid_sources)
+    if 'independent_next_task' in result:
+        ident = result['independent_next_task']
+        affected = result['affected_tasks']
+        if (not isinstance(ident, str) or len(ident) > 120
+                or not isinstance(affected, list) or len(affected) != len(findings)
+                or any(not isinstance(row, dict) or set(row) != {'task_ids', 'evidence_needed', 'owner'}
+                       or not isinstance(row['task_ids'], list) or len(row['task_ids']) > 200
+                       or any(not isinstance(key, str) or not key.strip() or len(key) > 120
+                              for key in row['task_ids'])
+                       or any(not isinstance(row[key], str) or not row[key].strip() or len(row[key]) > 1000
+                              for key in ('evidence_needed', 'owner')) for row in affected)
+                or ident and (not affected or any(not row['task_ids'] for row in affected))):
+            raise ValueError('需求覆盖复核的派单、证据或责任方填写有误')
     return result

@@ -67,6 +67,40 @@ class DispatchTests(unittest.TestCase):
             workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
+    def test_coverage_revision_releases_only_the_independently_approved_function(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            initial = {**verification_task('INITIAL'), 'delivery_scope': 'function'}
+            blocked = task('BLOCKED', 'other.py', depends=['INITIAL'])
+            final = verification_task('FINAL', depends=['BLOCKED'])
+            proposal = {**json.loads(plan(initial)['text']), 'function_plan': [initial, blocked, final]}
+            coverage = {
+                'status': 'revise',
+                'summary': '最终路径需要补齐证据',
+                'findings': [{'source_id': 'original', 'quote': 'ORIGINAL BACKLOG', 'gap': '缺少后续证据'}],
+                'independent_next_task': 'INITIAL',
+                'affected_tasks': [{'task_ids': ['BLOCKED'], 'evidence_needed': '构建记录', 'owner': 'Watcher'}],
+            }
+            worker = FunctionWorker('worker', [result('INITIAL', 'done')])
+            blocked_proposal = {**BRIEF, 'status': 'needs_input', 'blockers': ['构建记录未齐'],
+                                'next_task': None, 'modules': [], 'function_plan': []}
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(proposal)},
+                {'verdict': {}, 'text': json.dumps(coverage)},
+                result('INITIAL', 'accepted', next_task=blocked),
+                *[{'verdict': {}, 'text': json.dumps(blocked_proposal)} for _ in range(2)],
+            ])
+            with patch('auto_moniter.requirement_coverage.requires_review', return_value=True):
+                report = self.run_monitor(root, worker, reviewer, full_function_plan=True)
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            state = json.loads((root/'run/state.json').read_text())
+            self.assertIsNone(state['function_tasks']['current'])
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['INITIAL'])
+            self.assertIn('approved', reviewer.calls[2]['prompt'].lower())
+            self.assertIn('构建记录', reviewer.calls[3]['prompt'])
+
     def test_missing_input_for_implicit_fixed_check_defers_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

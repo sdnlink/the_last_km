@@ -264,3 +264,14 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'继续�
         self.assertEqual(json.loads((run / 'control.json').read_text())['action'], 'stop')
         self.assertIn('fixture spawn failure', view['launch_error'])
         self.assertIn('resume', view['actions'])
+
+    def test_saved_review_round_is_forwarded_to_one_resume_launch(self):
+        task, run = self.stopped_task()
+        ident = task['id']
+        with patch('console.tasks.subprocess.Popen', side_effect=OSError('test launch failure')) as launch:
+            with self.assertRaises(TaskError):
+                self.imported.action(ident, 'resume', {'review_saved_round': 5})
+            self.assertIn('--review-saved-round=5', launch.call_args.args[0])
+            with self.assertRaises(TaskError):
+                self.imported.action(ident, 'resume')
+            self.assertNotIn('--review-saved-round=5', launch.call_args.args[0])

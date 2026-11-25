@@ -284,8 +284,10 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
         additions={'task_id':{'type':'string'},'task_status':{'type':'string',
                    'enum':['done','incomplete','accepted','changes_required']},'next_task':next_schema}
         if gate:
+            from auto_moniter.field_handoff import REQUEST_SCHEMA
             from auto_moniter.verdict import SUPPLEMENTAL_CHECKS_SCHEMA
             additions['supplemental_checks'] = copy.deepcopy(SUPPLEMENTAL_CHECKS_SCHEMA)
+            additions['field_handoffs'] = copy.deepcopy(REQUEST_SCHEMA)
     result['properties'].update(additions)
     result['required'].extend(additions)
     return result
@@ -349,7 +351,9 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
         + ('For changes_required in verification-only work, use status=continue. If code can be repaired, return '
            'next_task as one bounded implementation task with a new ID, accurate targets and approved checks. '
            'If progress requires an external prerequisite and there is no runnable repair, report it in blockers '
-           'and return next_task=null. '
+           'and return next_task=null. Use field_handoffs for each concrete prerequisite. Include the type '
+           '(deployment, browser or observation), task title, responsible role and exact evidence needed. '
+           'Return field_handoffs=[] in all other cases. '
            if task.get('kind') == 'verification' else
            'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +
         'For failed behavior, cite the criterion, entry point, input, expected and observed results, and the failing '

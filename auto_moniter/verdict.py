@@ -130,6 +130,7 @@ class Verdict:
     task_status: str = ""
     next_task: dict | None = None
     supplemental_checks: list[dict] = field(default_factory=list)
+    field_handoffs: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -138,6 +139,8 @@ class Verdict:
         data.pop("structured", None)
         if not self.supplemental_checks:
             data.pop('supplemental_checks')
+        if not self.field_handoffs:
+            data.pop('field_handoffs')
         if not self.task_id and not self.task_status and self.next_task is None:
             for key in ("task_id", "task_status", "next_task"):
                 data.pop(key)
@@ -191,6 +194,7 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
         issue_resolutions=data.get("issue_resolutions", []),
         task_id=data.get("task_id", ""), task_status=data.get("task_status", ""), next_task=data.get("next_task"),
         supplemental_checks=data.get('supplemental_checks', []),
+        field_handoffs=data.get('field_handoffs', []),
     )
     if isinstance(verdict.next_task, dict) and "review_test" in verdict.next_task and verdict.next_task["review_test"] is None:
         verdict.next_task = {key: value for key, value in verdict.next_task.items() if key != "review_test"}
@@ -199,7 +203,7 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
     if function_gate:
         required = set(VERDICT_SCHEMA['required']) | {'task_id', 'task_status', 'next_task'}
         invalid.extend(required - data.keys())
-        invalid.extend(data.keys() - required - {'supplemental_checks'})
+        invalid.extend(data.keys() - required - {'supplemental_checks', 'field_handoffs'})
         if not isinstance(data.get('task_id'), str) or not data['task_id']:
             invalid.append('task_id')
         if data.get('task_status') not in ('done', 'incomplete', 'accepted', 'changes_required'):
@@ -219,6 +223,10 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
         verdict.supplemental_checks = []
     elif requests and not function_gate:
         invalid.append('supplemental_checks')
+    from auto_moniter.field_handoff import requests_valid
+    if not requests_valid(verdict.field_handoffs) or verdict.field_handoffs and not function_gate:
+        invalid.append('field_handoffs')
+        verdict.field_handoffs = []
     if not isinstance(data.get("summary"), str) or not verdict.summary:
         invalid.append("summary")
     if verdict.scope not in {"module", "requirement"}:

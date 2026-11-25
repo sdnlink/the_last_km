@@ -9,6 +9,51 @@ const id=document.body.dataset.taskId;
 const section=$('#detail-page').dataset.section;
 let task,role='all',log='',logSequence=0,logTotal=0;
 let dispatchData=null,dispatchFilter='all',dispatchSequence=0;
+const receiptFields={
+ observation:['result'],
+ deployment:['version','manifest_sha256','rollback','result'],
+ browser:['version','session_reference','result']
+};
+const receiptLabels={version:'实际版本',manifest_sha256:'产物清单 SHA-256',rollback:'回退点',
+ session_reference:'浏览器会话或原标签页记录',result:'实际操作结果和证据位置'};
+function handoffClaimSlot(itemId){
+ return `auto-monitor:handoff:${id}:${itemId}`;
+}
+function renderFieldHandoff(t){
+ const panel=$('#detail-field-handoff');
+ if(!panel)return;
+ const handoff=t.field_handoff;
+ const key=JSON.stringify([t.status,handoff]);
+ if(panel.dataset.renderKey===key)return;
+ panel.dataset.renderKey=key;
+ if(!handoff?.items?.length){panel.replaceChildren();return;}
+ const deploymentPending=handoff.items.some(item=>item.kind==='deployment'&&!item.receipt);
+ panel.innerHTML=`<section class="detail-alert"><h3>现场交接 · ${escape(handoff.binding.task_id)}</h3><p>第 ${escape(handoff.binding.round)} 轮 · 候选 ${escape(handoff.binding.tree.slice(0,12))}</p>${handoff.resume?.error?`<p>自动续审暂未启动。 ${escape(handoff.resume.error)}</p>`:''}${(handoff.review_feedback||[]).map(text=>`<p>${escape(text)}</p>`).join('')}${handoff.items.map(item=>{
+ const waiting=item.kind==='browser'&&deploymentPending;
+ const claimedHere=item.claim&&sessionStorage.getItem(handoffClaimSlot(item.id));
+ const canEdit=item.allow_manual&&!item.executor_task&&!waiting&&!item.receipt&&t.status==='action_required';
+ const status=item.receipt?'已收到回执':handoff.executor_status?.[item.id]||
+   (item.executor_task?'等待执行器回传':item.allow_manual?'等待现场操作':'尚未关联获准的执行任务');
+ return `
+  <details open><summary>${escape(item.title)} · ${escape(status)}</summary>
+  <p>执行方：${escape(item.owner)}${item.claim?` · ${escape(item.claim.name)} 已认领`:''}</p>
+  ${item.evidence_needed?`<p>${escape(item.evidence_needed)}</p>`:''}
+  ${item.expected_version?`<p>待核对版本 <code>${escape(item.expected_version)}</code></p>`:''}
+  ${item.expected_manifest_sha256?`<p>归档清单 SHA-256 <code>${escape(item.expected_manifest_sha256)}</code></p>`:''}
+  ${item.resources_expected?`<p>现场需对账 ${escape(item.resources_expected)} 个资源。</p>`:''}
+  ${item.executor_task?`<p><a href="/tasks/${escape(item.executor_task)}">查看关联执行任务</a></p>`:''}
+  ${canEdit&&item.url?`<p><a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">打开现场浏览器页</a>，完成操作后保留原标签页。</p>`:''}
+  ${canEdit&&!item.claim?`<form data-field-claim="${escape(item.id)}"><label>认领人 <input name="name" required maxlength="100"></label>
+    <button type="submit">认领</button></form>`:''}
+  ${canEdit&&claimedHere?`<form data-field-release="${escape(item.id)}"><button type="submit">撤销认领</button></form>`:''}
+  ${canEdit&&(!item.claim||claimedHere)?`<form data-field-receipt="${escape(item.id)}">${receiptFields[item.kind].map(key=>
+     `<label style="display:block">${escape(receiptLabels[key])}<textarea name="${key}" required maxlength="4000" rows="2"></textarea></label>`).join('')}
+     ${item.resources_expected?`<label>部署资源对账 JSON（target、resources）<textarea name="proof" required maxlength="110000" rows="4"></textarea></label>`:''}
+     ${item.browser_proof?`<label>浏览器观察记录 JSON（url、observed_at、session_reference）<textarea name="proof" required maxlength="4000" rows="4"></textarea></label>`:''}
+     <button type="submit">提交现场回执</button></form>`:''}</details>`;
+ }).join('')}${Object.entries(handoff.dispatch||{}).map(([child,dispatch])=>
+  `<p><a href="/tasks/${escape(child)}">查看关联任务</a> · ${dispatch.status==='dispatched'?'已交给调度器':escape(dispatch.error)}</p>`).join('')}</section>`;
+}
 function renderDispatch(){
  if(!dispatchData)return;
  const data=dispatchData,html=dispatchPlanHTML(data);
@@ -52,6 +97,7 @@ function render(t){
  if(t.health.health==='heartbeat_stale')alerts.push(i18n('监督器心跳已超时，请核对 watcher 工作记录。'));
  if(t.status==='interrupted')alerts.push(i18n('任务执行已中断，可查看工作记录后从检查点恢复。'));
  if($('#detail-alerts'))$('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
+ renderFieldHandoff(t);
 }
 function renderUsage(usage,estimate){
  const stages=usage.stage_elapsed_s||{};
@@ -164,6 +210,31 @@ async function loadLogs(){
  }catch(error){if(error.status===404&&log){log='';return loadLogs();}throw error;}
 }
 export function mount(){
+ $('#detail-field-handoff')?.addEventListener('submit',async event=>{
+  const form=event.target.closest('[data-field-receipt],[data-field-claim],[data-field-release]');
+  if(!form)return;
+  event.preventDefault();
+  const button=form.querySelector('button');
+  button.disabled=true;
+  try{
+   const itemId=form.dataset.fieldClaim||form.dataset.fieldRelease||form.dataset.fieldReceipt;
+   const slot=handoffClaimSlot(itemId), fields=Object.fromEntries(new FormData(form));
+   const key=sessionStorage.getItem(slot);
+   const proof=fields.proof?JSON.parse(fields.proof):undefined;
+   delete fields.proof;
+   const payload=form.dataset.fieldClaim?{action:'claim',name:fields.name}:
+    form.dataset.fieldRelease?{action:'release',claim_key:key}:{receipt:fields,claim_key:key,proof};
+   const result=await api(`/api/tasks/${encodeURIComponent(id)}/field-handoff`,{
+    id:itemId,binding:task.field_handoff.binding,revision:task.field_handoff.revision,...payload
+   });
+   if(result.claim_key)sessionStorage.setItem(slot,result.claim_key);
+   if(form.dataset.fieldRelease)sessionStorage.removeItem(slot);
+   toast(result.resume_error||(result.resuming?'回执已齐备，已启动原轮次复核。':
+    result.claim_key?'认领已保存。':form.dataset.fieldRelease?'已撤销认领。':'现场回执已保存。'),Boolean(result.resume_error));
+   render(await api(`/api/tasks/${encodeURIComponent(id)}`));
+  }catch(error){toast(error.message,true);}
+  finally{button.disabled=false;}
+ });
  const supervision=$('#task-supervision');
  if(supervision){
   const setupFailed=new URLSearchParams(location.search).get('supervision')==='setup-failed';

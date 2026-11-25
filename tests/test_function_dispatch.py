@@ -150,6 +150,99 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('MANUAL-PREFLIGHT 是管理端预检', report.summary)
             self.assertFalse(worker.calls)
 
+    def test_resume_reviews_checked_candidate_before_pending_replan(self):
+        from auto_moniter.directions import Directions
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root/'run'
+            assignment = task('F1', 'app.py')
+            submission = result('F1', 'incomplete', gaps=['Waiting for handoff evidence'])
+            worker = FunctionWorker('worker', [{**submission, 'touch': 'app.py'}])
+            reviewer = ScriptedProvider('reviewer', [
+                plan(assignment), result('F1', 'changes_required', gaps=['Waiting for handoff evidence']),
+            ])
+            self.assertEqual(self.run_monitor(root, worker, reviewer, max_rounds=1,
+                                              review_every=1).status, 'max_rounds')
+            checkpoint = run/'state.json'
+            state = json.loads(checkpoint.read_text())
+            state['status'] = 'action_required'
+            state['referee'] = {'enabled': True, 'model': '', 'replan': True, 'decision': {
+                'action': 'replan', 'summary': 'Review the remaining plan',
+                'instructions': 'Verify the handoff before continuing.',
+                'evidence': ['Current receipt passed'], 'id': 1, 'cycle': 1,
+                'incident': 'planning', 'task_id': 'F1',
+            }}
+            checkpoint.write_text(json.dumps(state))
+            Directions(run).append('The handoff evidence is now available.')
+            log = run/'001-check-01.log'
+            original_log = log.read_bytes()
+            log.write_bytes(original_log + b'changed log\n')
+            stale_worker = FunctionWorker('worker', [])
+            stale_reviewer = ScriptedProvider('reviewer', [])
+            stale = self.run_monitor(root, stale_worker, stale_reviewer, resume=True, review_saved_round=1)
+            self.assertEqual(stale.status, 'action_required')
+            self.assertIn('原检查回执已变化', stale.summary)
+            self.assertFalse(stale_reviewer.calls)
+            log.write_bytes(original_log)
+            worker = FunctionWorker('worker', [])
+            accepted = result('F1', 'accepted')
+            accepted['verdict']['issue_resolutions'] = [
+                {'id': 'AUD-1', 'summary': 'Handoff verified', 'evidence': ['check:001-check-01.log']},
+            ]
+            reviewer = ScriptedProvider('reviewer', [accepted])
+
+            def stop_at_replan(supervisor, records, *, next_function=False):
+                self.assertTrue(next_function)
+                self.assertIsNone(supervisor.function_tasks.current)
+                supervisor.request_stop()
+                return False
+
+            with patch.object(Supervisor, '_elaborate_requirement', stop_at_replan):
+                report = self.run_monitor(root, worker, reviewer, resume=True, review_saved_round=1)
+            self.assertEqual(report.status, 'stopped', report.summary)
+            self.assertFalse(worker.calls)
+            self.assertEqual(len(reviewer.calls), 1)
+            self.assertIn('The handoff evidence is now available.', reviewer.calls[0]['prompt'])
+            state = json.loads(checkpoint.read_text())
+            self.assertEqual([item['task']['id'] for item in state['function_tasks']['accepted']], ['F1'])
+            self.assertTrue(state['referee']['replan'])
+            self.assertFalse(state['deferred_replan'])
+
+    def test_fixed_check_source_alias_uses_current_candidate_after_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixed_check = 'test "$(basename "$FRONTEND_ROOT")" = frontend_tig && test "$FRONTEND_ROOT/app.py" -ef app.py'
+            assignment = {**task('F1', 'app.py'), 'check_ids': ['check:2']}
+            empty = FunctionWorker('worker', [])
+            planner = ScriptedProvider('reviewer', [plan(assignment)])
+            monitor = Supervisor(RunConfig(
+                'Implement input parsing', root, empty, reviewer=planner, workflow='review-first',
+                function_dispatch=True, git_history='off', run_dir=root/'run',
+                checks=[CHECK, fixed_check], retry_delay_s=0,
+            ), log=lambda _: None)
+            observe = monitor._event
+
+            def stop_after_planning(event, **fields):
+                observe(event, **fields)
+                if event == 'requirements_reviewed':
+                    monitor.request_stop()
+
+            monitor._event = stop_after_planning
+            self.assertEqual(monitor.run().status, 'stopped')
+            worker = FunctionWorker('worker', [{**result('F1', 'done'), 'touch': 'app.py'}])
+            reviewer = ScriptedProvider('reviewer', [result('F1', 'accepted')])
+            resumed = self.run_monitor(root, worker, reviewer, resume=True, checks=[], max_rounds=1,
+                                       check_source_aliases=['check:2=frontend_tig'])
+            self.assertEqual(resumed.status, 'max_rounds', resumed.summary)
+            record = next(row for row in resumed.records if row.role == 'worker')
+            receipt = record.watcher_result['candidate_checks']
+            self.assertTrue(receipt['passed'])
+            self.assertEqual(receipt['context']['commands'], [fixed_check])
+            self.assertEqual(receipt['context']['check_source_aliases'], ['check:2=frontend_tig'])
+            log = root/'run'/receipt['checks'][0]['log']
+            self.assertIn(f'FRONTEND_ROOT={root}/run/check-source-2/frontend_tig', log.read_text())
+
     def test_declaration_only_change_requires_primary_file_in_edit_scope(self):
         from auto_moniter.function_gate import baseline, scope_problems
         from auto_moniter.workspace import file_snapshot
@@ -1061,6 +1154,62 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(state['function_tasks']['current']['id'],'VERIFY')
             self.assertEqual(state['function_tasks']['accepted'],[])
 
+            from auto_moniter import field_handoff
+            from datetime import datetime, timezone
+            run = root/'run'
+            self.assertTrue(field_handoff.read(run)['automatic'])
+            handoff = field_handoff.configure(run, state, [
+                {'kind': 'deployment', 'owner': '现场执行者', 'title': '部署初测候选',
+                 'expected_version': '1.2.3', 'expected_manifest_sha256': 'a'*64,
+                 'expected_target':'example.test', 'expected_resources':{'app.js':'b'*64}},
+                {'kind': 'browser', 'owner': '现场测试者', 'title': '保留原标签页',
+                 'url': 'https://example.test/login', 'expected_version': '1.2.3', 'browser_proof':True},
+            ])
+            request = {key: handoff[key] for key in ('binding', 'revision')}
+            deployment = {'version': '1.2.3', 'manifest_sha256': 'a'*64, 'rollback': 'previous',
+                          'result': '部署版本和资源匹配现场记录'}
+            import threading
+            from console.tasks import TaskError, TaskStore
+            store = object.__new__(TaskStore)
+            store._lock = threading.RLock()
+            meta = {'id':'example','run_dir':str(run),'managed':True}
+            store._get = lambda ident: meta
+            store._catalog = lambda: {'example':meta}
+            store._view = lambda *args, **kwargs: {'status':'action_required','actions':['resume']}
+            with patch.object(store, 'action') as resume:
+                browser = {'version': '1.2.3', 'session_reference': 'saved-tab-1', 'result': '已保留初测原标签页'}
+                with self.assertRaisesRegex(TaskError, '先提交同一候选'):
+                    store.field_handoff('example', {**request, 'id':'2', 'receipt': browser})
+                with self.assertRaisesRegex(TaskError, '交接版本已变化'):
+                    store.field_handoff('example', {**request, 'id':'1', 'revision':'old', 'receipt': deployment})
+                with self.assertRaisesRegex(TaskError, '实际版本'):
+                    store.field_handoff('example', {**request, 'id': '1', 'receipt': {**deployment, 'version':'old'}})
+                claim = store.field_handoff('example', {**request, 'id':'1', 'action':'claim', 'name':'现场人员'})
+                self.assertNotIn('key_sha256', claim['items'][0]['claim'])
+                with self.assertRaisesRegex(TaskError, '原认领凭据'):
+                    store.field_handoff('example', {**request, 'id':'1', 'receipt': deployment})
+                submission = {**request, 'id':'1', 'receipt':deployment, 'claim_key':claim['claim_key']}
+                with self.assertRaisesRegex(TaskError, '哈希不一致'):
+                    store.field_handoff('example', {**submission, 'proof':{'target':'example.test','resources':{'app.js':'c'*64}}})
+                partial = store.field_handoff('example', {**submission,
+                    'proof':{'target':'example.test','resources':{'app.js':'b'*64}}})
+                resume.assert_not_called()
+                browser_return = {**request, 'id':'2', 'receipt':browser, 'proof':{
+                    'url':'https://example.test/home', 'session_reference':'saved-tab-1',
+                    'observed_at':datetime.now(timezone.utc).isoformat()}}
+                invalid = {**browser_return, 'proof':{**browser_return['proof'],'url':'https://other.test/home'}}
+                with self.assertRaisesRegex(TaskError, '不同源'):
+                    store.field_handoff('example', invalid)
+                # Simulate the console exiting after persisting the last receipt, before starting the child.
+                complete = field_handoff.submit(run, state, browser_return)
+                resume.assert_not_called()
+                store.recover_field_handoffs()
+                store.recover_field_handoffs()
+                store.field_handoff('example', browser_return)
+                resume.assert_called_once_with('example', 'resume')
+            self.assertFalse(field_handoff.ready(partial))
+            self.assertTrue(field_handoff.ready(complete))
+            self.assertEqual(field_handoff.read(run)['resume']['status'], 'launched')
             worker = FunctionWorker('worker', [])
             reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted', status='done')])
             report = Supervisor(RunConfig('', root, worker, reviewer=reviewer, workflow='review-first',
@@ -1068,8 +1217,95 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status, 'done', report.summary)
             self.assertFalse(worker.calls)
             self.assertEqual(len(reviewer.calls), 1)
+            self.assertIn('saved-tab-1', reviewer.calls[0]['prompt'])
+            self.assertIn(f"handoff:{handoff['revision']}:2", reviewer.calls[0]['prompt'])
             resumed = json.loads((root/'run/state.json').read_text())
             self.assertEqual([item['task']['id'] for item in resumed['function_tasks']['accepted']], ['VERIFY'])
+
+    def test_waiting_handoff_dispatches_only_explicitly_linked_tasks_once(self):
+        from console.tasks import TaskError, TaskStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = {'id':'parent','cwd':str(root/'parent'),'run_dir':str(root)}
+            children = {
+                'build': {'id':'build','cwd':str(root/'build'),'managed':True,'task_type':'deployment'},
+                'local': {'id':'local','cwd':str(root/'local'),'managed':True,'task_type':'code'},
+                'browser': {'id':'browser','cwd':str(root/'browser'),'managed':True,'task_type':'documentation'},
+                'overlap': {'id':'overlap','cwd':str(root/'parent'/'child'),'managed':True,'task_type':'code'},
+            }
+            store = object.__new__(TaskStore)
+            store._get = children.__getitem__
+            store._view = lambda *args, **kwargs: {'status':'queued'}
+            with self.assertRaisesRegex(TaskError, '独立工作区'):
+                store._validate_handoff_task(parent, 'overlap', deployment=False)
+            handoff = {'items':[{'kind':'deployment','executor_task':'build'},
+                                {'kind':'browser','executor_task':'browser'}],
+                       'independent_tasks':['local']}
+            with patch.object(store, 'action') as start:
+                first = store._dispatch_handoff_tasks(parent, handoff)
+                store._dispatch_handoff_tasks(parent, first)
+                self.assertEqual([(call.args) for call in start.call_args_list],
+                                 [('local','start'),('build','start')])
+                first['items'][0]['receipt'] = {'version':'123'}
+                store._dispatch_handoff_tasks(parent, first)
+                self.assertEqual(start.call_args.args, ('browser','start'))
+
+    def test_field_result_collection_rejects_stale_executor_output_and_resumes_once(self):
+        from auto_moniter import field_handoff
+        from auto_moniter.workspace import workspace_fingerprint
+        from console.tasks import TaskStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run, cwd = root/'run', root/'browser'
+            run.mkdir()
+            cwd.mkdir()
+            task_def = {'id':'VERIFY','kind':'verification'}
+            tree = 'a'*64
+            state = {'function_tasks':{'current':task_def}, 'rounds':[
+                {'role':'worker','index':6,'tree':tree,'watcher_result':{'candidate_checks':{
+                    'digest':'b'*64,'context':{'task':task_def}}}},
+                {'role':'reviewer','index':6,'task_status':'changes_required',
+                 'blockers':['浏览器证据待取得'],'watcher_result':{'status':'blocked'}},
+            ]}
+            deployment_id, browser_id = '1'*32, '2'*32
+            meta = {'id':'parent','cwd':str(root/'parent'),'run_dir':str(run)}
+            deployment_run, browser_run = root/'deploy-run', root/'browser-run'
+            browser_run.mkdir()
+            children = {
+                deployment_id:{'id':deployment_id,'cwd':str(root/'deployment'),'run_dir':str(deployment_run),
+                               'managed':True,'task_type':'deployment'},
+                browser_id:{'id':browser_id,'cwd':str(cwd),'run_dir':str(browser_run),
+                            'managed':True,'task_type':'documentation'},
+            }
+            value = field_handoff.configure(run,state,[
+                {'kind':'deployment','owner':'部署执行器','title':'部署','executor_task':deployment_id},
+                {'kind':'browser','owner':'浏览器执行器','title':'浏览器观察','executor_task':browser_id},
+            ])
+            request = {key:value[key] for key in ('binding','revision')}
+            deployment = {**request, 'id':'1', 'receipt':{
+                'version':'123','manifest_sha256':'c'*64,'rollback':'backup','result':'已部署'}}
+            browser = {**request, 'id':'2', 'receipt':{
+                'version':'123','session_reference':'tab-1','result':'已保留原标签页'}}
+            result_path = cwd/field_handoff.EXECUTOR_RESULT
+            store = object.__new__(TaskStore)
+            store._get = children.__getitem__
+            store._view = lambda *_args, **_kwargs: {'status':'done'}
+            read_result = store._executor_field_result
+            with patch.object(store, '_executor_field_result', side_effect=lambda child, item:
+                              deployment if child['id'] == deployment_id else read_result(child, item)):
+                for revision in ('stale', request['revision']):
+                    result_path.write_text(json.dumps({**browser,'revision':revision}))
+                    (browser_run/'state.json').write_text(json.dumps({
+                        'status':'done','tree':workspace_fingerprint(cwd,ignore_dir=browser_run)}))
+                    value = store._collect_field_results(meta, run, state, value)
+                    self.assertEqual(field_handoff.ready(value), revision == request['revision'])
+                self.assertEqual(value['items'][1]['receipt']['executor_task'], browser_id)
+            with patch.object(store, 'action') as resume:
+                store._resume_field_handoff('parent', run, value)
+                store._resume_field_handoff('parent', run, field_handoff.read(run))
+                resume.assert_called_once_with('parent', 'resume')
 
     def test_final_verification_environment_retry_only_reviews_completed_checks(self):
         with tempfile.TemporaryDirectory() as directory:

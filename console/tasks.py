@@ -31,6 +31,7 @@ from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
+from auto_moniter import candidate_checks, field_handoff
 from auto_moniter.requirement_queue import RequirementQueue
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
@@ -121,6 +122,10 @@ def _removable_checks(state):
         'function_tasks', 'function_plan', 'quality_policy', 'requirements_review')])
     # Positional check IDs in saved assignments must keep referring to the same commands.
     start = max(len(original), max(references, default=-1) + 1)
+    for item in state.get('check_source_aliases', []):
+        match = re.fullmatch(r'check:([1-9][0-9]{0,3})=[A-Za-z0-9_-]+', item)
+        if match:
+            start = max(start, int(match[1]))
     return {hashlib.sha256(command.encode()).hexdigest(): index
             for index, command in enumerate(checks) if index >= start}
 
@@ -482,6 +487,7 @@ class TaskStore:
                      'quality_policy': state.get('quality_policy', meta.get('quality_policy', {})) if include_details else {},
                      'quality_state': state.get('quality_state', {}) if include_details else {},
                      'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},
+                     'field_handoff': self._field_handoff_view(run, state) if include_details else {},
                      'activity': progress,
                      'work': work,
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
@@ -667,6 +673,229 @@ class TaskStore:
     def detail(self, ident: str) -> dict:
         with self._lock:
             return self._view(self._get(ident), self.metrics.sample()['processes'])
+
+    @staticmethod
+    def _field_handoff_view(run, state):
+        try:
+            value = field_handoff.read(run)
+            return field_handoff.public(value) if value and field_handoff.binding(state) == value['binding'] else {}
+        except (OSError, ValueError, KeyError):
+            return {}
+
+    def field_handoff(self, ident: str, data: dict) -> dict:
+        from auto_moniter.workspace import workspace_fingerprint
+
+        with self._lock:
+            meta = self._get(ident)
+            run = Path(meta['run_dir'])
+            view = self._view(meta, {}, include_details=False)
+            if view['status'] != 'action_required':
+                raise TaskError('只有等待处理的任务可以登记或提交现场回执。', 409)
+            state = Directions(run).read('state.json', 32 * 1024 * 1024)
+            checkpoint = field_handoff.binding(state)
+            worker = next(row for row in reversed(state['rounds']) if row.get('role') == 'worker')
+            receipt = worker['watcher_result']['candidate_checks']
+            if not candidate_checks.valid(receipt, run, receipt.get('context')):
+                raise TaskError('原轮次的检查回执已变化，请重新核对候选。', 409)
+            if (workspace_fingerprint(Path(state['cwd']), ignore_dir=run) != checkpoint['tree']
+                    or [row['id'] for row in Directions(run).messages()] != checkpoint['directions']):
+                raise TaskError('候选或用户要求已变化，此交接需要重新复核。', 409)
+            if 'items' in data:
+                independent = data.get('independent_tasks', [])
+                if (not isinstance(independent, list) or len(independent) > 12
+                        or not all(isinstance(child, str) for child in independent)):
+                    raise TaskError('请提供已登记的独立任务编号。')
+                items = data['items']
+                executors = [(item['executor_task'], item.get('kind') == 'deployment') for item in items
+                             if isinstance(item, dict) and item.get('executor_task')] if isinstance(items, list) else []
+                targets = [*independent, *(key for key, _ in executors)]
+                if (any(not isinstance(key, str) for key in targets) or len(set(targets)) != len(targets)):
+                    raise TaskError('执行任务不得重复关联。')
+                for child_id, for_deployment in [(key, False) for key in independent] + executors:
+                    self._validate_handoff_task(meta, child_id, deployment=for_deployment)
+                value = field_handoff.configure(run, state, items,
+                    replace_revision=data.get('replace_revision'), independent=independent)
+                return self._dispatch_handoff_tasks(meta, value)
+            try:
+                if data.get('action') == 'claim':
+                    return field_handoff.claim(run, state, data)
+                if data.get('action') == 'release':
+                    return field_handoff.release(run, state, data)
+                current_handoff = field_handoff.read(run)
+                item = next((row for row in current_handoff.get('items', []) if row['id'] == data.get('id')), {})
+                if item.get('executor_task'):
+                    raise TaskError('此交接由关联执行任务自动回传，以该任务的正式验收结果为准。', 409)
+                value = field_handoff.submit(run, state, data)
+            except ValueError as exc:
+                raise TaskError(str(exc), 409) from exc
+            return self._resume_field_handoff(ident, run, value)
+
+    def _validate_handoff_task(self, parent, ident, *, deployment):
+        child = self._get(ident)
+        if (parent['id'] == ident or not child.get('managed')
+                or workspaces_overlap(Path(parent['cwd']), Path(child['cwd']))
+                or child.get('task_type', 'code') not in ({'deployment'} if deployment else {'code', 'documentation'})
+                or parent['id'] in child.get('task_dependencies', [])):
+            raise TaskError('关联任务须已登记、使用独立工作区，且执行类型与交接一致。', 409)
+        return child
+
+    def _dispatch_handoff_tasks(self, meta, value):
+        if field_handoff.ready(value):
+            return field_handoff.public(value)
+        run = Path(meta['run_dir'])
+        targets = {ident: False for ident in value.get('independent_tasks', [])}
+        deployment_pending = any(item['kind'] == 'deployment' and not item.get('receipt') for item in value['items'])
+        targets.update((item['executor_task'], item['kind'] == 'deployment') for item in value['items']
+                       if item.get('executor_task') and not item.get('receipt')
+                       and not (item['kind'] == 'browser' and deployment_pending))
+        dispatch = dict(value.get('dispatch') or {})
+        for ident, deployment in targets.items():
+            if dispatch.get(ident, {}).get('status') == 'dispatched':
+                continue
+            try:
+                child = self._validate_handoff_task(meta, ident, deployment=deployment)
+                status = self._view(child, {}, include_details=False)['status']
+                if status == 'queued':
+                    self.action(ident, 'start')
+                elif status not in {'starting', 'running', 'paused', 'done'}:
+                    raise TaskError('关联执行任务未就绪，请核对其状态。', 409)
+                dispatch[ident] = {'status': 'dispatched'}
+            except (TaskError, OSError, ValueError) as exc:
+                dispatch[ident] = {'status': 'waiting', 'error': redact(str(exc))}
+        if dispatch != value.get('dispatch', {}):
+            value = {**value, 'dispatch': dispatch}
+            write_json(run / field_handoff.FILE, value, durable=True)
+        return field_handoff.public(value)
+
+    def _executor_field_result(self, child, item):
+        from auto_moniter import deployment, requirement_context
+        from auto_moniter.workspace import evidence_paths, workspace_fingerprint
+
+        run, cwd = Path(child['run_dir']), Path(child['cwd']).resolve()
+        state = Directions(run).read('state.json', 32 * 1024 * 1024)
+        if state.get('status') != 'done' or state.get('tree') != workspace_fingerprint(cwd, ignore_dir=run):
+            raise ValueError('执行任务的工作区已变化，不能复用原结果。')
+        if item['kind'] == 'deployment':
+            name = field_handoff.EXECUTOR_RESULT
+            accepted = next((row for row in reversed(state.get('rounds') or [])
+                             if row.get('role') == 'reviewer' and row.get('delivery', {}).get('status') == 'accepted'), {})
+            fingerprint = deployment.fingerprint(cwd, run, child['requirement'])
+            approved = accepted.get('watcher_result', {}).get('candidate_approval', {}).get('context', {})
+            if name not in fingerprint or approved.get('deployment_evidence') != fingerprint:
+                raise ValueError('部署结果未纳入执行任务的正式验收。')
+            report = deployment.validate(cwd, run, child['requirement'])
+            if name not in report['stages'][-1]['evidence']:
+                raise ValueError('部署执行器的回执须由现场验证阶段引用。')
+            path = deployment.evidence_path(cwd, run).with_name(name)
+            value = requirement_context.read(path, limit=128 * 1024)
+            if not isinstance(value, dict) or not isinstance(value.get('receipt'), dict):
+                raise ValueError('部署执行器未提供有效的结构化回执。')
+            target = report['target']
+            if (value['receipt'].get('version') != target['version']
+                    or item.get('expected_target', target['host']) != target['host']):
+                raise ValueError('部署回执与已验收的目标版本不一致。')
+            return value
+        # Browser and observation executors publish their result as part of the reviewed workspace.
+        path = cwd / field_handoff.EXECUTOR_RESULT
+        if path.is_symlink() or not evidence_paths(cwd, [path.name], ignore_dir=run, include_git_ignored=False):
+            raise ValueError('执行回执须为工作区内经过验收的普通文件。')
+        return requirement_context.read(path, limit=128 * 1024)
+
+    def _collect_field_results(self, meta, run, state, value):
+        errors = {}
+        for item in value['items']:
+            if item.get('receipt'):
+                continue
+            ident = item.get('executor_task')
+            if not ident:
+                errors[item['id']] = '尚未关联获准的执行任务。'
+                continue
+            if item['kind'] == 'browser' and any(row['kind'] == 'deployment' and not row.get('receipt')
+                                                for row in value['items']):
+                errors[item['id']] = '等待同一候选的部署回执。'
+                continue
+            try:
+                child = self._validate_handoff_task(meta, ident, deployment=item['kind'] == 'deployment')
+                child_view = self._view(child, {}, include_details=False)
+                if child_view['status'] != 'done':
+                    errors[item['id']] = '等待关联执行任务完成验收。' if child_view['status'] in {
+                        'queued', 'starting', 'running', 'paused'} else '关联执行任务未通过验收，请查看该任务的停止原因。'
+                    continue
+                result = self._executor_field_result(child, item)
+                if not isinstance(result, dict) or result.get('id') != item['id']:
+                    raise ValueError('执行器回执未绑定当前交接项。')
+                value = field_handoff.submit(run, state, result, executor=ident)
+            except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
+                errors[item['id']] = redact(str(exc))
+        if errors != value.get('executor_status', {}):
+            value = {**value, 'executor_status': errors}
+            write_json(run / field_handoff.FILE, value, durable=True)
+        return value
+
+    def _resume_field_handoff(self, ident, run, value):
+        if not field_handoff.ready(value) or value.get('resume', {}).get('status') != 'pending':
+            return field_handoff.public(value)
+        try:
+            self.action(ident, 'resume')
+        except (TaskError, OSError, ValueError) as exc:
+            failure = redact(str(exc))
+            updated = field_handoff.update_resume(run, value, 'pending',
+                                                 agent_calls=value['resume']['agent_calls'], error=failure)
+            return {**field_handoff.public(updated), 'resume_error': failure}
+        # The child may already have advanced or reopened the handoff.
+        current = field_handoff.read(run)
+        if current.get('revision') == value['revision'] and current.get('resume', {}).get('status') == 'pending':
+            current = field_handoff.update_resume(run, current, 'launched',
+                                                 agent_calls=current['resume']['agent_calls'])
+        return {**field_handoff.public(current), 'resuming': True}
+
+    def recover_field_handoffs(self, *, retry_failed=True):
+        """Replay submitted receipts that outlived the console before launch."""
+        from auto_moniter.workspace import workspace_fingerprint
+
+        with self._lock:
+            for meta in self._catalog().values():
+                if not meta.get('managed'):
+                    continue
+                run = Path(meta['run_dir'])
+                try:
+                    value = field_handoff.read(run)
+                    if not value:
+                        continue
+                    view = self._view(meta, {}, include_details=False)
+                    if view['status'] in {'running', 'starting', 'paused'}:
+                        continue
+                    if view['status'] not in {'action_required', 'interrupted'}:
+                        continue
+                    if read_control(run / 'control.json').get('action') in ('stop', 'pause'):
+                        continue
+                    state = Directions(run).read('state.json', 32 * 1024 * 1024)
+                    checkpoint = value['binding']
+                    worker = next((row for row in reversed(state.get('rounds') or [])
+                                   if row.get('role') == 'worker'), {})
+                    receipt = worker.get('watcher_result', {}).get('candidate_checks') or {}
+                    if (field_handoff.binding(state) != checkpoint
+                            or [row['id'] for row in Directions(run).messages()] != checkpoint['directions']
+                            or workspace_fingerprint(Path(state['cwd']), ignore_dir=run) != checkpoint['tree']
+                            or not candidate_checks.valid(receipt, run, receipt.get('context'))):
+                        if field_handoff.ready(value):
+                            field_handoff.update_resume(run, value, 'stale', error='候选、验收命令或用户要求已变化。')
+                        continue
+                    if not field_handoff.ready(value):
+                        value = self._collect_field_results(meta, run, state, value)
+                        self._dispatch_handoff_tasks(meta, value)
+                    if field_handoff.ready(value) and 'resume' in view['actions']:
+                        request = value.get('resume') or {}
+                        if request.get('error') and not retry_failed:
+                            continue
+                        if (request.get('status') == 'launched' and view['status'] == 'interrupted'
+                                and state.get('status') == 'running'
+                                and request.get('agent_calls') == (state.get('usage') or {}).get('agent_calls', 0)):
+                            value = field_handoff.update_resume(run, value, 'pending',
+                                                               agent_calls=request['agent_calls'])
+                        self._resume_field_handoff(meta['id'], run, value)
+                except (OSError, ValueError, KeyError, TypeError, ControlError) as exc:
+                    logger.warning('任务 %s 的现场续审检查失败：%s', meta['id'], redact(str(exc)))
 
     def dispatch_plan(self, ident: str, page: int = 1, page_size: int = 10, status: str = 'all') -> dict:
         from console.dispatch import page as dispatch_page
@@ -1032,6 +1261,9 @@ class TaskStore:
         run.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Requirement is supplied by stdin, so even text beginning with '-' stays literal.
         arguments = self._resume_args(meta) if resume else self._new_args(meta)
+        saved_round = meta.pop('review_saved_round', None)
+        if resume and saved_round is not None:
+            arguments.append(f'--review-saved-round={saved_round}')
         argv = [sys.executable, '-m', 'auto_moniter', *arguments]
         env = os.environ.copy()
         env['AUTO_MONITER_AGENT_SETTINGS']=str(self.agents.path)
@@ -1307,8 +1539,17 @@ class TaskStore:
                 if action == 'resume':
                     arguments = self._resume_args(meta)
                     saved_state = read_json(run / 'state.json')
+                    handoff = self._field_handoff_view(run, saved_state)
+                    if (handoff and not field_handoff.ready(handoff)
+                            and [row['id'] for row in Directions(run).messages()] == handoff['binding']['directions']):
+                        raise TaskError('现场回执尚未齐备，请在任务详情中补交。', 409)
                     usage = saved_state.get('usage', {})
                     additions = data or {}
+                    if 'review_saved_round' in additions:
+                        saved_round = additions['review_saved_round']
+                        if type(saved_round) is not int or saved_round < 1:
+                            raise TaskError('补审轮次须为正整数。')
+                        meta = {**meta, 'review_saved_round': saved_round}
                     if 'referee' in additions:
                         if type(additions['referee']) is not bool:
                             raise TaskError('裁判开关必须为布尔值')
@@ -1343,9 +1584,12 @@ class TaskStore:
                         raise TaskError('已达到 Worker 执行轮次上限，请明确追加轮次后恢复', 409)
                     from auto_moniter.project_workspace import assignment_workspaces
                     from auto_moniter.assignment_delivery import links
+                    from auto_moniter.check_environment import source_aliases
                     for key, flag, validate in (
                             ('assignment_workspaces', '--assignment-workspace=', assignment_workspaces),
-                            ('assignment_deliveries', '--assignment-delivery=', links)):
+                            ('assignment_deliveries', '--assignment-delivery=', links),
+                            ('check_source_aliases', '--check-source-alias=',
+                             lambda values: source_aliases(values, saved_state.get('checks', [])))):
                         if key not in additions:
                             continue
                         bindings = additions[key]

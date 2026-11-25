@@ -121,6 +121,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--full-function-plan', action='store_true',
                      help='Require a complete reviewer function plan before dispatch; inherited on resume')
     run.add_argument('--quality-policy', type=Path, help='Immutable JSON requirements, baseline protection and verified-progress policy')
+    run.add_argument('--check-source-alias', action='append', metavar='check:N=NAME',
+                     help='Set FRONTEND_ROOT to an alias of the current workspace for one fixed check')
+    run.add_argument('--review-saved-round', type=_positive_int, help='On resume, independently review the unchanged current assignment from this round')
     run.add_argument("--max-runtime", default="0", help="Total active monitor runtime budget, including resumed runs; 0 disables")
     run.add_argument("--max-agent-calls", type=_nonnegative_int, default=0, help="Total worker/reviewer turns across resumed runs; 0 disables")
     run.add_argument("--max-output-bytes", type=_positive_int, default=None, help="Combined output limit per subprocess (default: 8 MiB; inherited on resume)")
@@ -431,6 +434,8 @@ def _run(args: argparse.Namespace) -> int:
         keep_rounds=args.keep_rounds,
         worker_isolation=args.worker_isolation, protect_paths=args.protect,
         assignment_workspaces=bindings,
+        check_source_aliases=[] if args.check_source_alias == [''] else args.check_source_alias,
+        review_saved_round=args.review_saved_round,
         assignment_deliveries=deliveries,
         assignment_contracts=contracts,
         memory_bytes=args.memory_bytes, file_bytes=args.file_bytes, max_run_bytes=args.max_run_bytes,

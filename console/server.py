@@ -9,6 +9,7 @@ import secrets
 import signal
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +35,12 @@ class ConsoleServer(ThreadingHTTPServer):
         self.csrf = secrets.token_urlsafe(32)
         super().__init__(address, Handler)
         self.supervision = SupervisionSchedule(store, self.server_address[1])
+        self._next_handoff_scan = None
+
+    def service_actions(self):
+        if self._next_handoff_scan is not None and time.monotonic() >= self._next_handoff_scan:
+            self._next_handoff_scan = time.monotonic() + 30
+            self.store.recover_field_handoffs(retry_failed=False)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -171,6 +178,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise TaskError('接口不存在', 404)
                 if parts[3] == 'directions':
                     self._json(self.server.store.add_direction(parts[2], data), 201)
+                elif parts[3] == 'field-handoff':
+                    self._json(self.server.store.field_handoff(parts[2], data))
                 elif parts[3] == 'requirement-queue':
                     self._json(self.server.store.queued_requirements(parts[2], data), 201)
                 elif parts[3] == 'supervision':
@@ -240,6 +249,8 @@ def main(argv=None) -> int:
                 try:
                     print(f'控制台已启动：http://127.0.0.1:{port}', flush=True)
                     print(f'任务数据：{data_dir}', flush=True)
+                    store.recover_field_handoffs()
+                    server._next_handoff_scan = time.monotonic() + 30
                     server.serve_forever(poll_interval=0.5)
                 finally:
                     if previous_term is not None:

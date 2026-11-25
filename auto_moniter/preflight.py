@@ -38,6 +38,9 @@ def validate(config) -> None:
         raise ValueError('review-first workflow requires an independent reviewer')
     if config.function_dispatch and (config.no_review or config.workflow not in ('review-first','auto')):
         raise ValueError('Function dispatch requires the review-first workflow')
+    if config.review_saved_round is not None and (not config.resume or type(config.review_saved_round) is not int
+                                                  or config.review_saved_round < 1):
+        raise ValueError('补审已保存候选须从原任务恢复并指定有效轮次。')
     if not isinstance(config.quality_policy, dict):
         raise ValueError('Quality policy must be an object')
     if config.quality_policy:
@@ -105,6 +108,9 @@ def validate(config) -> None:
             raise ValueError(f"Protected path must exist inside project: {name}")
     if not isinstance(config.checks, list) or any(not isinstance(command, str) or not command.strip() for command in config.checks):
         raise ValueError("Acceptance commands must be nonempty strings")
+    if not config.resume:
+        from auto_moniter.check_environment import source_aliases
+        source_aliases(config.check_source_aliases or [], config.checks)
     if not config.no_review and config.reviewer is None:
         raise ValueError("Pass --reviewer, or --no-review to trust the worker")
     for provider in [config.provider, *([config.reviewer] if not config.no_review else [])]:

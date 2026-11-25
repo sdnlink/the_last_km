@@ -80,6 +80,73 @@ class ReviewFirstTests(unittest.TestCase):
   self.assertEqual(worker.calls,[])
   self.assertFalse((self.root/'run'/'reviewed-requirement.json').exists())
 
+ def test_transport_failure_retries_the_same_coverage_review(self):
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  disconnected={'verdict':{},'exit_code':1,'stderr':
+                'Reconnecting... 1/5 (stream disconnected before completion: Upstream request failed)'}
+  reviewer=ScriptedProvider('reviewer',[
+   self.brief(),disconnected,approve_requirement_coverage(),{'verdict':_verdict('done',evidence=['app.py'])},
+  ])
+  result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
+  self.assertEqual(result.status,'done',result.summary)
+  self.assertEqual(len(worker.calls),1)
+  for call in reviewer.calls[1:3]:
+   self.assertIn('独立复核需求覆盖范围',call['prompt'])
+   self.assertIn(BRIEF['refined_requirement'],call['prompt'])
+   self.assertTrue(call['read_only'])
+  run=self.root/'run'
+  self.assertIn('Upstream request failed',(run/'2000001-reviewer-repair-2.log').read_text())
+  self.assertEqual(len(list(run.glob('*-requirement-coverage.json'))),1)
+
+ def test_persistent_transport_failure_preserves_coverage_revision_for_resume(self):
+  requirement='逐页复查筛选，返回列表时恢复原筛选。'
+  finding={'source_id':'original','quote':'返回列表时恢复原筛选','gap':'缺少恢复原筛选的用例'}
+  proposal=self.brief()
+  revision=self.brief({'status':'revise','summary':'发现漏项','findings':[finding]})
+  disconnected={'verdict':{},'exit_code':1,'stderr':'502 Bad Gateway'}
+  worker=ScriptedProvider('worker',[])
+  reviewer=ScriptedProvider('reviewer',[proposal,revision,*([disconnected]*4)])
+  with patch.object(Supervisor,'_consult_referee',side_effect=AssertionError('transport is not a planning defect')):
+   blocked=self.run_loop(worker,reviewer,requirement=requirement,referee=True)
+  self.assertEqual(blocked.status,'action_required',blocked.summary)
+  self.assertIn('自动重试后仍未恢复',blocked.summary)
+  self.assertEqual(worker.calls,[])
+  for call in reviewer.calls[2:]:
+   self.assertIn(finding['gap'],call['prompt'])
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  revised=self.brief({**BRIEF,'acceptance_criteria':[*BRIEF['acceptance_criteria'],finding['quote']]})
+  reviewer=ScriptedProvider('reviewer',[revised,approve_requirement_coverage(),
+   {'verdict':_verdict('done',evidence=['app.py'])}])
+  result=self.run_loop(worker,reviewer,requirement=requirement,referee=True,resume=True)
+  self.assertEqual(result.status,'done',result.summary)
+  self.assertIn(finding['gap'],reviewer.calls[0]['prompt'])
+  self.assertIn('requirement-review-context.json',reviewer.calls[0]['prompt'])
+  self.assertIn('独立复核需求覆盖范围',reviewer.calls[1]['prompt'])
+  self.assertEqual(len(list((self.root/'run').glob('*-requirement-coverage.json'))),2)
+
+ def test_authentication_failure_is_not_retried_as_transport(self):
+  worker=ScriptedProvider('worker',[])
+  reviewer=ScriptedProvider('reviewer',[{'verdict':{},'exit_code':1,'stderr':'HTTP 401 Unauthorized'}])
+  result=self.run_loop(worker,reviewer)
+  self.assertEqual(result.status,'action_required',result.summary)
+  self.assertEqual(len(reviewer.calls),1)
+  self.assertEqual(worker.calls,[])
+
+ def test_user_amendment_during_transport_backoff_invalidates_the_old_prompt(self):
+  from auto_moniter.directions import Directions
+  worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
+  reviewer=ScriptedProvider('reviewer',[
+   {'verdict':{},'exit_code':1,'stderr':'502 Bad Gateway'},
+   self.brief(),{'verdict':_verdict('done',evidence=['app.py'])},
+  ])
+  amendment='返回列表时保留筛选。'
+  with patch.object(Supervisor,'_retry_pause',side_effect=lambda *_: Directions(self.root/'run').append(amendment)):
+   result=self.run_loop(worker,reviewer)
+  self.assertEqual(result.status,'done',result.summary)
+  self.assertNotIn(amendment,reviewer.calls[0]['prompt'])
+  self.assertIn(amendment,reviewer.calls[1]['prompt'])
+  self.assertEqual(len(worker.calls),1)
+
  def test_invalid_coverage_source_is_rechecked_without_replanning(self):
   invalid=self.brief({
    'status':'revise','summary':'引用了裁判意见','findings':[

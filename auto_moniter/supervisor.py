@@ -1828,8 +1828,10 @@ class Supervisor:
                 self._check_budget()
                 continue
             if not self._project_review_changed or self._stop:
-                if not result and not self._stop and self._consult_referee(
-                        'planning', self.requirements_review.get('summary', 'Requirement planning did not finish'), records):
+                if (not result and not self._stop
+                        and self.requirements_review.get('failure_kind') != 'model_transport'
+                        and self._consult_referee(
+                            'planning', self.requirements_review.get('summary', 'Requirement planning did not finish'), records)):
                     next_function = bool(self.requirements_review.get('acceptance_criteria') or self.function_tasks.current
                                          or self._referee_replan)
                     continue
@@ -1973,6 +1975,40 @@ class Supervisor:
                 source.replace(self.run_dir / (artifact + suffix))
         return artifact + '-text.md'
 
+    def _invoke_planning_reviewer(self, prompt, index, *, directions, tree):
+        from auto_moniter.runtime_policy import transient_model_failure
+
+        for attempt in range(4):
+            self._process_control()
+            if (self._stop or self.directions.messages() != directions
+                    or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
+                return None
+            turn = self._invoke(self.config.reviewer, prompt, '', role='reviewer', index=index,
+                model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args,
+                read_only=True, direction_snapshot=directions)
+            if turn.session_id:
+                self._active_reviewer_id = turn.session_id
+            self._process_control()
+            if self._stop:
+                return None
+            if not (turn.exit_code or turn.timed_out or turn.interruption):
+                return turn
+            if not transient_model_failure(turn.interruption, turn.stderr):
+                return turn
+            if (self.directions.messages() != directions
+                    or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
+                self._archive_requirement_review(index)
+                return None
+            if attempt == 3:
+                raise _PlanningTransportFailure(
+                    f'Reviewer 的模型服务连接中断，自动重试后仍未恢复。方案和已验收结果已保存。'
+                    f'模型服务恢复后可继续原任务。请查看 {turn.output_path.name}。')
+            self._close_requirement_reviewer()
+            archived = self._archive_requirement_review(index)
+            self._event('planning_transport_retry', round=index, retry=attempt + 1,
+                        log=archived.removesuffix('-text.md') + '.log')
+            self._retry_pause(attempt + 1, 'Reviewer 模型服务连接中断')
+
     def _requirement_coverage_review(self, sources, plan, *, modules, checks, directions, tree):
         prompt = requirement_coverage.prompt(
             sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted)
@@ -1984,12 +2020,8 @@ class Supervisor:
                 self._close_requirement_reviewer()
                 index = 2000000 + self._agent_calls
                 self._event('requirement_coverage_started', round=index)
-                turn = self._invoke(self.config.reviewer, prompt, '', role='reviewer', index=index,
-                    model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args,
-                    read_only=True, direction_snapshot=directions)
-                self._active_reviewer_id = turn.session_id
-                self._process_control()
-                if (self._stop or self.directions.messages() != directions
+                turn = self._invoke_planning_reviewer(prompt, index, directions=directions, tree=tree)
+                if (turn is None or self.directions.messages() != directions
                         or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
                     return None
                 if turn.exit_code or turn.timed_out or turn.interruption:
@@ -2016,7 +2048,69 @@ class Supervisor:
         self._event('requirement_coverage_reviewed', status=result['status'], receipt=receipt)
         return result
 
-    def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None):
+    def _coverage_sources(self, directions):
+        sources = {'original': self.config.requirement, 'acceptance': self.config.acceptance}
+        if self.active_queued_requirement:
+            sources['queued'] = self.active_queued_requirement['text']
+        sources.update({item['id']: item['text'] for item in directions})
+        return sources
+
+    def _coverage_inputs(self, plan, staged_plan, sources, checks, tree):
+        reviewed_plan = dict(plan)
+        modules = self.modules.export()
+        if staged_plan:
+            ledger, dispatch, complete = staged_plan
+            modules = ledger.export()
+            reviewed_plan['next_task'] = dispatch.current
+            if complete:
+                reviewed_plan['function_plan'] = complete['tasks']
+        binding = {
+            'plan_sha256': requirement_coverage.digest(reviewed_plan),
+            'sources_sha256': requirement_coverage.digest(sources),
+            'checks_sha256': requirement_context.checks_digest(checks),
+            'modules_sha256': requirement_coverage.digest(modules),
+            'tree': tree,
+        }
+        return reviewed_plan, modules, binding
+
+    def _saved_coverage_revision(self, continuation, *, checks, tree, sources, next_function):
+        if (not continuation or continuation['source'] != 'saved requirement analysis'
+                or continuation['workspace_changed'] or continuation['checks_changed']
+                or continuation['new_direction_ids']):
+            return None
+        plan = continuation['previous_response']
+        if plan['status'] != 'ready':
+            return None
+        try:
+            brief = requirements_review.parse(json.dumps(
+                {key: plan[key] for key in requirements_review.SCHEMA['required']}))
+            brief['cycle'] = len(self.requirement_cycles) + 1
+            staged = self._stage_requirement_plan(plan['next_task'], plan['modules'], plan.get('function_plan'),
+                brief, next_function=next_function) if self.config.function_dispatch else None
+            _, _, binding = self._coverage_inputs(plan, staged, sources, checks, tree)
+        except (KeyError, ValueError):
+            return None
+        for path in sorted(self.run_dir.glob('*-requirement-coverage.json'), reverse=True):
+            try:
+                record = requirement_context.read(path, limit=128 * 1024)
+                if not isinstance(record, dict) or any(record.get(k) != v for k, v in binding.items()):
+                    continue
+                review = requirement_coverage.parse(json.dumps(
+                    {key: record[key] for key in requirement_coverage.SCHEMA['required']}), sources)
+            except (OSError, KeyError, ValueError, RecursionError):
+                continue
+            return (review, path.name) if review['status'] == 'revise' else None
+        return None
+
+    def _coverage_revision_prompt(self, prompt, review):
+        return (prompt + '\n\n独立复核发现以下需求缺项。'
+                '读取 ' + str(self.run_dir / 'requirement-review-context.json') + ' 中的 response 作为待修订方案。'
+                '仅修订缺项及其直接关联的验收与依赖条目，照录其他条目并返回完整方案。'
+                '仅在缺项需要新证据时查看对应文件。\n'
+                + json.dumps(review['findings'], ensure_ascii=False))
+
+    def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None,
+                                   directions, saved_revision=None):
         """Repair distinct planning errors with durable limits, without dispatching work."""
         from auto_moniter.adaptive_recovery import RecoveryJournal
         journal = RecoveryJournal(self.run_dir)
@@ -2024,21 +2118,24 @@ class Supervisor:
         signature = self.project.signature if self.project else ''
         recovery_context = {'kind':'requirement_plan', 'tree':tree, 'index':index,
                             'task':self.function_tasks.current,
-                            'directions':[item['id'] for item in self.directions.messages()]}
+                            'directions':[item['id'] for item in directions]}
         try:
             prompt += journal.prompt()
         except (OSError, ValueError):
             pass  # Advisory history cannot prevent an otherwise valid review.
         base_prompt = prompt
-        coverage_required = False
+        coverage_required = saved_revision is not None
+        if saved_revision:
+            review, receipt = saved_revision
+            prompt = self._coverage_revision_prompt(base_prompt, review)
+            self._event('requirement_coverage_revision_resumed', receipt=receipt, round=index)
         for attempt in range(5):
             self._process_control()
             if self._stop:
                 return None
-            turn = self._invoke(self.config.reviewer,prompt,'',role='reviewer',index=index,
-                model=self._reviewer_model(),extra_args=self.config.reviewer_extra_args,read_only=True)
-            if turn.session_id:
-                self._active_reviewer_id = turn.session_id
+            turn = self._invoke_planning_reviewer(prompt, index, directions=directions, tree=tree)
+            if turn is None:
+                return None
             if turn.exit_code or turn.timed_out or turn.interruption:
                 return turn
             if any(item['id'] not in self._direction_ids['reviewer'] for item in self.directions.messages()):
@@ -2149,10 +2246,7 @@ class Supervisor:
                     directions = self.directions.messages()
                     if [item['id'] for item in directions] != self._direction_ids['reviewer']:
                         return turn
-                    sources = {'original': self.config.requirement, 'acceptance': self.config.acceptance}
-                    if self.active_queued_requirement:
-                        sources['queued'] = self.active_queued_requirement['text']
-                    sources.update({item['id']: item['text'] for item in directions})
+                    sources = self._coverage_sources(directions)
                     modules = staged_plan[0].export() if staged_plan else self.modules.export()
                     coverage_required |= requirement_coverage.requires_review(
                         sources, modules, self.config.assignment_workspaces)
@@ -2166,27 +2260,19 @@ class Supervisor:
                             return turn
                         requirement_context.save(self.run_dir, self.config.cwd, self.config.requirement,
                             len(self.requirement_cycles) + 1, plan, snapshot, checks, directions)
-                        reviewed_plan = dict(plan)
-                        if staged_plan:
-                            _, dispatch, complete = staged_plan
-                            reviewed_plan['next_task'] = dispatch.current
-                            if complete:
-                                reviewed_plan['function_plan'] = complete['tasks']
+                        reviewed_plan, modules, _ = self._coverage_inputs(plan, staged_plan, sources, checks, tree)
                         review = self._requirement_coverage_review(
                             sources, reviewed_plan, modules=modules, checks=checks,
                             directions=directions, tree=tree)
                         if review is None:
-                            return None if self._stop else turn
+                            return None
                         if review['status'] == 'revise':
                             missing = '\n'.join(item['gap'] for item in review['findings'])[:1800]
                             if attempt >= 4 or not journal.admit(recovery_context, missing):
                                 raise ValueError('需求覆盖复核仍有缺项，派单尚未开始。' + missing)
                             self._close_requirement_reviewer()
                             self._archive_requirement_review(index)
-                            prompt = (base_prompt + '\n\n独立复核发现以下需求缺项。'
-                                      '保留已经覆盖的要求，只修订相关内容，并重新提交完整方案。\n'
-                                      + json.dumps(review['findings'], ensure_ascii=False)
-                                      + '\n待修订方案：\n' + turn.text)
+                            prompt = self._coverage_revision_prompt(base_prompt, review)
                             continue
                 try:
                     if isinstance(plan,dict) and plan.get('status') == 'ready':
@@ -2215,9 +2301,16 @@ class Supervisor:
         before_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
         before=snapshot_fingerprint(self.config.cwd,before_files)
         review_index = 910000 + self._next_round if next_function else 900000 + len(self.requirement_cycles) if follow_up else 0
+        directions = self.directions.messages()
         continuation = requirement_context.load(self.run_dir,self.config.cwd,self.config.requirement,
-            len(self.requirement_cycles)+1,before_files,review_checks,self.directions.messages(),
+            len(self.requirement_cycles)+1,before_files,review_checks,directions,
             previous=previous_result,output_file=f'{review_index:03d}-reviewer-text.md')
+        saved_revision = self._saved_coverage_revision(continuation, checks=review_checks, tree=before,
+            sources=self._coverage_sources(directions), next_function=next_function)
+        if saved_revision:
+            continuation = {key: value for key, value in continuation.items() if key != 'previous_response'}
+            continuation['response_file'] = str(self.run_dir / 'requirement-review-context.json')
+            self._archive_requirement_review(review_index)
         if not continuation and next_function and previous_brief.get('status') == 'ready':
             continuation = {'previous_response':previous_brief,'source':'approved requirement brief',
                             'workspace_changed':True,'changed_files':None,
@@ -2271,7 +2364,7 @@ class Supervisor:
                            'For needs_input use next_task=null. '
                            + (function_plan.planning_contract() if self.config.full_function_plan else 'Do not assign the full backlog. ')+
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))
-                if self.config.full_function_plan and self.function_plan:
+                if self.config.full_function_plan and self.function_plan and not saved_revision:
                     prompt += '\nPreviously approved function plan (revise remaining entries only with concrete findings):\n'+json.dumps(self.function_plan,ensure_ascii=False)
                 if self.config.assignment_contracts:
                     prompt += ('\n以下派单来自原任务。按编号保留原始目标、边界、验收描述和测试源码，'
@@ -2326,13 +2419,14 @@ class Supervisor:
                 self.project.observe(force=True)
             project_signature = self.project.signature if self.project else ''
             turn = self._invoke_requirement_review(prompt, index=review_index, checks=review_checks,
-                next_function=next_function, previous_brief=previous_brief)
-            if turn is None:
-                return False
+                next_function=next_function, previous_brief=previous_brief, directions=directions,
+                saved_revision=saved_revision)
             review_directions = [item for item in self.directions.messages()
                                  if item['id'] in self._direction_ids['reviewer']]
-            if turn.session_id:self._active_reviewer_id=turn.session_id
-            output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
+            if turn is not None:
+                if turn.session_id:
+                    self._active_reviewer_id = turn.session_id
+                output_file = turn.output_path.with_name(turn.output_path.stem + '-text.md').name
             after_files=file_snapshot(self.config.cwd,ignore_dir=self.run_dir)
             after=snapshot_fingerprint(self.config.cwd,after_files)
             if self.project:
@@ -2356,17 +2450,21 @@ class Supervisor:
                 preview = ', '.join(item['change']+' '+json.dumps(item['file'],ensure_ascii=False) for item in changes[:10])
                 raise ValueError('Workspace changed during requirement review; review was not accepted. '
                                  'Change source is unknown; concurrent writes are possible. Files: '+preview+'. See '+report)
-            if turn.exit_code or turn.timed_out or turn.interruption:
-                raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
-            if any(item['id'] not in self._direction_ids['reviewer'] for item in self.directions.messages()):
-                try:
-                    requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
-                        len(self.requirement_cycles)+1,json.loads(turn.text),before_files,review_checks,review_directions)
-                except (ValueError,TypeError):
-                    pass
-                output_file = self._archive_requirement_review(review_index)
+            if self.directions.messages() != directions:
+                if turn is not None and not (turn.exit_code or turn.timed_out or turn.interruption):
+                    try:
+                        requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
+                            len(self.requirement_cycles)+1,json.loads(turn.text),before_files,review_checks,review_directions)
+                    except (ValueError,TypeError):
+                        pass
+                if output_file:
+                    output_file = self._archive_requirement_review(review_index)
                 self._requirement_input_changed = True
                 raise ValueError('New user directions arrived during requirement review; revalidation required before dispatch')
+            if turn is None:
+                return False
+            if turn.exit_code or turn.timed_out or turn.interruption:
+                raise ValueError('Requirement reviewer failed: '+(turn.stderr or turn.interruption or str(turn.exit_code)))
             if self.config.function_dispatch:
                 plan = json.loads(turn.text)
                 if not isinstance(plan, dict) or not {'next_task','modules'} <= plan.keys():
@@ -2433,6 +2531,7 @@ class Supervisor:
         except ValueError as exc:
             self.requirements_review={'status':'failed','summary':redact(str(exc)),
                                       'cycle': len(self.requirement_cycles) + 1,
+                                      **({'failure_kind': 'model_transport'} if isinstance(exc, _PlanningTransportFailure) else {}),
                                       **({'output_file':output_file} if output_file else {}),
                                       **({'workspace_changes':workspace_changes} if workspace_changes else {})}
             if (follow_up and not self._stop_requested and not self._project_review_changed
@@ -6915,6 +7014,10 @@ class _CompletedTurn:
     structured: bool = False
     stderr: str = ""
     interruption: str = ""
+
+
+class _PlanningTransportFailure(ValueError):
+    pass
 
 
 def _paseo_archive(binary: str, agent_id: str, cwd: Path) -> bool:

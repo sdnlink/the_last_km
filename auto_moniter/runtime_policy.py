@@ -4,6 +4,21 @@ import re
 import time
 
 
+def transient_model_failure(interruption, error):
+    """Recognize provider transport failures, including a CLI's final failed reconnect."""
+    if interruption:
+        return interruption == 'network retry budget'
+    if re.search(r'\b(?:401|403)\b|unauthorized|invalid.api.key|authentication', error, re.I):
+        return False
+    return bool(re.search(
+        r'stream disconnected before completion|idle timeout waiting for SSE|upstream request failed|'
+        r'\b(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)\b|'
+        r'(?:unexpected |http )status(?: code)?[ :]+50[234]\b|'
+        r'connection (?:reset|refused|closed)|error sending request for url',
+        error, re.I,
+    ))
+
+
 class RetryWatch:
     def __init__(self, limit_s):
         self.limit_s = limit_s

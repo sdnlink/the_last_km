@@ -48,6 +48,7 @@ class ScriptedProvider(Provider):
                 from pathlib import Path
                 {touch_line}
                 print(json.dumps({payload!r}))
+                sys.stderr.write({script.get('stderr', '')!r})
                 sys.exit({code})
                 """
             ),

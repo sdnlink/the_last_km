@@ -165,6 +165,11 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     elif 'authentication' in text or re.search(r'\b401\b|unauthorized|not signed in|not logged in|invalid.api.key|grok login|set the xai_api_key',text):
         code='authentication';title='模型认证失败';reason='所选执行器未能通过认证，调用结果不能用于验收。'
         actions=['在启动控制台的同一用户环境中完成登录或配置对应密钥，再恢复原任务；不要在需求里填写密钥。']
+    elif '模型服务连接中断' in text:
+        code='model_service_unavailable';title='Reviewer 的模型服务暂时不可用'
+        role='reviewer';phase='需求复核'
+        reason='模型连接中断，自动重试后仍未恢复。Watcher 已保存方案和已验收结果。'
+        actions=['打开对应日志确认上游服务状态，服务恢复后继续原任务。']
     elif 'no output' in text or 'idle timeout' in text:
         code='idle_timeout';title='模型长时间没有输出';reason='调用达到无输出时限，被监督器中断；这与总运行预算、单轮硬上限不同。'
         actions=['检查该轮模型日志和连接状态；恢复时根据实际输出方式调整 idle-timeout，保留总预算。']

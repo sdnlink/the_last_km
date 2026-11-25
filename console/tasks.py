@@ -45,7 +45,7 @@ from console.agents import AgentManager
 from auto_moniter.agent_settings import AGENTS, read_settings
 from console.diagnostics import diagnose, console_result, present_summary
 from console.launch import abort_start
-from console import migration
+from console import debug_preview, migration
 
 
 PROVIDERS = tuple(AGENTS)
@@ -488,6 +488,7 @@ class TaskStore:
                      'quality_state': state.get('quality_state', {}) if include_details else {},
                      'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},
                      'field_handoff': self._field_handoff_view(run, state) if include_details else {},
+                     'local_preview': self._local_preview_view(meta) if include_details else {},
                      'activity': progress,
                      'work': work,
                      'control_message': control_message, 'resume_unavailable': resume_unavailable,
@@ -681,6 +682,32 @@ class TaskStore:
             return field_handoff.public(value) if value and field_handoff.binding(state) == value['binding'] else {}
         except (OSError, ValueError, KeyError):
             return {}
+
+    def _local_preview_view(self, meta) -> dict:
+        if not meta.get('managed') or not debug_preview.available(Path(meta['cwd'])):
+            return {'status': 'unavailable'}
+        try:
+            return debug_preview.status(self.data_dir / 'debug-previews' / run_key(Path(meta['run_dir'])))
+        except (OSError, ValueError, KeyError):
+            return {'status': 'failed', 'message': '暂时无法读取本地调试状态。'}
+
+    def local_preview(self, ident: str, data: dict | None = None) -> dict:
+        with self._lock:
+            meta = self._get(ident)
+            if data is None:
+                return self._local_preview_view(meta)
+            workspace = Path(meta['cwd'])
+            if not meta.get('managed') or not debug_preview.available(workspace):
+                return {'status': 'unavailable'}
+            directory = self.data_dir / 'debug-previews' / run_key(Path(meta['run_dir']))
+            try:
+                if data.get('action') == 'start':
+                    return debug_preview.start(directory, workspace, data)
+                if data.get('action') == 'stop':
+                    return debug_preview.stop(directory)
+                raise ValueError('请选择启动或关闭本地调试。')
+            except (ValueError, RuntimeError) as exc:
+                raise TaskError(str(exc), 409) from exc
 
     def field_handoff(self, ident: str, data: dict) -> dict:
         from auto_moniter.workspace import workspace_fingerprint
@@ -1595,6 +1622,7 @@ class TaskStore:
                 try:
                     validate_log_location(run, Path(view['cwd']))
                     with inactive_run(run) as directory:
+                        debug_preview.remove(self.data_dir / 'debug-previews' / run_key(run))
                         cleanup = purge_run_logs(directory)
                         marker = self.deleted_dir / (run_key(run) + '.json')
                         write_json(marker, {'id': ident, 'run_dir': str(run.resolve()),
@@ -1612,7 +1640,7 @@ class TaskStore:
                                 write_json(lifecycle,previous_lifecycle,durable=True)
                             marker.unlink(missing_ok=True)
                             raise
-                except ValueError as exc:
+                except (ValueError, RuntimeError) as exc:
                     raise TaskError(str(exc), 409) from exc
                 except OSError as exc:
                     raise TaskError(f'任务日志清理或删除失败，请重试：{exc}', 500) from exc

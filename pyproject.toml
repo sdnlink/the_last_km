@@ -35,7 +35,7 @@ include = ["auto_moniter*", "console*"]
 
 [tool.setuptools.package-data]
 auto_moniter = ["skills/*/SKILL.md"]
-console = ["static/*", "static/pages/*", "static/fragments/*"]
+console = ["static/*", "static/pages/*", "static/fragments/*", "debug_preview.mjs"]
 
 [tool.setuptools.data-files]
 "share/doc/auto-moniter" = ["README.md", "README.zh-CN.md", "OPERATIONS.md", "CHANGELOG.md", "QUALITY_POLICY.md", "ACCEPTANCE_GUIDE.md", "WORKFLOW.md"]

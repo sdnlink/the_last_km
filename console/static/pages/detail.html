@@ -11,7 +11,22 @@
             <div class="detail-page-actions"><div id="detail-actions"></div><div class="detail-edit-actions"><button class="button secondary" id="detail-open-direction">调整当前需求</button><button class="button primary" id="detail-open-requirement-queue">追加排队需求</button></div></div>
           </header>
           <div id="detail-current-state"></div>
+          <div id="detail-local-preview" class="detail-edit-actions" hidden></div>
           <!-- DETAIL_TABS -->
           </section>
           <!-- DETAIL_CONTENT -->
+          <dialog id="preview-backend-dialog" aria-labelledby="preview-backend-title">
+            <form id="preview-backend-form">
+              <div class="dialog-heading"><h2 id="preview-backend-title">填写测试后端</h2></div>
+              <div class="form-body">
+                <p id="preview-backend-reason"></p>
+                <label>测试后端地址 <input name="backend" type="url" autocomplete="off" required maxlength="500"></label>
+                <p id="preview-backend-error" role="alert" hidden></p>
+              </div>
+              <div class="dialog-footer">
+                <button class="button secondary" type="button" data-close="preview-backend-dialog">暂不填写</button>
+                <button class="button primary" type="submit">连接并继续</button>
+              </div>
+            </form>
+          </dialog>
         </section>

@@ -9,6 +9,43 @@ const id=document.body.dataset.taskId;
 const section=$('#detail-page').dataset.section;
 let task,role='all',log='',logSequence=0,logTotal=0;
 let dispatchData=null,dispatchFilter='all',dispatchSequence=0;
+let previewPrompted=false,previewChanging=false;
+const previewAPI=()=>`/api/tasks/${encodeURIComponent(id)}/local-preview`;
+
+function showPreviewPrompt(preview){
+ const dialog=$('#preview-backend-dialog');
+ $('#preview-backend-reason').textContent=i18n(preview.message);
+ if(dialog.open||$('dialog[open]'))return;
+ $('#preview-backend-error').hidden=true;
+ if(!$('#dialog-styles')){
+  const css=document.createElement('link');css.id='dialog-styles';css.rel='stylesheet';css.href='/dialogs.css';document.head.append(css);
+ }
+ previewPrompted=true;
+ dialog.showModal();
+}
+function renderPreview(preview){
+ const panel=$('#detail-local-preview');
+ if(!panel)return;
+ panel.hidden=!preview?.status||preview.status==='unavailable';
+ if(panel.hidden)return;
+ const link=preview.status==='ready'?`<a class="button secondary" href="${escape(preview.url)}" target="_blank" rel="noopener noreferrer">${i18n('打开本地调试')}</a>`:'';
+ const starting=preview.status==='starting';
+ const label=preview.status==='needs_input'?'填写测试后端':starting?'正在启动本地调试':'启动本地调试';
+ const start=link||`<button class="button secondary" data-preview-action="start"${starting?' disabled':''}>${i18n(label)}</button>`;
+ const stop=link||starting?`<button class="button secondary" data-preview-action="stop">${i18n('关闭本地调试')}</button>`:'';
+ stableHTML(panel,`${start}${stop}${preview.status==='failed'?'<small role="status">'+escape(i18n(preview.message))+'</small>':''}`);
+ if(preview.status==='needs_input'&&!previewPrompted)showPreviewPrompt(preview);
+ if(preview.status!=='needs_input')previewPrompted=false;
+}
+async function changePreview(payload){
+ if(previewChanging)return;
+ previewChanging=true;
+ try{
+  const result=await api(previewAPI(),payload);
+  if(task)task.local_preview=result;
+  renderPreview(result);
+ }finally{previewChanging=false;}
+}
 const receiptFields={
  observation:['result'],
  deployment:['version','manifest_sha256','rollback','result'],
@@ -86,6 +123,7 @@ function render(t){
  $('#detail-open-requirement-queue').disabled=!t.can_queue_requirements;
  $('#detail-actions').innerHTML=`${badge(t)}${taskButtons(t)}`;
  stableHTML($('#detail-current-state'),taskNarrativeHTML(t));
+ if(!previewChanging)renderPreview(t.local_preview);
  if(section==='home'){
   renderUsage(t.health.usage||{},t.time_estimate||{});
   renderWorkflow(t,{role});
@@ -210,6 +248,27 @@ async function loadLogs(){
  }catch(error){if(error.status===404&&log){log='';return loadLogs();}throw error;}
 }
 export function mount(){
+ $('#detail-local-preview')?.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-preview-action]');
+  if(!button)return;
+  if(button.dataset.previewAction==='start'&&task?.local_preview?.status==='needs_input'){
+   showPreviewPrompt(task.local_preview);return;
+  }
+  try{await changePreview({action:button.dataset.previewAction});}
+  catch(error){toast(error.message,true);}
+ });
+ $('#preview-backend-form')?.addEventListener('submit',async event=>{
+  event.preventDefault();
+  if(previewChanging)return;
+  const form=event.currentTarget,error=$('#preview-backend-error');
+  error.hidden=true;
+  form.querySelector('[type=submit]').disabled=true;
+  try{
+   await changePreview({action:'start',backend:new FormData(form).get('backend')});
+   if(task?.local_preview?.status!=='needs_input')$('#preview-backend-dialog').close();
+  }catch(exc){error.textContent=exc.message;error.hidden=false;}
+  finally{form.querySelector('[type=submit]').disabled=false;}
+ });
  $('#detail-field-handoff')?.addEventListener('submit',async event=>{
   const form=event.target.closest('[data-field-receipt],[data-field-claim],[data-field-release]');
   if(!form)return;

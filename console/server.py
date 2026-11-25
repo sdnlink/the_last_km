@@ -112,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._json(self.server.store.logs(parts[2], name, page, size))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
+                elif len(parts) == 4 and parts[3] == 'local-preview':
+                    self._json(self.server.store.local_preview(parts[2]))
                 elif len(parts) == 4 and parts[3] == 'requirement-queue':
                     self._json(self.server.store.queued_requirements(parts[2]))
                 elif len(parts) == 4 and parts[3] == 'dispatch-plan':
@@ -180,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.server.store.add_direction(parts[2], data), 201)
                 elif parts[3] == 'field-handoff':
                     self._json(self.server.store.field_handoff(parts[2], data))
+                elif parts[3] == 'local-preview':
+                    self._json(self.server.store.local_preview(parts[2], data))
                 elif parts[3] == 'requirement-queue':
                     self._json(self.server.store.queued_requirements(parts[2], data), 201)
                 elif parts[3] == 'supervision':

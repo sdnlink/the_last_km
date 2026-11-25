@@ -68,6 +68,10 @@ test('paused and stopped workflow stages cannot retain live animation after poll
    if(status==='running')assert.match(html,/data-motion="running"/);
    else assert.doesNotMatch(html,/data-motion="running"/);
   }
+  renderWorkflow(task('running','refereeing'),{showRoles:false});
+  assert.match(nodes['#workflow-stages'].innerHTML,/data-role="referee" data-motion="running" aria-current="step"/);
+  renderWorkflow(task('running','publishing'),{showRoles:false});
+  assert.match(nodes['#workflow-stages'].innerHTML,/data-role="watcher" data-motion="running" aria-current="step"/);
  }finally{Object.assign(globalThis,previous);}
 });
 
@@ -89,7 +93,12 @@ test('role cards distinguish current review work from its earlier waiting explan
  assert.match(html,/scene-scan/);assert.match(html,/scene-sweep/);assert.match(html,/scene-cursor/);
  assert.match(html,/<details class="role-runtime" data-key="role-runtime-reviewer">/);
  assert.match(html,/Waiting for review/);
- assert.doesNotMatch(roleDetailsHTML({...t,status:'paused'}),/data-motion="running"/);
+ assert.match(html,/data-role="reviewer" data-motion="running" data-current-work="true"/);
+ assert.match(html,/data-role="watcher" data-motion="monitoring"/);
+ assert.doesNotMatch(roleDetailsHTML({...t,status:'paused'}),/data-current-work|data-motion="running"/);
+ const validating=roleDetailsHTML({...t,health:{phase:'validating'}});
+ assert.match(validating,/data-role="watcher" data-motion="running" data-current-work="true"/);
+ assert.match(validating,/data-role="reviewer" data-motion="waiting"/);
  assert.equal(rolePresentation({...t,health:{phase:'retry_wait'}},'reviewer',{status:'running'}).state,'waiting');
 });
 

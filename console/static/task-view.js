@@ -89,10 +89,16 @@ function roleActivity(t,name,r,presentation){
   if(presentation.state==='attention'||presentation.state==='error')return {title:presentation.label,work:t.failure?.reason||taskNarrative(t).next};
   return {title:presentation.label,work:r.last_conclusion?.summary||r.current_work||i18n('暂无工作记录')};
 }
+const phaseRoles={working:'worker',reviewing:'reviewer',refining_requirements:'reviewer',
+  refereeing:'referee',validating:'watcher',publishing:'watcher',closing_agents:'watcher'};
 function roleDetailsHTML(t) {
+  const phaseRole=phaseRoles[t.health?.phase];
   return ["worker", "reviewer", ...(t.work?.roles?.referee ? ["referee"] : []), "watcher"].map(name => {
     const r = t.work?.roles?.[name] || {status:"not_started"};
-    const presentation=rolePresentation(t,name,r);
+    const staleRunning=phaseRole&&phaseRole!==name&&name!=='watcher'&&r.status==='running';
+    const presentation=rolePresentation(t,name,staleRunning?{...r,status:'waiting'}:r);
+    const current=presentation.state==='running'&&phaseRole===name;
+    const motion=name==='watcher'&&!current&&presentation.state==='running'?'monitoring':presentation.state;
     const titles = {worker:i18n("任务实现"), reviewer:i18n("独立审查"), referee:i18n("异常恢复决策"), watcher:i18n("监督与调度")};
     const last = r.last_conclusion;
     const activity=roleActivity(t,name,r,presentation);
@@ -111,7 +117,7 @@ function roleDetailsHTML(t) {
     }
     const overview=name==='watcher'?[[i18n('最近心跳'),r.heartbeat_age_s==null?'—':i18n`${duration(r.heartbeat_age_s)} 前`],[i18n('模型调用'),`${r.usage?.agent_calls||0} / ${r.usage?.max_agent_calls||i18n('不限')}`]]:
       [[i18n('执行器'),r.provider||'—'],[i18n('工作轮次'),r.round==null?'—':i18n`第 ${r.round} 轮`]];
-    return i18nHTML`<article class="role-card role-${name}" data-role="${name}" data-motion="${presentation.state}"><header class="role-card-title"><div><strong>${roleName(name)}</strong><small>${name} · ${titles[name]}</small></div><span class="role-state">${stateLabel(presentation.state,presentation.label)}</span></header><div class="role-activity-scene">${roleSceneHTML(name)}<div class="role-scene-caption">${stateLabel(presentation.state,activity.title)}</div></div><div class="role-work"><span class="role-work-label">${presentation.state==='running'?i18n('此刻正在做'):presentation.state==='waiting'?i18n('为何等待'):i18n('当前说明')}</span><p class="role-current">${escape(activity.work)}</p><div class="role-work-flow" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div><dl class="role-overview">${overview.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl><footer class="role-card-footer"><details class="role-runtime" data-key="role-runtime-${name}"><summary>${i18n('运行详情')}</summary><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl>${last?i18nHTML`<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p>${watcherHTML(last)}${checkpointHTML(t.id,last)}</div>`:''}</details><button class="detail-button" data-role-focus="${name}">${i18n('工作记录')} ↗</button></footer></article>`;
+    return i18nHTML`<article class="role-card role-${name}" data-role="${name}" data-motion="${motion}"${current?' data-current-work="true"':''}><header class="role-card-title"><div><strong>${roleName(name)}</strong><small>${name} · ${titles[name]}</small></div><span class="role-state">${stateLabel(motion,current?i18n('正在工作'):presentation.label)}</span></header><div class="role-activity-scene">${roleSceneHTML(name)}<div class="role-scene-caption">${stateLabel(motion,activity.title)}</div></div><div class="role-work"><span class="role-work-label">${current?i18n('此刻正在做'):motion==='waiting'?i18n('为何等待'):i18n('当前说明')}</span><p class="role-current">${escape(activity.work)}</p><div class="role-work-flow" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div><dl class="role-overview">${overview.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl><footer class="role-card-footer"><details class="role-runtime" data-key="role-runtime-${name}"><summary>${i18n('运行详情')}</summary><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl>${last?i18nHTML`<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p>${watcherHTML(last)}${checkpointHTML(t.id,last)}</div>`:''}</details><button class="detail-button" data-role-focus="${name}">${i18n('工作记录')} ↗</button></footer></article>`;
   }).join("");
 }
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
@@ -119,15 +125,16 @@ function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true}
   const phase = t.health.phase;
   const stages = t.workflow==='review-first'
     ? [["reviewer",i18n("reviewer 完善需求"),"refining_requirements"],["worker",i18n("worker 实现"),"working"],["checks",i18n("审查前运行固定检查"),"validating"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 提交已审核代码"),"publishing"],["watcher",i18n("归档交付"),"closing_agents"]]
-    : [["worker",i18n("worker 实现"),"working"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 验收与本地提交"),"validating"],["watcher",i18n("归档交付"),"closing_agents"]];
-  const stageTitles={refining_requirements:i18n('梳理需求'),working:i18n('实现需求'),validating:i18n('运行检查'),reviewing:i18n('独立审查'),publishing:i18n('保存提交'),closing_agents:i18n('整理记录')};
+    : [["worker",i18n("worker 实现"),"working"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 验收与本地提交"),phase==='publishing'?'publishing':'validating'],["watcher",i18n("归档交付"),"closing_agents"]];
+  if(phase==='refereeing')stages.splice(-1,0,['referee',roleName('referee'),'refereeing']);
+  const stageTitles={refining_requirements:i18n('梳理需求'),working:i18n('实现需求'),validating:i18n('运行检查'),reviewing:i18n('独立审查'),refereeing:i18n('裁判诊断'),publishing:i18n('保存提交'),closing_agents:i18n('整理记录')};
   stableHTML($("#workflow-stages"), stages.map(([role,label,stage],i) => {
     const skipped = stage === "reviewing" && t.work?.roles?.reviewer?.status === "disabled";
     const complete = t.status === "done" && !skipped;
     const current = active(t) && phase === stage && !skipped;
     const state=skipped?'idle':complete?'complete':current?taskMotion(t):t.status==='paused'?'paused':['running','starting'].includes(t.status)?'waiting':'idle';
     const text=skipped?i18n('未启用'):complete?i18n('已完成'):current?(state==='running'?i18n('正在执行'):state==='paused'?i18n('已暂停'):state==='attention'?i18n('连接待确认'):i18n('等待当前操作结束')):t.status==='paused'?i18n('等待恢复'):state==='waiting'?i18n('等待调度'):i18n('当前未执行');
-    return `<div class="workflow-stage ${complete ? "complete" : current ? "current" : ""}" data-motion="${state}"><span>${skipped ? "—" : complete ? "✓" : i+1}</span><div><strong title="${escape(label)}">${stageTitles[stage]}</strong><small>${stateLabel(state,text)}</small></div></div>`;
+    return `<div class="workflow-stage ${complete ? "complete" : current ? "current" : ""}" data-role="${phaseRoles[stage]||role}" data-motion="${state}"${current?' aria-current="step"':''}><span>${skipped ? "—" : complete ? "✓" : i+1}</span><div><strong title="${escape(label)}">${stageTitles[stage]}</strong><small>${stateLabel(state,text)}</small></div></div>`;
   }).join(""));
   const currentRound = t.activity?.round;
   const currentStart = Date.parse(t.activity?.started_at) || 0;

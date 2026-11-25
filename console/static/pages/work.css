@@ -311,9 +311,13 @@
 
 .workflow-stage small { display:block; font-size:10px; margin-top:5px; }
 
-.workflow-stage.current { background:var(--accent-soft); color:var(--accent); border-color:var(--accent-line); }
+.workflow-stage[data-role] > span { background:var(--role-soft); color:var(--role-color); }
 
-.workflow-stage.current > span, .workflow-stage.complete > span { background:#d7eee8; color:#15877c; }
+.workflow-stage.current[data-motion="running"] { background:var(--role-soft); color:var(--role-color); border-color:var(--role-color); box-shadow:inset 3px 0 var(--role-color); }
+.workflow-stage.current[data-motion="running"] > span { background:var(--role-color); color:#fff; }
+.workflow-stage.current[data-motion="running"] strong { font-weight:700; }
+.workflow-stage.current[data-motion="running"] .component-state { color:inherit; }
+.workflow-stage.complete > span { background:#d7eee8; color:#15877c; }
 
 .workflow-stage.complete { color:#4c9185; }
 
@@ -410,15 +414,21 @@
 .role-panel { container-type:inline-size; }
 .role-details { align-items:start; gap:12px; padding:0 16px 16px; }
 .role-details:has(.role-referee) { grid-template-columns:repeat(4,minmax(0,1fr)); }
-.role-card { --role-color:#087d78; --role-soft:#edf7f5; display:flex; flex-direction:column; padding:0; border-radius:14px; background:#fff; overflow:hidden; box-shadow:none; }
-.role-card.role-reviewer { --role-color:#5d70bd; --role-soft:#f0f2fc; }
-.role-card.role-watcher { --role-color:#a47636; --role-soft:#faf5ec; }
-.role-card[data-motion="running"] { border-color:color-mix(in srgb,var(--role-color) 35%,white); box-shadow:none; }
-.role-card-title { padding:12px 12px 0; align-items:flex-start; flex-wrap:wrap; gap:4px 8px; }
+[data-role="worker"] { --role-color:#08736d; --role-soft:#e3f4f0; }
+[data-role="reviewer"] { --role-color:#345da6; --role-soft:#eaf0fc; }
+[data-role="referee"] { --role-color:#77469b; --role-soft:#f3eafa; }
+[data-role="watcher"] { --role-color:#855813; --role-soft:#fbf0dc; }
+.role-card { display:flex; flex-direction:column; padding:0; border-radius:14px; background:#fff; overflow:hidden; box-shadow:none; }
+.role-card-title { background:var(--role-soft); padding:10px 12px 8px; align-items:flex-start; flex-wrap:wrap; gap:4px 8px; }
 .role-card-title strong { display:block; font-family:inherit; font-size:15px; color:var(--role-color); }
 .role-card-title small { display:block; margin-top:2px; color:var(--muted); font:10px/1.5 monospace; }
 .role-state { padding:4px 7px; background:var(--role-soft); color:var(--role-color); font-size:10px; }
 .role-state .component-state { color:inherit; }
+.role-card[data-current-work="true"] { border-color:var(--role-color); box-shadow:0 0 0 1px var(--role-color); }
+.role-card[data-current-work="true"] .role-card-title { box-shadow:inset 3px 0 var(--role-color); }
+.role-card[data-current-work="true"] .role-state { background:var(--role-color); color:#fff; font-weight:700; }
+.role-state [data-motion="paused"] { color:var(--amber); }
+.role-state :is([data-motion="attention"], [data-motion="error"]) { color:var(--red); }
 .role-activity-scene { position:relative; display:grid; grid-template-columns:44px minmax(0,1fr); align-items:center; gap:6px; margin:8px 12px 0; padding:4px 8px; border-radius:8px; background:var(--role-soft); color:var(--role-color); }
 .role-scene { display:block; width:44px; height:28px; stroke:currentColor; stroke-width:1.5; }
 .scene-window { fill:white; stroke-opacity:.5; }

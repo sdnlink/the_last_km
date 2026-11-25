@@ -296,6 +296,7 @@ export default {
   "已完成": "Completed",
   "已暂停": "Paused",
   "正在执行": "Running",
+  "正在工作": "Working now",
   "进度说明": "Progress update",
   "执行命令": "Command",
   "文件变更": "File changes",

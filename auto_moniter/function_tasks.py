@@ -353,6 +353,7 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
            'If progress requires an external prerequisite and there is no runnable repair, report it in blockers '
            'and return next_task=null. Use field_handoffs for each concrete prerequisite. Include the type '
            '(deployment, browser or observation), task title, responsible role and exact evidence needed. '
+           'For browser evidence use a matching configured case_id when available, otherwise set case_id to an empty string. '
            'Return field_handoffs=[] in all other cases. '
            if task.get('kind') == 'verification' else
            'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +

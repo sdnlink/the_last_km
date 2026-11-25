@@ -1139,10 +1139,27 @@ class Supervisor:
             review_prompt = self._review_prompt(round_index, verdict, turn.output_path, tree, last_review)
             from auto_moniter import field_handoff
             handoff = field_handoff.read(self.run_dir) if pending and self._verification_only() else {}
-            handoff_applied = field_handoff.matches(handoff,
+            handoff_bound = field_handoff.matches_checkpoint(handoff,
                 task=self.function_tasks.current, round_index=round_index, tree=tree,
                 checks_digest=record.watcher_result.get('candidate_checks', {}).get('digest'),
                 directions=self._dispatch_directions)
+            fallback = handoff.get('fallback', {}) if handoff_bound else {}
+            if fallback.get('revision') != handoff.get('revision'):
+                fallback = {}
+            if fallback.get('role') == 'referee' and self.config.referee:
+                reason = '浏览器自动用例未完成。请确定可执行的补证路径。' + json.dumps(fallback['failures'], ensure_ascii=False)
+                if self._consult_referee('browser_evidence', reason, records, candidate=record):
+                    if self._referee_replan:
+                        raise RefereeRedirect(reason)
+                if self._stop:
+                    return self._finish('stopped' if self._stop_requested else 'action_required',
+                                        self._stop_reason or reason, records, verdict)
+            handoff_applied = handoff_bound and (field_handoff.ready(handoff) or bool(fallback))
+            if fallback:
+                review_prompt += ('\n\n自动浏览器用例未取得以下证据。请在原权限内核对已有证据或批准的检查，'
+                                  '能补齐时给出依据，仍有缺项时明确所需执行能力。'
+                                  '自动化失败本身不证明现场行为通过。\n'
+                                  + json.dumps(fallback['failures'], ensure_ascii=False))
             if handoff_applied:
                 record.watcher_result['field_handoff_revision'] = handoff['revision']
                 review_prompt += ('\n\n控制台提交了以下现场交接回执。Watcher 已核对派单、候选、轮次和检查记录。'
@@ -2937,7 +2954,7 @@ class Supervisor:
             if handoffs:
                 value = field_handoff.read(self.run_dir)
                 if (not record or record.watcher_result.get('field_handoff_revision') != value.get('revision')
-                        or not field_handoff.matches(value, task=self.function_tasks.current,
+                        or not field_handoff.matches_checkpoint(value, task=self.function_tasks.current,
                             round_index=record.index, tree=tree, directions=self._dispatch_directions,
                             checks_digest=record.watcher_result.get('candidate_checks', {}).get('digest'))
                         or not handoffs <= field_handoff.citations(value)):
@@ -3275,7 +3292,7 @@ class Supervisor:
                 raise ValueError('Referee did not finish: ' + (turn.stderr or turn.interruption or str(turn.exit_code)))
             decision = referee.parse(turn.text)
             action = decision['action']
-            if kind == 'reviewer_failure' and action == 'retry_worker':
+            if kind in {'reviewer_failure', 'browser_evidence'} and action == 'retry_worker':
                 raise ValueError('Review transport failure cannot authorize repeating implementation')
             if kind == 'planning' and action not in {'replan', 'wait'}:
                 raise ValueError('Failed planning requires replanning or a concrete external prerequisite')
@@ -6705,6 +6722,13 @@ class Supervisor:
             from auto_moniter.field_handoff import executor_prompt
 
             prompt += executor_prompt(self.config.cwd, self.run_dir)
+        if role == 'reviewer' and self._verification_only():
+            from auto_moniter.browser_execution import reviewer_cases
+
+            try:
+                prompt += reviewer_cases(self.config.cwd)
+            except (OSError, ValueError, TypeError):
+                pass
         schema_path = self.schema_path
         if report_only:
             if role != 'worker' or not read_only:

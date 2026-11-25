@@ -31,7 +31,7 @@ from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
-from auto_moniter import candidate_checks, field_handoff
+from auto_moniter import browser_execution, candidate_checks, field_handoff
 from auto_moniter.requirement_queue import RequirementQueue
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
@@ -805,18 +805,34 @@ class TaskStore:
 
     def _collect_field_results(self, meta, run, state, value):
         errors = {}
+        failed_cases = {}
         for item in value['items']:
             if item.get('receipt'):
                 continue
             ident = item.get('executor_task')
-            if not ident:
-                errors[item['id']] = '尚未关联获准的执行任务。'
-                continue
             if item['kind'] == 'browser' and any(row['kind'] == 'deployment' and not row.get('receipt')
                                                 for row in value['items']):
                 errors[item['id']] = '等待同一候选的部署回执。'
                 continue
             try:
+                if not ident:
+                    case_id = item.get('case_id')
+                    if not case_id:
+                        errors[item['id']] = '尚未关联获准的执行任务。'
+                        if item['kind'] == 'browser' and not item.get('allow_manual'):
+                            failed_cases[item['id']] = {'case_id':'', 'reason':errors[item['id']], 'role':'reviewer'}
+                        continue
+                    config = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd'])).get(case_id)
+                    result = (browser_execution.poll(run, value, item, config) if config else
+                              {'status':'failed', 'reason':'当前工作区未配置所请求的浏览器用例。'})
+                    if result['status'] == 'ready':
+                        value = field_handoff.submit(run, state, result['submission'], executor='browser:'+case_id)
+                    else:
+                        errors[item['id']] = result.get('reason', '已启动无头浏览器，等待执行结果。')
+                        if result['status'] == 'failed':
+                            failed_cases[item['id']] = {'case_id':case_id, 'reason':errors[item['id']],
+                                                       'role':(config or {}).get('fallback', 'reviewer')}
+                    continue
                 child = self._validate_handoff_task(meta, ident, deployment=item['kind'] == 'deployment')
                 child_view = self._view(child, {}, include_details=False)
                 if child_view['status'] != 'done':
@@ -829,10 +845,41 @@ class TaskStore:
                 value = field_handoff.submit(run, state, result, executor=ident)
             except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
                 errors[item['id']] = redact(str(exc))
-        if errors != value.get('executor_status', {}):
-            value = {**value, 'executor_status': errors}
+                if not ident and item.get('case_id'):
+                    failed_cases[item['id']] = {'case_id':item['case_id'], 'reason':errors[item['id']], 'role':'reviewer'}
+        if errors != value.get('executor_status', {}) or failed_cases != value.get('failed_cases', {}):
+            value = {**value, 'executor_status': errors, 'failed_cases': failed_cases}
             write_json(run / field_handoff.FILE, value, durable=True)
         return value
+
+    def _route_browser_failure(self, meta, run, value):
+        failures = value.get('failed_cases') or {}
+        missing = [item for item in value['items'] if not item.get('receipt')]
+        if not failures or any(item['id'] not in failures for item in missing):
+            return
+        key = candidate_checks.digest([value['binding'], sorted(
+            (f['case_id'], f['role'], f['reason']) for f in failures.values())])
+        history = value.get('fallback_history', [])
+        previous = value.get('fallback') or {}
+        pending = previous.get('key') == key and previous.get('status') == 'pending'
+        if not pending and (key in history or len(history) >= 6):
+            return
+        role = 'referee' if any(f['role'] == 'referee' for f in failures.values()) else 'reviewer'
+        updated = {**value, 'fallback': {'revision':value['revision'], 'role':role, 'failures':failures,
+                                         'key':key, 'status':'pending'},
+                   'fallback_history': history if pending else [*history, key]}
+        write_json(run / field_handoff.FILE, updated, durable=True)
+        try:
+            self.action(meta['id'], 'resume')
+        except (TaskError, OSError, ValueError) as exc:
+            write_json(run / field_handoff.FILE, {**value, 'fallback_history': updated['fallback_history'],
+                         'executor_status': {**value.get('executor_status', {}),
+                             'fallback': redact(str(exc))}}, durable=True)
+        else:
+            current = field_handoff.read(run)
+            if current.get('revision') == value['revision'] and current.get('fallback') == updated['fallback']:
+                current['fallback']['status'] = 'launched'
+                write_json(run / field_handoff.FILE, current, durable=True)
 
     def _resume_field_handoff(self, ident, run, value):
         if not field_handoff.ready(value) or value.get('resume', {}).get('status') != 'pending':
@@ -886,6 +933,8 @@ class TaskStore:
                     if not field_handoff.ready(value):
                         value = self._collect_field_results(meta, run, state, value)
                         self._dispatch_handoff_tasks(meta, value)
+                        if not field_handoff.ready(value) and 'resume' in view['actions']:
+                            self._route_browser_failure(meta, run, value)
                     if field_handoff.ready(value) and 'resume' in view['actions']:
                         request = value.get('resume') or {}
                         if request.get('error') and not retry_failed:
@@ -1269,6 +1318,7 @@ class TaskStore:
         argv = [sys.executable, '-m', 'auto_moniter', *arguments]
         env = os.environ.copy()
         env['AUTO_MONITER_AGENT_SETTINGS']=str(self.agents.path)
+        env[browser_execution.ENV] = str(self.data_dir / browser_execution.CONFIG)
         package_root = str(Path(__file__).resolve().parent.parent)
         env['PYTHONPATH'] = package_root + os.pathsep + env.get('PYTHONPATH', '')
         env['PYTHONUNBUFFERED'] = '1'
@@ -1542,7 +1592,7 @@ class TaskStore:
                     arguments = self._resume_args(meta)
                     saved_state = read_json(run / 'state.json')
                     handoff = self._field_handoff_view(run, saved_state)
-                    if (handoff and not field_handoff.ready(handoff)
+                    if (handoff and not field_handoff.ready(handoff) and not handoff.get('fallback')
                             and [row['id'] for row in Directions(run).messages()] == handoff['binding']['directions']):
                         raise TaskError('现场回执尚未齐备，请在任务详情中补交。', 409)
                     usage = saved_state.get('usage', {})

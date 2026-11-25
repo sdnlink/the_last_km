@@ -27,14 +27,19 @@ REQUEST_SCHEMA = {'type': 'array', 'maxItems': 12, 'items': {
     'properties': {key: {'type': 'string'} for key in sorted(REQUEST_FIELDS)},
     'required': sorted(REQUEST_FIELDS),
 }}
+REQUEST_SCHEMA['items']['properties']['case_id'] = {'type': 'string'}
+REQUEST_SCHEMA['items']['required'].append('case_id')
 REQUEST_SCHEMA['items']['properties']['kind']['enum'] = list(FIELDS)
 
 
 def requests_valid(requests):
     return (isinstance(requests, list) and len(requests) <= 12
-            and all(isinstance(row, dict) and set(row) == REQUEST_FIELDS
+            and all(isinstance(row, dict) and REQUEST_FIELDS <= row.keys() <= REQUEST_FIELDS | {'case_id'}
                     and all(isinstance(v, str) and 0 < len(v.strip()) <= 300 and '\0' not in v
-                            for v in row.values())
+                            for k, v in row.items() if k != 'case_id')
+                    and isinstance(row.get('case_id', ''), str)
+                    and (not row.get('case_id') or row['kind'] == 'browser'
+                         and re.fullmatch(r'[a-z][a-z0-9-]{0,63}', row['case_id']))
                     and row['kind'] in FIELDS for row in requests))
 
 
@@ -81,8 +86,13 @@ def public(value):
 
 
 def matches(value, *, task, round_index, tree, checks_digest, directions):
+    return ready(value) and matches_checkpoint(value, task=task, round_index=round_index, tree=tree,
+                                               checks_digest=checks_digest, directions=directions)
+
+
+def matches_checkpoint(value, *, task, round_index, tree, checks_digest, directions):
     checkpoint = value.get('binding') or {}
-    return (ready(value) and checkpoint.get('round') == round_index
+    return (checkpoint.get('round') == round_index
             and checkpoint.get('tree') == tree
             and checkpoint.get('task_sha256') == candidate_checks.digest(task)
             and checkpoint.get('checks_digest') == checks_digest
@@ -150,7 +160,7 @@ def reopen(run, value, blockers, requests=()):
         for reason in blockers[:12]
     ]
     updated = {**{key: field for key, field in value.items()
-                  if key not in ('resume', 'dispatch', 'executor_status')},
+                  if key not in ('resume', 'dispatch', 'executor_status', 'fallback', 'failed_cases')},
                'revision': uuid.uuid4().hex, 'review_feedback': safe(blockers),
                'retained_evidence': review_evidence(value)[-12:],
                'automatic': True,
@@ -192,10 +202,12 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
                'owner': _text(item.get('owner'), 200)}
         if 'evidence_needed' in item:
             row['evidence_needed'] = _text(item['evidence_needed'], 300)
-        for key in ('url', 'expected_version', 'expected_manifest_sha256', 'expected_target', 'executor_task',
+        for key in ('url', 'expected_version', 'expected_manifest_sha256', 'expected_target', 'executor_task', 'case_id',
                     'artifact_manifest'):
-            if key in item:
+            if key in item and not (key == 'case_id' and item[key] == ''):
                 row[key] = _text(item[key], 500)
+        if row.get('case_id') and (kind != 'browser' or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', row['case_id'])):
+            raise ValueError('浏览器用例编号无效。')
         if 'executor_task' in row and not re.fullmatch(r'[a-f0-9]{32}', row['executor_task']):
             raise ValueError('请指定有效的已登记执行任务编号。')
         if 'artifact_manifest' in row and (kind != 'deployment' or not row['artifact_manifest'].startswith('/')):
@@ -225,6 +237,8 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
                   'independent_tasks': list(independent)})
     if existing.get('binding') == checkpoint and existing.get('retained_evidence'):
         value['retained_evidence'] = existing['retained_evidence']
+    if existing.get('binding') == checkpoint and existing.get('fallback_history'):
+        value['fallback_history'] = existing['fallback_history']
     write_json(run / FILE, value, durable=True)
     return value
 
@@ -314,7 +328,8 @@ def submit(run, state, data, *, executor=None):
         raise ValueError('回执字段与待办要求不一致。')
     _require_dependencies(value, item)
     if executor is not None:
-        if executor != item.get('executor_task'):
+        if executor != item.get('executor_task') and not (
+                not item.get('executor_task') and item.get('case_id') and executor == 'browser:' + item['case_id']):
             raise ValueError('回执来自未关联的执行任务。')
     else:
         _check_claim(item, data)

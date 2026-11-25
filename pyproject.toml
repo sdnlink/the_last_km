@@ -16,6 +16,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+browser = ["playwright>=1.50,<2"]
 languages = [
     "tree-sitter==0.25.2",
     "tree-sitter-language-pack==0.9.0",

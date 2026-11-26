@@ -235,7 +235,8 @@ def run_case(job):
               4: '无头浏览器依赖未安装。',
               5: '浏览器账号配置须保存在当前用户的私有文件中。',
               6: 'Chrome 无法验证测试站点的证书，请核对站点和已登记的证书公钥指纹。',
-              7: '现场部署版本与当前候选不一致。'}.get(turn.exit_code)
+              7: '现场部署版本与当前候选不一致。',
+              8: '验证码等待超时，请重新发起浏览器验证。'}.get(turn.exit_code)
     if turn.timed_out:
         reason = '无头浏览器用例超时，已回收执行进程。'
     result = {'status': 'failed', 'reason': reason or f'浏览器用例未完成（退出码 {turn.exit_code}）。'}

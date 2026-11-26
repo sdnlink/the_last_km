@@ -12,10 +12,29 @@ from unittest.mock import patch
 from auto_moniter import browser_execution, candidate_checks, field_handoff
 from auto_moniter.storage import write_json
 from auto_moniter.workspace import workspace_fingerprint
-from console.tasks import TaskStore
+from console.tasks import TaskError, TaskStore
 
 
 class BrowserExecutionTests(unittest.TestCase):
+    def test_console_serves_only_the_current_unexpired_captcha_image(self):
+        from base64 import b64encode
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            write_json(run / 'state.json', {'status': 'action_required'})
+            png = b'\x89PNG\r\n\x1a\n'
+            challenge = {'kind': 'image', 'expires': time.time() + 30, 'image': b64encode(png).decode()}
+            store = object.__new__(TaskStore)
+            store._lock = RLock()
+            with (patch.object(store, '_get', return_value={'run_dir': str(run)}),
+                  patch.object(store, '_field_handoff_view', return_value={'browser_inputs': {'current': challenge}})):
+                self.assertEqual(store.browser_captcha_image('task', 'current'), png)
+                with self.assertRaises(TaskError):
+                    store.browser_captcha_image('task', 'old')
+                challenge['expires'] = time.time() - 1
+                with self.assertRaises(TaskError):
+                    store.browser_captcha_image('task', 'current')
+
     def test_captcha_is_sent_only_to_the_live_bound_browser(self):
         with tempfile.TemporaryDirectory() as temp:
             run = Path(temp)

@@ -683,6 +683,22 @@ class TaskStore:
         except (OSError, ValueError, KeyError):
             return {}
 
+    def browser_captcha_image(self, ident, nonce):
+        from base64 import b64decode
+
+        with self._lock:
+            run = Path(self._get(ident)['run_dir'])
+            state = Directions(run).read('state.json', 32 * 1024 * 1024)
+            handoff = self._field_handoff_view(run, state)
+            challenge = handoff.get('browser_inputs', {}).get(nonce, {})
+            if (state.get('status') != 'action_required' or challenge.get('kind') != 'image'
+                    or challenge.get('expires', 0) <= time.time()):
+                raise TaskError('验证码已失效，请等待新的验证码。', 404)
+            image = b64decode(challenge.get('image', ''), validate=True)
+            if not image.startswith(b'\x89PNG\r\n\x1a\n'):
+                raise TaskError('验证码图片格式无效。', 404)
+            return image
+
     def _local_preview_view(self, meta) -> dict:
         if not meta.get('managed') or not debug_preview.available(Path(meta['cwd'])):
             return {'status': 'unavailable'}

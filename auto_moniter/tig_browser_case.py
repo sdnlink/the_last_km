@@ -31,6 +31,10 @@ class CaptchaAdapterRequired(ValueError):
     pass
 
 
+class CaptchaExpired(ValueError):
+    pass
+
+
 class WrongDeployment(ValueError):
     pass
 
@@ -41,7 +45,7 @@ def human_captcha(role, image=None):
 
     directory = Path.cwd()
     nonce = secrets.token_hex(16)
-    expires = time.time() + 120
+    expires = time.time() + 180
     request = directory / 'captcha.json'
     response = directory / 'captcha-answer.json'
     challenge = {'nonce': nonce, 'role': role, 'expires': expires,
@@ -56,7 +60,7 @@ def human_captcha(role, image=None):
             if answer.get('nonce') == nonce and re.fullmatch(pattern, answer.get('code', '')):
                 return answer['code']
             time.sleep(.25)
-        raise CaptchaAdapterRequired()
+        raise CaptchaExpired()
     finally:
         response.unlink(missing_ok=True)
         request.unlink(missing_ok=True)
@@ -374,6 +378,8 @@ def main():
         print(json.dumps(execute(request, settings), ensure_ascii=False))
     except CaptchaAdapterRequired:
         return 3
+    except CaptchaExpired:
+        return 8
     except ModuleNotFoundError:
         return 4
     except WrongDeployment:

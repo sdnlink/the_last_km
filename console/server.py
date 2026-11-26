@@ -112,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
                         self._json(self.server.store.logs(parts[2], name, page, size))
                 elif len(parts) == 4 and parts[3] == 'progress':
                     self._json(self.server.store.progress(parts[2]))
+                elif len(parts) == 5 and parts[3] == 'browser-captcha':
+                    self._send(200, self.server.store.browser_captcha_image(parts[2], parts[4]), 'image/png')
                 elif len(parts) == 4 and parts[3] == 'local-preview':
                     self._json(self.server.store.local_preview(parts[2]))
                 elif len(parts) == 4 and parts[3] == 'requirement-queue':

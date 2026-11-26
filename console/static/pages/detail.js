@@ -60,7 +60,7 @@ function handoffClaimSlot(itemId){
 function renderBrowserCaptcha(t, reopen=false){
  const dialog=$('#browser-captcha-dialog');
  const challenge=Object.values(t.field_handoff?.browser_inputs||{}).find(value=>
-  (value.kind==='otp'||/^[A-Za-z0-9+/]+={0,2}$/.test(value.image))&&value.expires>Date.now()/1000);
+  (value.kind==='otp'||value.kind==='image')&&value.expires>Date.now()/1000);
  if(!challenge||t.status!=='action_required'){
   if(dialog.open)dialog.close();
   return;
@@ -73,7 +73,7 @@ function renderBrowserCaptcha(t, reopen=false){
  const otp=challenge.kind==='otp',image=$('#browser-captcha-image');
  image.hidden=otp;
  if(otp)image.removeAttribute('src');
- else image.src='data:image/png;base64,'+challenge.image;
+ else image.src=`/api/tasks/${encodeURIComponent(id)}/browser-captcha/${encodeURIComponent(challenge.nonce)}`;
  $('#browser-captcha-title').textContent=otp?'填写六位动态验证码':'填写现场浏览器验证码';
  const form=$('#browser-captcha-form');
  form.reset();
@@ -278,6 +278,11 @@ async function loadLogs(){
  }catch(error){if(error.status===404&&log){log='';return loadLogs();}throw error;}
 }
 export function mount(){
+ $('#browser-captcha-image')?.addEventListener('error',()=>{
+  const error=$('#browser-captcha-error');
+  error.textContent='验证码图片未加载，请等待新的验证码或刷新任务详情。';
+  error.hidden=false;
+ });
  $('#detail-field-handoff')?.addEventListener('click',event=>{
   if(event.target.closest('[data-browser-captcha]')&&task)renderBrowserCaptcha(task,true);
  });

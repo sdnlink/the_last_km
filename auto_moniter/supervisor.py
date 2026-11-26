@@ -728,8 +728,10 @@ class Supervisor(
                 if self.config.function_dispatch and not _failure_reason(turn, verdict) and not turn.interruption:
                     original_report = verdict.to_dict()
                     errors = self._validate_function_worker(verdict)
-                    if errors and original_report.get('task_status') == 'done' and not (
-                            original_report['gaps'] or original_report['blockers'] or verdict.parse_error):
+                    completion_repair = original_report.get('task_status') == 'done' and not (
+                        original_report['gaps'] or original_report['blockers'] or verdict.parse_error)
+                    verification_repair = verification_only and bool(verdict.parse_error)
+                    if errors and (completion_repair or verification_repair):
                         report_repair = {'status': 'pending', 'errors': errors, 'original': original_report,
                                          'task': self.function_tasks.current}
                 self._rounds_since_review += 1
@@ -960,7 +962,7 @@ class Supervisor(
                         record.failure or 'Function completion report needs correction; implementation was preserved.',
                         records, record.verdict)
                 turn, verdict = correction, record.verdict
-                if verdict.task_status != 'done':
+                if verdict.task_status != 'done' and not self._verification_only():
                     last_worker = verdict
                     continue
             if (self.config.workflow == 'review-first' and not self.config.function_dispatch

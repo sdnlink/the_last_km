@@ -825,6 +825,9 @@ class RequirementPlanning:
                            'Use delivery_scope=function for intermediate work, including read-only verification that records standalone evidence. '
                            'Use module or requirement only when accepting the whole module or requirement. '
                            + module_contract +
+                           'Distinguish planning input from execution evidence. When the user has defined the scope '
+                           'and an approved execution path exists, keep its pending verification in the plan and '
+                           'use ready. Missing observations to be produced by that execution do not prevent planning. '
                            'For needs_input use next_task=null. '
                            + (function_plan.planning_contract() if self.config.full_function_plan else 'Do not assign the full backlog. ')+
                            'Accepted function records: ' + json.dumps(self.function_tasks.accepted, ensure_ascii=False))

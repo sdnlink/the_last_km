@@ -286,8 +286,17 @@ def _route_checks(pages, origin, version, records, accounts):
     desktop = {}
     knowledge = '/knowledgeBase/whitelist'
     for width in (1440, 1024):
+        member.set_viewport_size({'width': width, 'height': 900})
         security.set_viewport_size({'width': width, 'height': 900})
         paths = desktop[str(width)] = {}
+        history_at_width = paths[HISTORY_PATH] = {}
+        try:
+            member.goto(origin + history_source)
+            history_at_width['click'] = _history_snapshot(member, origin, history.click)
+            history_at_width['refresh'] = _history_snapshot(member, origin, member.reload)
+            history_at_width['return'] = _observe_browser_back(member, origin, history_source)
+        except TimeoutError:
+            history_at_width['incomplete'] = '部分封禁历史操作未在规定时间内完成。'
         for path, (row, tab, panels) in WHITELIST_ROUTES.items():
             observed = paths[path] = {}
             security.goto(origin + WHITELIST_PATH)
@@ -297,6 +306,7 @@ def _route_checks(pages, origin, version, records, accounts):
                 observed['click'] = _whitelist_snapshot(security, origin, path, tab, panels)
                 security.reload()
                 observed['refresh'] = _whitelist_snapshot(security, origin, path, tab, panels)
+                observed['tab_switches'] = _observe_tab_switches(security)
                 if path == knowledge:
                     security.get_by_role('button', name=re.compile(r'跳\s*转')).first.click(timeout=10000)
                     security.wait_for_url(origin + WHITELIST_PATH, timeout=10000)
@@ -307,6 +317,7 @@ def _route_checks(pages, origin, version, records, accounts):
             observed['last_url'] = _route_url(security, origin)
             observed['vertical_sidebar_visible'] = security.locator('.ant-layout-sider').first.is_visible()
     security.set_viewport_size({'width': 1440, 'height': 900})
+    member.set_viewport_size({'width': 1440, 'height': 900})
     for path, (row, tab, panels) in WHITELIST_ROUTES.items():
         # Use the real row button for each transition; opening the target does not test the button.
         security.goto(origin + WHITELIST_PATH)
@@ -393,6 +404,35 @@ def _observe_browser_back(page, origin, expected):
     except TimeoutError:
         return {'expected_url': expected, 'observed_url': _route_url(page, origin), 'matched': False}
     return {'expected_url': expected, 'observed_url': _route_url(page, origin), 'matched': True}
+
+
+def _observe_tab_switches(page):
+    from playwright.sync_api import TimeoutError
+
+    tab_sets = page.get_by_role('tablist')
+    tabs = tab_sets.first.get_by_role('tab')
+    original = tabs.and_(page.locator('[aria-selected="true"]')).first
+    original_name = original.inner_text().strip() if original.is_visible() else ''
+    results = []
+    for tab in tabs.all():
+        if not tab.is_visible():
+            continue
+        name = tab.inner_text().strip()
+        if not name or name == original_name:
+            continue
+        enabled = tab.is_enabled()
+        selected = False
+        if enabled:
+            try:
+                tab.click(timeout=5000)
+                tab.and_(page.locator('[aria-selected="true"]')).wait_for(timeout=5000)
+                selected = True
+            except TimeoutError:
+                pass
+        results.append({'tab': name, 'enabled': enabled, 'selected': selected})
+    if original_name and any(item['selected'] for item in results):
+        tabs.get_by_text(original_name, exact=True).first.click(timeout=5000)
+    return results
 
 
 def _active_detection_snapshot(page, origin):

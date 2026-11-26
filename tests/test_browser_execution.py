@@ -16,6 +16,36 @@ from console.tasks import TaskError, TaskStore
 
 
 class BrowserExecutionTests(unittest.TestCase):
+    def test_reopen_recovers_explicitly_registered_observation_without_case_id(self):
+        request = {'kind': 'browser', 'title': '核对布局', 'owner': '执行器', 'evidence_needed': '记录实际宽度'}
+        config = {'task_id': 'VERIFY', 'candidate_tree': 'a' * 64, 'url': 'https://example.test/login',
+                  'expected_version': '1', 'handoff_revision': 'old', 'handoff_ids': ['1'],
+                  'reuse_on_reopen': True, 'reopen_observation_digests': [candidate_checks.digest(request)]}
+        item = {**request, 'id': '2'}
+        changed = {**item, 'id': '3', 'evidence_needed': '记录其他页面'}
+        value = {'revision': 'new', 'binding': {'task_id': 'VERIFY', 'tree': 'a' * 64},
+                 'items': [item, changed]}
+        rebound = browser_execution.for_handoff(config, value, 'login-routes')
+        self.assertTrue(browser_execution.matches_item(rebound, value, item))
+        self.assertFalse(browser_execution.matches_item(rebound, value, changed))
+
+    def test_temporary_resume_failure_keeps_the_receipt_and_retries_after_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            store = object.__new__(TaskStore)
+            value = {'revision': 'current', 'items': [{'id': '1', 'receipt': {'result': '观察已完成'}}],
+                     'resume': {'status': 'pending', 'agent_calls': 7}}
+            write_json(run / field_handoff.FILE, value)
+            with patch.object(store, 'action', side_effect=[TaskError('稍后重试', 503), {}]) as launch:
+                store._resume_field_handoff('task', run, value)
+                pending = field_handoff.read(run)
+                self.assertEqual(pending['items'], value['items'])
+                store._resume_field_handoff('task', run, pending)
+                launch.assert_called_once()
+                with patch('console.tasks.time.time', return_value=pending['resume']['retry_at'] + 1):
+                    self.assertTrue(store._resume_field_handoff('task', run, pending)['resuming'])
+                self.assertEqual(launch.call_count, 2)
+
     def test_tig_session_reuses_connected_role_pages(self):
         from unittest.mock import Mock
         from auto_moniter import tig_browser_case

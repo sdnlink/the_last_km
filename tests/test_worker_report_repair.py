@@ -8,7 +8,7 @@ from pathlib import Path
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.providers import ConfiguredProvider
 from tests.test_function_assignment_ids import final_task
-from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task
+from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
 from tests.test_supervisor import ScriptedProvider
 
 
@@ -72,6 +72,24 @@ class WorkerReportRepairTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual(len(worker.calls), 1)
         self.assertFalse(any(r.watcher_result.get('worker_report') for r in report.records))
+
+    def test_malformed_read_only_report_is_corrected_before_checks_and_handoff(self):
+        (self.root/'app.py').write_text(SOURCE)
+        assignment = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
+        malformed = result('VERIFY', 'incomplete', gaps=['Browser evidence pending'])
+        malformed['verdict']['unexpected_field'] = True
+        corrected = result('VERIFY', 'incomplete', gaps=['Browser evidence pending'])
+        corrected['verdict']['blockers'] = ['Browser evidence pending']
+        blocked = result('VERIFY', 'changes_required')
+        blocked['verdict']['blockers'] = ['Browser evidence pending']
+        worker = FunctionWorker('worker', [malformed, corrected])
+        reviewer = ScriptedProvider('reviewer', [plan(assignment), blocked])
+        report = self.monitor(worker, reviewer).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertEqual([call['read_only'] for call in worker.calls], [True, True])
+        worker_record = next(row for row in report.records if row.role == 'worker')
+        self.assertTrue(worker_record.watcher_result['candidate_checks']['passed'])
+        self.assertTrue((self.run_dir/'field-handoff.json').is_file())
 
     def test_handoff_still_requires_independent_acceptance(self):
         worker = FunctionWorker('worker', [handoff(final=True)])

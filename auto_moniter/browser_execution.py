@@ -46,10 +46,18 @@ def for_handoff(config, value, case_id):
     if config.get('handoff_revision') == value['revision']:
         return config
     ids = [row['id'] for row in value['items'] if row['kind'] == 'browser'
-           and row.get('case_id') == case_id and not (row.get('claim') or row.get('executor_task'))
+           and names_case(config, row, case_id) and not (row.get('claim') or row.get('executor_task'))
            and row.get('url', config['url']) == config['url']
            and row.get('expected_version', config['expected_version']) == config['expected_version']]
     return {**config, 'handoff_revision': value['revision'], 'handoff_ids': ids} if ids else config
+
+
+def names_case(config, item, case_id):
+    assigned = item.get('case_id')
+    return assigned == case_id or (
+        not assigned and item.get('evidence_needed')
+        and candidate_checks.digest({key: item.get(key) for key in field_handoff.REQUEST_FIELDS})
+        in config.get('reopen_observation_digests', ()))
 
 
 def cases(path, workspace):
@@ -100,6 +108,13 @@ def cases(path, workspace):
             raise ValueError('自动续接须登记派单、候选及首批浏览器待办。')
         if reuse:
             config['reuse_on_reopen'] = True
+        observations = entry.get('reopen_observation_digests', [])
+        if (not isinstance(observations, list) or len(observations) > 12
+                or any(not isinstance(value, str) or not field_handoff.SHA256.fullmatch(value) for value in observations)
+                or observations and not reuse):
+            raise ValueError('自动续接的浏览器观察摘要须绑定已批准的批量用例。')
+        if observations:
+            config['reopen_observation_digests'] = observations
         if settings is not None:
             if (argv is not None or case not in TIG_CASES or not isinstance(settings, str)
                     or '\0' in settings or not Path(settings).is_absolute()):

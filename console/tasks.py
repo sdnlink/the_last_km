@@ -904,7 +904,8 @@ class TaskStore:
                     if not case_id:
                         matching = [key for key, config in cases.items()
                                     if config.get('task_id') and (config.get('handoff_ids') or len(browser_items) == 1)
-                                    and browser_execution.matches_item(config, value, item)]
+                                    and browser_execution.matches_item(
+                                        browser_execution.for_handoff(config, value, key), value, item)]
                         if len(matching) == 1:
                             case_id = matching[0]
                     if not case_id:
@@ -1008,14 +1009,21 @@ class TaskStore:
                 write_json(run / field_handoff.FILE, current, durable=True)
 
     def _resume_field_handoff(self, ident, run, value):
-        if not field_handoff.ready(value) or value.get('resume', {}).get('status') != 'pending':
+        request = value.get('resume') or {}
+        if (not field_handoff.ready(value) or request.get('status') != 'pending'
+                or request.get('retry_at', 0) > time.time()):
             return field_handoff.public(value)
         try:
             self.action(ident, 'resume')
         except (TaskError, OSError, ValueError) as exc:
             failure = redact(str(exc))
+            retry = {}
+            if (isinstance(exc, OSError) or isinstance(exc, TaskError) and
+                    (exc.status == 503 or str(exc) == '任务进程仍在运行或等待回收，请稍后重试')):
+                attempts = request.get('attempts', 0) + 1
+                retry = {'attempts': attempts, 'retry_at': time.time() + min(15 * 2 ** min(attempts - 1, 5), 300)}
             updated = field_handoff.update_resume(run, value, 'pending',
-                                                 agent_calls=value['resume']['agent_calls'], error=failure)
+                                                 agent_calls=request['agent_calls'], error=failure, **retry)
             return {**field_handoff.public(updated), 'resume_error': failure}
         # The child may already have advanced or reopened the handoff.
         current = field_handoff.read(run)
@@ -1094,7 +1102,7 @@ class TaskStore:
                                 referee_enabled=state.get('referee', {}).get('enabled') is True)
                     if field_handoff.ready(value) and 'resume' in view['actions']:
                         request = value.get('resume') or {}
-                        if request.get('error') and not retry_failed:
+                        if request.get('error') and not request.get('retry_at') and not retry_failed:
                             continue
                         if (request.get('status') == 'launched' and view['status'] == 'interrupted'
                                 and state.get('status') == 'running'

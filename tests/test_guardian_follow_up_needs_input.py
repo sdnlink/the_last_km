@@ -60,7 +60,8 @@ def crash_during_waiting_finish(config, sender, *, before_report=False):
             os._exit(23)
         write_json(path, value, **kwargs)
 
-    with patch('auto_moniter.supervisor.write_json', side_effect=write):
+    module = 'supervisor' if before_report else 'supervisor_checkpoint'
+    with patch(f'auto_moniter.{module}.write_json', side_effect=write):
         result = Supervisor(config, log=lambda _: None).run()
     sender.send({key: getattr(result, key) for key in ('status', 'rounds', 'summary', 'stop_reason')})
     sender.close()

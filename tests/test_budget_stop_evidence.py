@@ -264,10 +264,11 @@ class BudgetStopEvidenceTests(unittest.TestCase):
                     max_rounds=1, failure_limit=1,
                 ), log=lambda _: None)
                 monitor._elapsed = lambda: clock['now']
-                import auto_moniter.supervisor as supervisor_module
+                from auto_moniter import supervisor as supervisor_module, supervisor_agents
                 original_command = supervisor_module.run_command
-                original_transcript = supervisor_module.paseo_transcript
+                original_transcript = supervisor_agents.paseo_transcript
                 original_stop = supervisor_module._paseo_stop
+                original_agent_stop = supervisor_agents._paseo_stop
 
                 def offline(prepared, cwd, **kwargs):
                     if 'inspect' in prepared.argv:
@@ -278,14 +279,15 @@ class BudgetStopEvidenceTests(unittest.TestCase):
                         return TurnResult('', stdout='{"status":"completed"}', exit_code=0)
                     return original_command(prepared, cwd, **kwargs)
 
-                supervisor_module.paseo_transcript = lambda *args, **kwargs: 'final paseo conclusion'
-                supervisor_module._paseo_stop = lambda *args, **kwargs: True
+                supervisor_agents.paseo_transcript = lambda *args, **kwargs: 'final paseo conclusion'
+                supervisor_agents._paseo_stop = supervisor_module._paseo_stop = lambda *args, **kwargs: True
                 supervisor_module.run_command = offline
                 try:
                     report = monitor.run()
                 finally:
                     supervisor_module.run_command = original_command
-                    supervisor_module.paseo_transcript = original_transcript
+                    supervisor_agents.paseo_transcript = original_transcript
+                    supervisor_agents._paseo_stop = original_agent_stop
                     supervisor_module._paseo_stop = original_stop
                 self.assertIs(supervisor_module._paseo_stop, original_stop)
                 log = (run / '001-worker.log').read_text(encoding='utf-8')
@@ -316,9 +318,10 @@ class BudgetStopEvidenceTests(unittest.TestCase):
         self._paseo_edge(empty_after_capture=False, stop_ok=False)
 
     def _paseo_edge(self, *, empty_after_capture, stop_ok):
-        import auto_moniter.supervisor as supervisor_module
+        from auto_moniter import supervisor as supervisor_module, supervisor_agents
         before_stop = supervisor_module._paseo_stop
-        before_transcript = supervisor_module.paseo_transcript
+        before_agent_stop = supervisor_agents._paseo_stop
+        before_transcript = supervisor_agents.paseo_transcript
         before_command = supervisor_module.run_command
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -347,14 +350,15 @@ class BudgetStopEvidenceTests(unittest.TestCase):
                     return TurnResult('', stdout='{"status":"running"}', exit_code=0)
                 return before_command(prepared, cwd, **kwargs)
 
-            supervisor_module.paseo_transcript = transcript
-            supervisor_module._paseo_stop = lambda *args, **kwargs: stop_ok
+            supervisor_agents.paseo_transcript = transcript
+            supervisor_agents._paseo_stop = supervisor_module._paseo_stop = lambda *args, **kwargs: stop_ok
             supervisor_module.run_command = offline
             try:
                 report = monitor.run()
             finally:
                 supervisor_module.run_command = before_command
-                supervisor_module.paseo_transcript = before_transcript
+                supervisor_agents.paseo_transcript = before_transcript
+                supervisor_agents._paseo_stop = before_agent_stop
                 supervisor_module._paseo_stop = before_stop
             self.assertIs(supervisor_module._paseo_stop, before_stop)
             log = (run / '001-worker.log').read_text(encoding='utf-8')

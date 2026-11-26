@@ -51,7 +51,8 @@ elif args[0] == 'logs':
             monitor.run_dir.mkdir()
             monitor._write_state([], "running", 0, "", "")
             launch = TurnResult("", exit_code=1, stdout=json.dumps({"agentId": "11111111-1111-1111-1111-111111111111"}))
-            with patch("auto_moniter.supervisor.run_command", return_value=launch), patch("auto_moniter.supervisor._paseo_stop", return_value=False):
+            with (patch("auto_moniter.supervisor.run_command", return_value=launch),
+                  patch("auto_moniter.supervisor_agents._paseo_stop", return_value=False)):
                 with self.assertRaises(RecoveryError):
                     monitor._invoke(provider, "task", "", role="worker", index=1, model="", extra_args=[], read_only=False)
 

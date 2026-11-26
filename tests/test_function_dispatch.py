@@ -1301,6 +1301,9 @@ class DispatchTests(unittest.TestCase):
                     store.field_handoff('example', invalid)
                 # Simulate the console exiting after persisting the last receipt, before starting the child.
                 complete = field_handoff.submit(run, state, browser_return)
+                (run/field_handoff.FILE).write_text(json.dumps({**complete, 'fallback': {
+                    'revision': handoff['revision'], 'role': 'referee', 'failures': {'2': '旧浏览器错误'},
+                }}))
                 resume.assert_not_called()
                 store.recover_field_handoffs()
                 store.recover_field_handoffs()
@@ -1312,7 +1315,7 @@ class DispatchTests(unittest.TestCase):
             worker = FunctionWorker('worker', [])
             reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted', status='done')])
             report = Supervisor(RunConfig('', root, worker, reviewer=reviewer, workflow='review-first',
-                resume=True, git_history='off', run_dir=root/'run', retry_delay_s=0), log=lambda _: None).run()
+                resume=True, referee=True, git_history='off', run_dir=root/'run', retry_delay_s=0), log=lambda _: None).run()
             self.assertEqual(report.status, 'done', report.summary)
             self.assertFalse(worker.calls)
             self.assertEqual(len(reviewer.calls), 1)

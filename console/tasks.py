@@ -765,13 +765,23 @@ class TaskStore:
                     return field_handoff.claim(run, state, data)
                 if data.get('action') == 'release':
                     return field_handoff.release(run, state, data)
-                if data.get('action') == 'browser_captcha':
+                if data.get('action') in ('browser_captcha', 'retry_browser_captcha'):
                     value, item = field_handoff._select(run, state, data)
                     cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
-                    config = cases.get(item.get('case_id'))
+                    case_id = item.get('case_id')
+                    config = browser_execution.for_handoff(cases.get(case_id), value, case_id)
                     if (not config or not config.get('interactive_captcha') or item.get('receipt')
+                            or item.get('claim') or item.get('executor_task')
                             or not browser_execution.matches_item(config, value, item)):
                         raise ValueError('浏览器会话已失效，请刷新任务。')
+                    if data['action'] == 'retry_browser_captcha':
+                        if read_control(run / 'control.json').get('action') in ('stop', 'pause'):
+                            raise ValueError('任务已暂停或停止，请先恢复任务。')
+                        field_handoff._require_dependencies(value, item)
+                        result = browser_execution.poll(run, value, item, config, retry_captcha=True)
+                        if result['status'] == 'failed':
+                            raise ValueError(result['reason'])
+                        return {'status': result['status']}
                     browser_execution.submit_captcha(run, value, item, config, data.get('nonce'), data.get('code'))
                     return {'submitted': True}
                 if data.get('action') == 'bind_browser_case':
@@ -902,7 +912,7 @@ class TaskStore:
                         if not item.get('allow_manual'):
                             failed_cases[item['id']] = {'case_id':'', 'reason':errors[item['id']], 'role':'reviewer'}
                         continue
-                    config = cases.get(case_id)
+                    config = browser_execution.for_handoff(cases.get(case_id), value, case_id)
                     if not config:
                         result = {'status':'failed', 'reason':'当前工作区未配置所请求的浏览器用例。'}
                     elif not browser_execution.matches_item(config, value, item):
@@ -932,6 +942,8 @@ class TaskStore:
                         if result['status'] == 'failed':
                             failed_cases[item['id']] = {'case_id':case_id, 'reason':errors[item['id']],
                                                        'role':(config or {}).get('fallback', 'reviewer')}
+                            if config and config.get('interactive_captcha') and browser_execution.captcha_retryable(result):
+                                failed_cases[item['id']]['retry_captcha'] = True
                     continue
                 child = self._validate_handoff_task(meta, ident, deployment=item['kind'] == 'deployment')
                 child_view = self._view(child, {}, include_details=False)
@@ -958,7 +970,8 @@ class TaskStore:
     def _route_browser_failure(self, meta, run, value, *, referee_enabled=False):
         missing = [item for item in value['items'] if not item.get('receipt')]
         failures = {item['id']: value['failed_cases'][item['id']] for item in missing
-                    if item['id'] in (value.get('failed_cases') or {})}
+                    if item['id'] in (value.get('failed_cases') or {})
+                    and not value['failed_cases'][item['id']].get('retry_captcha')}
         if not failures:
             return
         key = candidate_checks.digest([value['binding'], sorted(

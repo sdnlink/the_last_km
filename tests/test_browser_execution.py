@@ -16,6 +16,52 @@ from console.tasks import TaskError, TaskStore
 
 
 class BrowserExecutionTests(unittest.TestCase):
+    def test_timed_out_captcha_can_retry_without_changing_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            value = {'binding': {'round': 39}, 'revision': 'current'}
+            item = {'id': '2', 'case_id': 'login-routes'}
+            config = {'url': 'https://example.test/login', 'expected_version': '1',
+                      'interactive_captcha': True, 'argv': [sys.executable]}
+            job, request = browser_execution._job(run, value, item, config)
+            job.mkdir(parents=True)
+            expired = {'status': 'failed', 'reason': browser_execution.CAPTCHA_TIMEOUT}
+            write_json(job / 'launch.json', {'request': request, 'attempts': 1})
+            write_json(job / 'result.json', expired)
+            with patch.object(browser_execution.subprocess, 'Popen') as spawn:
+                self.assertEqual(browser_execution.poll(run, value, item, config), expired)
+                self.assertEqual(browser_execution.poll(run, value, item, config, retry_captcha=True)['status'], 'running')
+                spawn.assert_called_once()
+            self.assertEqual(json.loads((job / 'result-attempt-1.json').read_text()), expired)
+            self.assertEqual(json.loads((job / 'launch.json').read_text())['request'], request)
+            saved = {'status': 'ready'}
+            write_json(job / 'result.json', saved)
+            with patch.object(browser_execution.subprocess, 'Popen') as spawn:
+                self.assertEqual(browser_execution.poll(run, value, item, config, retry_captcha=True), saved)
+                spawn.assert_not_called()
+
+    def test_captcha_timeout_waits_for_retry_without_launching_referee(self):
+        store = object.__new__(TaskStore)
+        value = {'items': [{'id': '2', 'kind': 'browser'}],
+                 'failed_cases': {'2': {'retry_captcha': True}}}
+        with patch.object(store, 'action') as start:
+            store._route_browser_failure({'id': 'test'}, Path('.'), value, referee_enabled=True)
+            start.assert_not_called()
+
+    def test_reopened_batch_requires_same_task_candidate_and_explicit_case(self):
+        config = {'task_id': 'VERIFY', 'candidate_tree': 'a' * 64, 'url': 'https://example.test/login',
+                  'expected_version': '1', 'handoff_revision': 'old', 'handoff_ids': ['1'],
+                  'reuse_on_reopen': True}
+        item = {'id': '2', 'kind': 'browser', 'case_id': 'login-routes'}
+        value = {'revision': 'new', 'binding': {'task_id': 'VERIFY', 'tree': 'a' * 64},
+                 'items': [item, {'id': '3', 'kind': 'browser'}, {**item, 'id': '4', 'expected_version': '2'}]}
+        rebound = browser_execution.for_handoff(config, value, 'login-routes')
+        self.assertEqual(rebound['handoff_ids'], ['2'])
+        self.assertTrue(browser_execution.matches_item(rebound, value, item))
+        changed = {**value, 'binding': {**value['binding'], 'task_id': 'OTHER'}}
+        self.assertEqual(browser_execution.for_handoff(config, changed, 'login-routes'), config)
+        self.assertEqual(config['handoff_revision'], 'old')
+
     def test_console_serves_only_the_current_unexpired_captcha_image(self):
         from base64 import b64encode
 

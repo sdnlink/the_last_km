@@ -22,6 +22,7 @@ CONFIG = 'browser-cases.json'
 ENV = 'AUTO_MONITER_BROWSER_CASES'
 CASE_ID = re.compile(r'[a-z][a-z0-9-]{0,63}')
 TIG_CASES = {'role-login', 'login-audit', 'login-routes'}
+CAPTCHA_TIMEOUT = '验证码等待超时，请重新发起浏览器验证。'
 
 
 def matches(config, binding):
@@ -37,6 +38,18 @@ def matches_item(config, value, item):
     browser_ids = {row['id'] for row in value.get('items', []) if row['kind'] == 'browser'}
     return (config['handoff_revision'] == value.get('revision') and item.get('id') in config['handoff_ids']
             and set(config['handoff_ids']) <= browser_ids)
+
+
+def for_handoff(config, value, case_id):
+    if not config or not config.get('reuse_on_reopen') or not matches(config, value['binding']):
+        return config
+    if config.get('handoff_revision') == value['revision']:
+        return config
+    ids = [row['id'] for row in value['items'] if row['kind'] == 'browser'
+           and row.get('case_id') == case_id and not (row.get('claim') or row.get('executor_task'))
+           and row.get('url', config['url']) == config['url']
+           and row.get('expected_version', config['expected_version']) == config['expected_version']]
+    return {**config, 'handoff_revision': value['revision'], 'handoff_ids': ids} if ids else config
 
 
 def cases(path, workspace):
@@ -82,6 +95,11 @@ def cases(path, workspace):
                     or not isinstance(revision, str) or not re.fullmatch(r'[a-f0-9]{32}', revision)):
                 raise ValueError('批量浏览器用例须绑定交接版本和待办编号。')
             config.update(handoff_ids=handoff_ids, handoff_revision=revision)
+        reuse = entry.get('reuse_on_reopen', False)
+        if type(reuse) is not bool or reuse and not config.get('handoff_ids'):
+            raise ValueError('自动续接须登记派单、候选及首批浏览器待办。')
+        if reuse:
+            config['reuse_on_reopen'] = True
         if settings is not None:
             if (argv is not None or case not in TIG_CASES or not isinstance(settings, str)
                     or '\0' in settings or not Path(settings).is_absolute()):
@@ -141,7 +159,8 @@ def reviewer_cases(workspace, task_id, run):
         from auto_moniter.workspace import workspace_fingerprint
 
         binding['tree'] = workspace_fingerprint(workspace, ignore_dir=run)
-    available = [case for case, config in registered.items() if not config.get('handoff_ids') and matches(config, binding)]
+    available = [case for case, config in registered.items() if matches(config, binding)
+                 and (not config.get('handoff_ids') or config.get('reuse_on_reopen'))]
     if not available:
         return ''
     return ('\n现场浏览器交接可在 field_handoffs 的 case_id 标注以下已配置用例。'
@@ -186,14 +205,19 @@ def submit_captcha(run, value, item, config, nonce, code):
     write_json(job / 'captcha-answer.json', {'nonce': nonce, 'code': code}, durable=True, mode=0o600)
 
 
-def poll(run, value, item, config):
+def captcha_retryable(result):
+    return (result.get('status') == 'failed'
+            and (result.get('code') == 'captcha_timeout' or result.get('reason') == CAPTCHA_TIMEOUT))
+
+
+def poll(run, value, item, config, *, retry_captcha=False):
     """One detached execution per case, binding and config; read durable results on restart."""
     if config.get('execution_error'):
         return {'status': 'failed', 'reason': config['execution_error']}
     job, request = _job(run, value, item, config)
     job.mkdir(parents=True, mode=0o700, exist_ok=True)
     result = Directions(job).read('result.json')
-    if result:
+    if result and not retry_captcha:
         return result
     # Pass the lock descriptor to the detached runner, including across console restart.
     with (job / 'execution.lock').open('a') as lock:
@@ -203,16 +227,23 @@ def poll(run, value, item, config):
             challenge = _challenge(job) if config.get('interactive_captcha') else {}
             return {'status': 'needs_input', 'challenge': challenge} if challenge else {'status': 'running'}
         result = Directions(job).read('result.json')
-        if result:
-            return result
         launch = Directions(job).read('launch.json')
         attempts = launch.get('attempts', 0)
+        if retry_captcha:
+            if not (config.get('interactive_captcha') and captcha_retryable(result)):
+                return result or {'status': 'running'}
+            archive = job / f"result-attempt-{launch.get('sequence', attempts)}.json"
+            (job / 'result.json').replace(archive)
+            attempts = 0
+        elif result:
+            return result
         if attempts >= 2:
             return {'status': 'failed', 'reason': '浏览器执行进程连续中断，已保留原检查点。'}
         for name in ('captcha.json', 'captcha-answer.json'):
             (job / name).unlink(missing_ok=True)
         write_json(job / 'launch.json', {'request': request, 'argv': config['argv'], 'attempts': attempts + 1,
-                                       'interactive_captcha': bool(config.get('interactive_captcha'))},
+                                       'interactive_captcha': bool(config.get('interactive_captcha')),
+                                       'sequence': launch.get('sequence', launch.get('attempts', 0)) + 1},
                    durable=True, mode=0o600)
         process = subprocess.Popen([sys.executable, '-m', 'auto_moniter.browser_execution', str(job)],
                                    pass_fds=(lock.fileno(),), stdin=subprocess.DEVNULL,
@@ -236,10 +267,12 @@ def run_case(job):
               5: '浏览器账号配置须保存在当前用户的私有文件中。',
               6: 'Chrome 无法验证测试站点的证书，请核对站点和已登记的证书公钥指纹。',
               7: '现场部署版本与当前候选不一致。',
-              8: '验证码等待超时，请重新发起浏览器验证。'}.get(turn.exit_code)
+              8: CAPTCHA_TIMEOUT}.get(turn.exit_code)
     if turn.timed_out:
         reason = '无头浏览器用例超时，已回收执行进程。'
     result = {'status': 'failed', 'reason': reason or f'浏览器用例未完成（退出码 {turn.exit_code}）。'}
+    if turn.exit_code == 8 and not turn.timed_out and not turn.interruption:
+        result['code'] = 'captcha_timeout'
     if not (turn.exit_code or turn.timed_out or turn.interruption):
         try:
             output = json.loads(turn.stdout)

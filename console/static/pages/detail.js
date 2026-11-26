@@ -108,6 +108,7 @@ function renderFieldHandoff(t){
   ${item.resources_expected?`<p>现场需对账 ${escape(item.resources_expected)} 个资源。</p>`:''}
   ${item.executor_task?`<p><a href="/tasks/${escape(item.executor_task)}">查看关联执行任务</a></p>`:''}
   ${Object.values(handoff.browser_inputs||{}).some(input=>input.id===item.id)?'<button type="button" class="button secondary" data-browser-captcha>填写验证码</button>':''}
+  ${t.status==='action_required'&&handoff.failed_cases?.[item.id]?.retry_captcha?`<button type="button" class="button secondary" data-browser-retry="${escape(item.id)}">重新获取验证码</button>`:''}
   ${canEdit&&item.url?`<p><a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">打开现场浏览器页</a>，完成操作后保留原标签页。</p>`:''}
   ${canEdit&&!item.claim?`<form data-field-claim="${escape(item.id)}"><label>认领人 <input name="name" required maxlength="100"></label>
     <button type="submit">认领</button></form>`:''}
@@ -283,8 +284,19 @@ export function mount(){
   error.textContent='验证码图片未加载，请等待新的验证码或刷新任务详情。';
   error.hidden=false;
  });
- $('#detail-field-handoff')?.addEventListener('click',event=>{
+ $('#detail-field-handoff')?.addEventListener('click',async event=>{
   if(event.target.closest('[data-browser-captcha]')&&task)renderBrowserCaptcha(task,true);
+  const button=event.target.closest('[data-browser-retry]');
+  const handoff=task?.field_handoff;
+  if(!button||!handoff)return;
+  button.disabled=true;
+  try{
+   await api(`/api/tasks/${encodeURIComponent(id)}/field-handoff`,{
+    action:'retry_browser_captcha',id:button.dataset.browserRetry,binding:handoff.binding,revision:handoff.revision
+   });
+   toast('浏览器验证已接续，请等待新的验证码。');
+  }catch(error){toast(error.message,true);}
+  finally{button.disabled=false;}
  });
  $('#browser-captcha-form')?.addEventListener('submit',async event=>{
   event.preventDefault();

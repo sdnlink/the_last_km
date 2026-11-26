@@ -1017,7 +1017,7 @@ class Supervisor(
                 task=self.function_tasks.current, round_index=round_index, tree=tree,
                 checks_digest=record.watcher_result.get('candidate_checks', {}).get('digest'),
                 directions=self._dispatch_directions)
-            fallback = handoff.get('fallback', {}) if handoff_bound else {}
+            fallback = handoff.get('fallback', {}) if handoff_bound and not field_handoff.ready(handoff) else {}
             if fallback.get('revision') != handoff.get('revision'):
                 fallback = {}
             fallback_evidence = {key: fallback[key] for key in ('failures', 'waiting') if key in fallback}

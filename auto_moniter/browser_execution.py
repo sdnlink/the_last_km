@@ -280,12 +280,15 @@ def run_case(job):
 
     launch = Directions(job).read('launch.json')
     request = launch['request']
+    failed_stage = ''
     if launch.get('session_settings_digest'):
         from auto_moniter import tig_browser_session
 
         try:
             code, output = tig_browser_session.execute(job.parent.parent, job, request, Path(launch['argv'][-1]),
                                                        launch['session_settings_digest'])
+            if code and isinstance(output, dict):
+                failed_stage = output.get('failed_stage', '')
             turn = TurnResult('', exit_code=code, stdout=json.dumps(output, ensure_ascii=False))
         except (OSError, ValueError, RuntimeError):
             turn = TurnResult('', exit_code=1)
@@ -302,6 +305,8 @@ def run_case(job):
     if turn.timed_out:
         reason = '无头浏览器用例超时，已回收执行进程。'
     result = {'status': 'failed', 'reason': reason or f'浏览器用例未完成（退出码 {turn.exit_code}）。'}
+    if failed_stage:
+        result['reason'] += f' 失败阶段：{failed_stage}。'
     if turn.exit_code == 8 and not turn.timed_out and not turn.interruption:
         result['code'] = 'captcha_timeout'
     if not (turn.exit_code or turn.timed_out or turn.interruption):

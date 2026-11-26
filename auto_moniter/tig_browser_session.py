@@ -89,7 +89,8 @@ def serve(run, settings_path, settings_digest, endpoint):
         server.bind('\0' + endpoint)
         server.listen()
         server.settimeout(2)
-        browser = playwright.chromium.launch(executable_path=settings.get('chrome'), headless=True,
+        browser = playwright.chromium.launch(executable_path=settings.get('chrome'),
+                                             headless=settings.get('visible_browser') is not True,
                                              args=chrome_args(settings))
         try:
             session = BrowserSession(browser)

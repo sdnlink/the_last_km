@@ -935,11 +935,11 @@ class TaskStore:
                             submission = {**submission, 'id': item['id']}
                         value = field_handoff.submit(run, state, submission, executor='browser:'+case_id)
                     else:
-                        errors[item['id']] = result.get('reason', '已启动无头浏览器，等待执行结果。')
+                        errors[item['id']] = result.get('reason', '浏览器验证已启动，等待执行结果。')
                         if result['status'] == 'needs_input':
                             challenge = result['challenge']
                             browser_inputs.setdefault(challenge['nonce'], {**challenge, 'id': item['id']})
-                            errors[item['id']] = '无头浏览器正在等待验证码。'
+                            errors[item['id']] = '浏览器正在等待验证码。'
                         if result['status'] == 'failed':
                             failed_cases[item['id']] = {'case_id':case_id, 'reason':errors[item['id']],
                                                        'role':(config or {}).get('fallback', 'reviewer')}

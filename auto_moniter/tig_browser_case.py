@@ -223,7 +223,26 @@ def _whitelist_snapshot(page, origin, path, tab, panels):
             'panels': visible_panels, 'missing_panels': [label for label in panels if label not in visible_panels]}
 
 
-def _direct_snapshot(page, origin, path, marker, role):
+def _session_identity(page, account, others):
+    # Return comparisons only. Never export stored values or tokens.
+    return page.evaluate("""([account, others]) => {
+        let app;
+        try {
+            app = JSON.parse(JSON.parse(sessionStorage.getItem('persist:root') || '{}').app || '{}');
+        } catch {
+            return {storage_readable: false};
+        }
+        const text = (document.body?.innerText || '').normalize();
+        return {
+            storage_readable: true,
+            own_account_in_session: app.user_name === account,
+            other_test_account_in_session: others.includes(app.user_name),
+            other_test_account_visible: others.some(name => text.includes(name))
+        };
+    }""", [account, others])
+
+
+def _direct_snapshot(page, origin, path, marker, role, identity):
     def observe():
         page.wait_for_function(
             """([target, selector, label, landing]) => {
@@ -240,6 +259,7 @@ def _direct_snapshot(page, origin, path, marker, role):
         target_visible = (page.get_by_role('tab', name=marker[1], exact=True).first.is_visible()
                           if marker[1] else page.locator(marker[0]).first.is_visible())
         return {'url': url, 'target_panel_visible': target_visible, 'not_found_visible': denied,
+                'session_identity': identity(),
                 'result': 'denied' if denied else 'visible' if url == path and target_visible
                 else 'redirect' if url != path else 'unconfirmed'}
 
@@ -249,7 +269,7 @@ def _direct_snapshot(page, origin, path, marker, role):
     return {'direct': direct, 'refresh': observe()}
 
 
-def _route_checks(pages, origin, version, records):
+def _route_checks(pages, origin, version, records, accounts):
     from playwright.sync_api import TimeoutError
 
     member = pages['member']
@@ -306,6 +326,7 @@ def _route_checks(pages, origin, version, records):
                **{path: ('[role="tab"]', values[1]) for path, values in WHITELIST_ROUTES.items()}}
     direct = {}
     sessions = {}
+    source_matrix = {}
     for role, page in pages.items():
         page.goto(origin + SUCCESS_PATHS[role])
         observed = _state(page, origin, version, SUCCESS_PATHS[role])
@@ -314,13 +335,53 @@ def _route_checks(pages, origin, version, records):
                           'displayed_role_labels': list(dict.fromkeys(labels)),
                           'layout': 'vertical' if page.locator('.ant-layout-sider').first.is_visible()
                           else 'horizontal'}
-        direct[role] = [_direct_snapshot(page, origin, path, marker, role)
+        account = accounts[role]['username']
+        others = [row['username'] for key, row in accounts.items() if key != role]
+        identity = lambda: _session_identity(page, account, others)
+        direct[role] = [_direct_snapshot(page, origin, path, marker, role, identity)
                         for path, marker in markers.items()]
+        source_matrix[role] = _source_navigation(page, origin, history_source, markers, direct[role])
     return {'navigation': navigation, 'active_detection': active_detection,
             'direct_route_order': list(markers), 'direct': direct,
-            'sessions': sessions, 'desktop_navigation': desktop,
+            'sessions': sessions, 'desktop_navigation': desktop, 'source_navigation': source_matrix,
             'contexts': len({id(page.context) for page in pages.values()}),
             'layout_scope': '仅记录站点本次实际提供的布局，未更改设备或用户配置。'}
+
+
+def _source_navigation(page, origin, history_source, markers, targets):
+    from playwright.sync_api import TimeoutError
+
+    observed = {}
+    for path, target in zip(markers, targets, strict=True):
+        source = history_source if path == HISTORY_PATH else WHITELIST_PATH
+        page.goto(origin + source)
+        if path == HISTORY_PATH:
+            button = page.get_by_role('button', name='封禁历史列表', exact=True).first
+        else:
+            row, _, _ = WHITELIST_ROUTES[path]
+            button = page.get_by_role('row').filter(has_text=row).get_by_role(
+                'button', name='新增监测白名单').first
+        try:
+            button.wait_for(state='visible', timeout=3000)
+        except TimeoutError:
+            pass
+        entry = observed[path] = {
+            'source': source, 'observed_source': _route_url(page, origin),
+            'source_not_found_visible': page.locator('img[src="/img/404.png"]').first.is_visible(),
+            'button_visible': button.is_visible(), 'target': target['direct']['result'],
+        }
+        if entry['observed_source'] == source and entry['button_visible'] and entry['target'] in ('denied', 'redirect'):
+            button.click(timeout=5000)
+            try:
+                page.wait_for_url(lambda url: url != origin + source, timeout=5000)
+            except TimeoutError:
+                pass
+            entry['click_url'] = _route_url(page, origin)
+            entry['click_not_found_visible'] = page.locator('img[src="/img/404.png"]').first.is_visible()
+            page.reload()
+            entry['refresh_url'] = _route_url(page, origin)
+            entry['refresh_not_found_visible'] = page.locator('img[src="/img/404.png"]').first.is_visible()
+    return observed
 
 
 def _observe_browser_back(page, origin, expected):
@@ -356,6 +417,7 @@ class BrowserSession:
     def __init__(self, browser):
         self.browser = browser
         self.pages = {}
+        self.stage = '准备验证'
 
 
 def execute(request, settings, *, session=None):
@@ -373,7 +435,9 @@ def execute(request, settings, *, session=None):
     adapter = captcha_command(settings)
     if session is None:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(executable_path=settings.get('chrome'), headless=True, args=chrome_args(settings))
+            browser = playwright.chromium.launch(executable_path=settings.get('chrome'),
+                                                 headless=settings.get('visible_browser') is not True,
+                                                 args=chrome_args(settings))
             try:
                 return execute(request, settings, session=BrowserSession(browser))
             finally:
@@ -384,6 +448,7 @@ def execute(request, settings, *, session=None):
     roles = ('audit', 'security') if case == 'login-audit' else SUCCESS_PATHS
     before = []
     for role in roles:
+        session.stage = f'核对 {role} 登录会话'
         saved = pages.get(role)
         if saved and not (case in ('role-login', 'login-audit') and role == 'security'):
             page, record = saved
@@ -401,12 +466,15 @@ def execute(request, settings, *, session=None):
                               route.continue_() if route.request.url.startswith((origin + '/', 'data:', 'blob:'))
                               else route.abort())
                 page = context.new_page()
+                session.stage = f'核对 {role} 测试入口版本'
                 response = page.goto(origin + '/web.json', timeout=15000)
                 if not response or not response.ok or response.json().get('git.build.version') != version:
                     raise WrongDeployment()
+                session.stage = f'登录 {role}'
                 submitted = _login(page, origin, role, accounts[role], adapter,
                                    verify_rejection=case == 'role-login' and role == 'security',
                                    interactive=settings.get('interactive_captcha') is True)
+                session.stage = f'核对 {role} 登录落点及菜单'
                 first = _state(page, origin, version, SUCCESS_PATHS[role])
                 page.reload()
                 if _state(page, origin, version, SUCCESS_PATHS[role]) != first:
@@ -419,6 +487,7 @@ def execute(request, settings, *, session=None):
         if case == 'login-audit' and role == 'audit':
             before = _audit_rows(page, accounts['security']['username'])
     observed_pages = {role: pages[role][0] for role in roles}
+    session.stage = '检查登录后页面'
     if case == 'login-audit':
         audit = observed_pages['audit']
         audit.reload()
@@ -430,10 +499,10 @@ def execute(request, settings, *, session=None):
         records['audit_correlation'] = {'before': len(before), 'after': len(after), 'new_row': delta[0],
                                         'device_timezone': settings['device_timezone']}
     elif case == 'login-routes':
-        records = _route_checks(observed_pages, origin, version, records)
+        records = _route_checks(observed_pages, origin, version, records, accounts)
     else:
         records['security']['captcha_retry_verified'] = True
-    reference = 'headless-' + secrets.token_hex(12)
+    reference = ('visible-' if settings.get('visible_browser') is True else 'headless-') + secrets.token_hex(12)
     if case == 'login-routes':
         return {'receipt': {'version': version, 'session_reference': reference,
                             'result': '已记录实际导航、刷新、返回、桌面宽度、四角色菜单和独立会话的页面访问结果。'},
@@ -458,7 +527,8 @@ def run_request(request, settings, *, session=None):
     except WrongDeployment:
         return 7, None
     except Exception as exc:
-        return (6 if 'net::ERR_CERT_' in str(exc) else 1), None
+        code = 6 if 'net::ERR_CERT_' in str(exc) else 1
+        return code, {'failed_stage': session.stage} if session is not None else None
 
 
 def main():

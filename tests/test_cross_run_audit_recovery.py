@@ -85,6 +85,26 @@ class CrossRunAuditTests(unittest.TestCase):
             self.assertEqual(state['usage']['agent_calls'],5)
             self.assertEqual(state['rounds'][-1]['watcher_result']['status'],'applied')
 
+    def test_format_repair_then_invalid_audit_gets_a_separate_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = ScriptedProvider('worker', [{'verdict': _verdict('done'), 'touch': 'app.py'}])
+            invalid = _verdict('continue', gaps=['app.py: Missing rejection case'],
+                               closed=['AUD-99'], evidence=['app.py'])
+            reviewer = ScriptedProvider('reviewer', [
+                self.brief(),
+                {'verdict': {}, 'text': '{"status":"unexpected"}'},
+                {'verdict': invalid},
+                {'verdict': _verdict('continue', gaps=['AUD-1: Missing rejection case'])},
+            ])
+            report = self.run_monitor(root, worker, reviewer)
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            self.assertEqual(len(worker.calls), 1)
+            self.assertEqual(len(reviewer.calls), 4)
+            self.assertIn('Unknown audit issue AUD-99', reviewer.calls[-1]['prompt'])
+            state = json.loads((root / 'run/state.json').read_text())
+            self.assertEqual(state['audit_issues']['items'][0]['status'], 'open')
+
     def test_new_source_prevents_reusing_rejected_progress_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

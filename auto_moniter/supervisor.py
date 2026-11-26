@@ -6588,7 +6588,7 @@ class Supervisor:
         return None
 
     def _invoke_review(self, provider, prompt, session_id, **kwargs):
-        """One bounded repair belongs to the reviewer, never to the worker."""
+        """Repair reviewer reports on the saved candidate within the retry budget."""
         self._review_audit_rejection = None
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         previous = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == kwargs['index']), None)
@@ -6649,7 +6649,13 @@ class Supervisor:
             errors = self._function_reviewer_report_errors(previous.verdict)
             if errors:
                 prompt += '\nCorrect the prior verification repair assignment on the same candidate: ' + '; '.join(errors)
-        for attempt in range(2):
+        audit_repair_attempted = False
+        if previous and previous.tree == tree and previous.watcher_result.get('status') == 'rejected':
+            prompt += ('\n上次报告未通过 Watcher 校验。请逐项核对以下原因。'
+                       '缺少合格关闭证据的审计项继续保留为待处理。\n'
+                       + '\n'.join(previous.watcher_result.get('reasons', [])))
+        for attempt in range(3):
+            audit_error = False
             turn = self._invoke(provider, prompt, session_id if attempt == 0 else '', **kwargs)
             review = self._verdict_from_turn(turn, role='reviewer')
             if (behavioral_failure and not review.parse_error
@@ -6712,6 +6718,7 @@ class Supervisor:
                 except AuditCapacityError:
                     raise
                 except ValueError as exc:
+                    audit_error = True
                     # Retain substantive findings even if a closure is invalid.
                     # No proposed closure is applied until the whole payload is valid.
                     reported = self.audit.record(findings, kwargs['index'], modules, known_modules=self.modules.items)
@@ -6722,14 +6729,17 @@ class Supervisor:
                     review.parse_error = 'invalid audit update: ' + str(exc)
                     review.status = 'continue'
                     review.gaps.append(review.parse_error)
-                    if attempt:
+                    if attempt and (audit_repair_attempted or attempt == 2):
                         self._review_audit_retry_exhausted = kwargs['index']
                         self._review_audit_rejection = {'round': kwargs['index'], 'reason': str(exc)}
             invalid = failure or review.parse_error or turn.interruption
             if not invalid or self._stop or self.config.workflow != 'review-first':
                 return turn
-            if attempt or (failure and classify(failure)[1] == 'stop'):
+            # The format repair can expose a previously unvalidated audit error.
+            if (attempt == 2 or (attempt and (not audit_error or audit_repair_attempted))
+                    or (failure and classify(failure)[1] == 'stop')):
                 return turn
+            audit_repair_attempted |= audit_error
             if (self._pending_directions()
                     or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
                 return turn
@@ -6761,6 +6771,7 @@ class Supervisor:
             prompt += ('\n\nReviewer-only repair of the SAME candidate. Worker has not changed it. '
                        'Retain already verified substantive findings; correct only the failed conclusion '
                        'or complete the interrupted audit. Do not invent implementation work.\n'
+                       '缺少本轮有效关闭证据时，从 issue_resolutions 撤回对应的关闭申请，审计项继续保留。\n'
                        + json.dumps(review.to_dict(), ensure_ascii=False) + '\nValidation error: ' + str(invalid)
                        + '\nAuthoritative current-run audit ledger after preserving findings:\n'
                        + json.dumps(self.audit.prompt(), ensure_ascii=False))

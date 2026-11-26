@@ -15,6 +15,7 @@ FILE = 'field-handoff.json'
 EXECUTOR_RESULT = 'field-handoff-result.json'
 EXECUTOR_REQUEST = 'field-handoff-request.json'
 SHA256 = re.compile(r'[a-f0-9]{64}')
+CHECK_ARCHIVE_CASE = 'watcher-check-archive'
 FIELDS = {
     'observation': ('result',),
     'deployment': ('version', 'manifest_sha256', 'rollback', 'result'),
@@ -38,9 +39,13 @@ def requests_valid(requests):
                     and all(isinstance(v, str) and 0 < len(v.strip()) <= 300 and '\0' not in v
                             for k, v in row.items() if k != 'case_id')
                     and isinstance(row.get('case_id', ''), str)
-                    and (not row.get('case_id') or row['kind'] == 'browser'
-                         and re.fullmatch(r'[a-z][a-z0-9-]{0,63}', row['case_id']))
+                    and _valid_case(row['kind'], row.get('case_id', ''))
                     and row['kind'] in FIELDS for row in requests))
+
+
+def _valid_case(kind, case_id):
+    return (not case_id or kind == 'observation' and case_id == CHECK_ARCHIVE_CASE
+            or kind == 'browser' and bool(re.fullmatch(r'[a-z][a-z0-9-]{0,63}', case_id)))
 
 
 def binding(state):
@@ -95,6 +100,39 @@ def _archive(run, value):
 
 def ready(value):
     return bool(value.get('items')) and all(item.get('receipt') for item in value['items'])
+
+
+def archive_item(value):
+    pending = [item for item in value.get('items', []) if not item.get('receipt')]
+    if value.get('automatic') and len(pending) == 1:
+        item = pending[0]
+        if (item.get('kind') == 'observation' and item.get('case_id') == CHECK_ARCHIVE_CASE
+                and not (item.get('claim') or item.get('executor_task'))):
+            return item
+    return None
+
+
+def archive_checks(run, state, handoff, item, receipt):
+    checkpoint = binding(state)
+    context = receipt.get('context', {})
+    if (checkpoint != handoff['binding'] or archive_item(handoff) != item
+            or checkpoint['checks_digest'] != receipt.get('digest')
+            or not receipt.get('passed') or not receipt.get('checks')
+            or not candidate_checks.valid(receipt, run, context)):
+        raise ValueError('归档需要与当前交接绑定且完整通过的 Watcher 检查记录。')
+    archive = {'binding': checkpoint, 'revision': handoff['revision'], 'item_id': item['id'],
+               'source': 'watcher_candidate_checks', 'cwd': state['cwd'],
+               'business_head': state.get('git_history', {}).get('business_head'),
+               'publication_tree': context.get('publication_tree'),
+               'source_aliases': context.get('check_source_aliases', []),
+               'check_inputs': (context.get('quality_policy') or {}).get('check_inputs', {}),
+               'checks': receipt['checks'], 'logs': receipt['logs']}
+    name = f"field-check-archive-{candidate_checks.digest(archive)}.json"
+    write_json(run / name, safe(archive), durable=True)
+    return submit(run, state, {'binding': checkpoint, 'revision': handoff['revision'], 'id': item['id'],
+        'receipt': {'result': f'Watcher 已归档候选的正式检查结果。归档文件：{run / name}。'
+                              f'回执摘要：{receipt["digest"]}。'
+                              + '原始日志：' + '、'.join(f'check:{log}' for log in list(receipt['logs'])[:8])}})
 
 
 def public(value):
@@ -248,8 +286,8 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
                     'artifact_manifest'):
             if key in item and not (key == 'case_id' and item[key] == ''):
                 row[key] = _text(item[key], 500)
-        if row.get('case_id') and (kind != 'browser' or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', row['case_id'])):
-            raise ValueError('浏览器用例编号无效。')
+        if not _valid_case(kind, row.get('case_id', '')):
+            raise ValueError('交接用例编号无效。')
         if 'executor_task' in row and not re.fullmatch(r'[a-f0-9]{32}', row['executor_task']):
             raise ValueError('请指定有效的已登记执行任务编号。')
         if 'artifact_manifest' in row and (kind != 'deployment' or not row['artifact_manifest'].startswith('/')):

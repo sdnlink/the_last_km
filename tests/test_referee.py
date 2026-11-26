@@ -66,6 +66,55 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
         self.assertFalse((self.run_dir / 'referee-decisions.json').exists())
 
+    def archive_scenario(self):
+        waiting = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
+        final = verification_task('FINAL', depends=['VERIFY'])
+        blocked = result('VERIFY', 'changes_required')
+        blocked['verdict'].update(blockers=['缺少当前候选的检查归档'], field_handoffs=[{
+            'kind': 'observation', 'case_id': 'watcher-check-archive',
+            'title': '归档已通过的检查', 'owner': 'Watcher 管理端', 'evidence_needed': '原始日志及候选指纹',
+        }])
+        return (FunctionWorker('worker', [result('VERIFY', 'done')]),
+                [planning(waiting, [waiting, final]), blocked, decision('archive_checks')])
+
+    def test_referee_archives_passing_checks_and_resumes_original_round(self):
+        worker, responses = self.archive_scenario()
+        reviewer = ScriptedProvider('reviewer', [*responses, result('VERIFY', 'accepted')])
+        report = self.monitor(worker, reviewer, max_rounds=1).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual([r.index for r in report.records if r.role == 'reviewer'], [1, 1])
+        self.assertIn('field-check-archive-', reviewer.calls[-1]['prompt'])
+        saved = json.loads(next(self.run_dir.glob('field-check-archive-*.json')).read_text())
+        self.assertEqual(saved['binding']['round'], 1)
+        self.assertEqual(saved['checks'][0]['exit_code'], 0)
+        self.assertEqual(list(saved['logs']), ['001-check-01.log'])
+        entries = referee.Journal(self.run_dir, archive=True).read()['decisions']
+        self.assertEqual([entry['status'] for entry in entries], ['applied'])
+
+    def test_resume_applies_saved_archive_decision_without_another_referee_call(self):
+        worker, responses = self.archive_scenario()
+        reviewer = ScriptedProvider('reviewer', responses)
+        monitor = self.monitor(worker, reviewer, max_rounds=1)
+        with patch.object(monitor, '_apply_referee_archive', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                monitor.run()
+        worker = FunctionWorker('worker', [])
+        reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted')])
+        report = self.monitor(worker, reviewer, max_rounds=1, resume=True).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertFalse(worker.calls)
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertIn('field-check-archive-', reviewer.calls[0]['prompt'])
+
+    def test_repeated_archive_request_waits_without_repeating_the_referee(self):
+        worker, responses = self.archive_scenario()
+        reviewer = ScriptedProvider('reviewer', [*responses, responses[1]])
+        report = self.monitor(worker, reviewer, max_rounds=1).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertEqual(len(reviewer.calls), 4)
+        self.assertEqual(len(list(self.run_dir.glob('field-check-archive-*.json'))), 1)
+
     def test_review_interruption_reuses_worker_candidate_and_requires_fresh_review(self):
         worker = self.worker()
         reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),

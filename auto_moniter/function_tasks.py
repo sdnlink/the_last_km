@@ -354,6 +354,9 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
            'and return next_task=null. Use field_handoffs for each concrete prerequisite. Include the type '
            '(deployment, browser or observation), task title, responsible role and exact evidence needed. '
            'For browser evidence use a matching configured case_id when available, otherwise set case_id to an empty string. '
+           'When the only missing observation is an archive of the current candidate’s passing Watcher checks '
+           'and their saved metadata, use kind=observation and case_id=watcher-check-archive. '
+           'Do not use that case for fresh observations or metadata absent from the saved check records. '
            'Return field_handoffs=[] in all other cases. '
            if task.get('kind') == 'verification' else
            'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +

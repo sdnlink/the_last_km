@@ -91,6 +91,8 @@ Web 新任务启用逐函数派单时，reviewer 先返回完整 `function_plan`
 
 逐函数任务可在质量策略中声明 `operator_preflights` 和 `check_inputs`。例如 `{"operator_preflights":["FILTER-PORT-DRAFT-BASELINE"],"check_inputs":{"check:1":["opt/web/backend/cplane/models/block_host.py"]}}`。管理端预检独立执行，提供候选指纹、工作区版本、执行结果和缺失输入，声明的预检编号不能进入正式派单。检查输入路径相对于任务工作区，编号对应固定验收命令的顺序。
 
+开启 Referee 的完整派单计划中，Reviewer 可以用 `kind=observation` 和 `case_id=watcher-check-archive` 请求归档已有的正式检查。Referee 可决定归档或等待。Watcher 校验候选、检查摘要和原始日志，保存归档及回执，再续审原轮次。恢复时沿用已保存的裁判决策。需要重新执行浏览器操作或部署验证时，继续使用相应的现场待办。
+
 固定检查按源码根目录名称选择分支时，可用 `--check-source-alias=check:2=frontend_tig` 或控制台恢复接口的 `check_source_aliases` 配置。Watcher 为这条固定命令设置 `FRONTEND_ROOT`，别名指向当前任务工作区。实际执行目录和命令仍沿用原设置，验收回执记录别名配置和日志。派单前核对执行环境即可，首次正式回执由 Watcher 执行固定检查后生成。
 
 Watcher 用同一套命令选择规则核对派单和正式验收，包括只读验证自动附加的固定检查。声明的输入缺失时，Watcher 优先从已批准计划推进依赖已满足的独立派单，并保留原待验项和固定检查。已经产生改动的派单保留在原位，避免其他派单接手其未验收工作树。没有可先执行的派单时，任务显示缺失路径，补齐后可从原检查点恢复。设定这些字段的入口是创建任务时的质量策略 JSON。

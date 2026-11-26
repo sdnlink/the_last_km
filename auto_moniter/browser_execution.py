@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import urlsplit
 
 from auto_moniter import candidate_checks, field_handoff
@@ -87,6 +88,7 @@ def cases(path, workspace):
                 raise ValueError('TIG 用例须指定私有配置的绝对路径。')
             config['argv'] = [sys.executable, '-m', 'auto_moniter.tig_browser_case', settings]
             config.update(_tig_settings_revision(Path(settings)))
+            config['runner_digest'] = hashlib.sha256(Path(__file__).with_name('tig_browser_case.py').read_bytes()).hexdigest()
         elif (not isinstance(argv, list) or not argv
               or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in argv)
               or not Path(argv[0]).is_absolute()):
@@ -111,11 +113,16 @@ def _tig_settings_revision(path):
         settings = json.loads(content)
         if not isinstance(settings, dict):
             raise ValueError()
-        adapter = Path(captcha_command(settings)[0]).stat()
+        command = captcha_command(settings)
+        adapter = Path(command[0]).stat() if command else None
         if find_spec('playwright') is None:
             return {'execution_error': '无头浏览器依赖未安装。'}
-        return {'settings_digest': hashlib.sha256(content).hexdigest(),
-                'adapter_revision': [adapter.st_dev, adapter.st_ino, adapter.st_mtime_ns, adapter.st_size]}
+        result = {'settings_digest': hashlib.sha256(content).hexdigest()}
+        if adapter:
+            result['adapter_revision'] = [adapter.st_dev, adapter.st_ino, adapter.st_mtime_ns, adapter.st_size]
+        if settings.get('interactive_captcha') is True:
+            result['interactive_captcha'] = True
+        return result
     except CaptchaAdapterRequired:
         return {'execution_error': '测试环境需要获准的验证码输入程序，请核对配置和执行权限。'}
     except FileNotFoundError:
@@ -143,17 +150,47 @@ def reviewer_cases(workspace, task_id, run):
             + ', '.join(sorted(available)))
 
 
-def poll(run, value, item, config):
-    """One detached execution per case, binding and config; read durable results on restart."""
-    if config.get('execution_error'):
-        return {'status': 'failed', 'reason': config['execution_error']}
+def _job(run, value, item, config):
     item_ids = config.get('handoff_ids') or [item['id']]
     request = {'binding': value['binding'], 'revision': value['revision'], 'id': item_ids[0],
                'case_id': item['case_id'], 'url': config['url'], 'expected_version': config['expected_version']}
     if config.get('handoff_ids'):
         request['item_ids'] = item_ids
     key = candidate_checks.digest([request, config])
-    job = run / 'browser-executions' / key
+    return run / 'browser-executions' / key, request
+
+
+def _challenge(job):
+    challenge = Directions(job).read('captcha.json')
+    if (not challenge or challenge['expires'] <= time.time()
+            or (job / 'captcha-answer.json').exists()):
+        return {}
+    return challenge
+
+
+def submit_captcha(run, value, item, config, nonce, code):
+    job, _ = _job(run, value, item, config)
+    challenge = _challenge(job)
+    if not challenge or challenge['nonce'] != nonce:
+        raise ValueError('验证码已过期，请等待下一次请求。')
+    otp = challenge.get('kind') == 'otp'
+    if not isinstance(code, str) or not re.fullmatch(r'[0-9]{6}' if otp else r'[A-Za-z0-9]{4}', code):
+        raise ValueError('请输入六位动态验证码。' if otp else '请输入图片上的四位字母或数字。')
+    with (job / 'execution.lock').open('r') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise ValueError('浏览器已退出，请重新启动取证。')
+    write_json(job / 'captcha-answer.json', {'nonce': nonce, 'code': code}, durable=True, mode=0o600)
+
+
+def poll(run, value, item, config):
+    """One detached execution per case, binding and config; read durable results on restart."""
+    if config.get('execution_error'):
+        return {'status': 'failed', 'reason': config['execution_error']}
+    job, request = _job(run, value, item, config)
     job.mkdir(parents=True, mode=0o700, exist_ok=True)
     result = Directions(job).read('result.json')
     if result:
@@ -163,7 +200,8 @@ def poll(run, value, item, config):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return {'status': 'running'}
+            challenge = _challenge(job) if config.get('interactive_captcha') else {}
+            return {'status': 'needs_input', 'challenge': challenge} if challenge else {'status': 'running'}
         result = Directions(job).read('result.json')
         if result:
             return result
@@ -171,7 +209,10 @@ def poll(run, value, item, config):
         attempts = launch.get('attempts', 0)
         if attempts >= 2:
             return {'status': 'failed', 'reason': '浏览器执行进程连续中断，已保留原检查点。'}
-        write_json(job / 'launch.json', {'request': request, 'argv': config['argv'], 'attempts': attempts + 1},
+        for name in ('captcha.json', 'captcha-answer.json'):
+            (job / name).unlink(missing_ok=True)
+        write_json(job / 'launch.json', {'request': request, 'argv': config['argv'], 'attempts': attempts + 1,
+                                       'interactive_captcha': bool(config.get('interactive_captcha'))},
                    durable=True, mode=0o600)
         process = subprocess.Popen([sys.executable, '-m', 'auto_moniter.browser_execution', str(job)],
                                    pass_fds=(lock.fileno(),), stdin=subprocess.DEVNULL,
@@ -188,11 +229,13 @@ def run_case(job):
     launch = Directions(job).read('launch.json')
     request = launch['request']
     turn = run_command(PreparedCommand(launch['argv'], stdin_text=json.dumps(request, ensure_ascii=False)),
-                       job, timeout_s=240, detect_input_requests=False, max_output_bytes=64 * 1024)
+                       job, timeout_s=900 if launch.get('interactive_captcha') else 240,
+                       detect_input_requests=False, max_output_bytes=64 * 1024)
     reason = {3: '测试环境需要验证码输入程序，当前未配置。',
               4: '无头浏览器依赖未安装。',
               5: '浏览器账号配置须保存在当前用户的私有文件中。',
-              6: 'Chrome 无法验证测试站点的证书，请核对站点和已登记的证书公钥指纹。'}.get(turn.exit_code)
+              6: 'Chrome 无法验证测试站点的证书，请核对站点和已登记的证书公钥指纹。',
+              7: '现场部署版本与当前候选不一致。'}.get(turn.exit_code)
     if turn.timed_out:
         reason = '无头浏览器用例超时，已回收执行进程。'
     result = {'status': 'failed', 'reason': reason or f'浏览器用例未完成（退出码 {turn.exit_code}）。'}

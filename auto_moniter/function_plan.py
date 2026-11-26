@@ -143,7 +143,8 @@ def waiting(plan, ledger):
 
 def planning_contract():
     return ('\nBefore implementation, return function_plan: the COMPLETE ordered list of remaining function assignments '
-            'through final requirement verification, including the exact current assignment first when one is unfinished. '
+            'through final requirement verification, including the exact unfinished assignment. Keep it first '
+            'unless Watcher lists an independent read-only assignment that can be proposed for coverage review. '
             'Set next_task to function_plan[0]. Each entry needs the same precise fields, focused checks, criteria and '
             'boundaries as next_task. Use unique IDs and only dependencies accepted already or appearing earlier in this plan. '
             'Cover every original module and requirement criterion; conclude with delivery_scope=requirement. '

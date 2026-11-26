@@ -15,6 +15,21 @@
           <!-- DETAIL_TABS -->
           </section>
           <!-- DETAIL_CONTENT -->
+          <dialog id="browser-captcha-dialog" aria-labelledby="browser-captcha-title">
+            <form id="browser-captcha-form">
+              <div class="dialog-heading"><h2 id="browser-captcha-title">填写现场浏览器验证码</h2></div>
+              <div class="form-body">
+                <p id="browser-captcha-role"></p>
+                <img id="browser-captcha-image" alt="现场登录验证码">
+                <label>验证码 <input name="code" required pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="off"></label>
+                <p id="browser-captcha-error" role="alert" hidden></p>
+              </div>
+              <div class="dialog-footer">
+                <button class="button secondary" type="button" data-close="browser-captcha-dialog">暂不填写</button>
+                <button class="button primary" type="submit">提交并继续</button>
+              </div>
+            </form>
+          </dialog>
           <dialog id="preview-backend-dialog" aria-labelledby="preview-backend-title">
             <form id="preview-backend-form">
               <div class="dialog-heading"><h2 id="preview-backend-title">填写测试后端</h2></div>

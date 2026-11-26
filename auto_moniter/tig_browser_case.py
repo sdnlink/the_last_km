@@ -1,6 +1,7 @@
 """Fixed, read-only TIG browser cases for an operator-configured test environment."""
 
 from datetime import datetime, timezone
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 
 
@@ -29,8 +31,41 @@ class CaptchaAdapterRequired(ValueError):
     pass
 
 
+class WrongDeployment(ValueError):
+    pass
+
+
+def human_captcha(role, image=None):
+    from auto_moniter.directions import Directions
+    from auto_moniter.storage import write_json
+
+    directory = Path.cwd()
+    nonce = secrets.token_hex(16)
+    expires = time.time() + 120
+    request = directory / 'captcha.json'
+    response = directory / 'captcha-answer.json'
+    challenge = {'nonce': nonce, 'role': role, 'expires': expires,
+                 'kind': 'image' if image is not None else 'otp'}
+    if image is not None:
+        challenge['image'] = base64.b64encode(image).decode('ascii')
+    pattern = r'[A-Za-z0-9]{4}' if image is not None else r'[0-9]{6}'
+    write_json(request, challenge, durable=True, mode=0o600)
+    try:
+        while time.time() < expires:
+            answer = Directions(directory).read(response.name)
+            if answer.get('nonce') == nonce and re.fullmatch(pattern, answer.get('code', '')):
+                return answer['code']
+            time.sleep(.25)
+        raise CaptchaAdapterRequired()
+    finally:
+        response.unlink(missing_ok=True)
+        request.unlink(missing_ok=True)
+
+
 def captcha_command(settings):
     adapter = settings.get('captcha_command')
+    if adapter is None and settings.get('interactive_captcha') is True:
+        return None
     if (not isinstance(adapter, list) or not adapter
             or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in adapter)
             or not os.path.isabs(adapter[0]) or not os.path.isfile(adapter[0])
@@ -58,6 +93,8 @@ def _state(page, origin, version, path):
 
 
 def _captcha_answer(adapter, role, image):
+    if adapter is None:
+        return human_captcha(role, image)
     result = subprocess.run([*adapter, role], input=image, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, timeout=35, check=True)
     answer = result.stdout.decode().strip()
@@ -66,7 +103,7 @@ def _captcha_answer(adapter, role, image):
     return answer
 
 
-def _login(page, origin, role, account, adapter, *, verify_rejection=False):
+def _login(page, origin, role, account, adapter, *, verify_rejection=False, interactive=False, retry=True):
     page.goto(origin + '/login')
     user = page.get_by_placeholder('请输入您的用户名')
     password = page.get_by_placeholder('请输入登录密码')
@@ -99,7 +136,23 @@ def _login(page, origin, role, account, adapter, *, verify_rejection=False):
     code.fill(_captcha_answer(adapter, role, captcha.screenshot()))
     page.wait_for_timeout(1100)
     submitted = datetime.now(timezone.utc).isoformat()
-    submit.click()
+    if interactive:
+        with page.expect_response(lambda r: urlsplit(r.url).path == '/login'
+                                  and r.request.method == 'POST', timeout=15000) as response:
+            submit.click()
+        result = response.value.json()
+        if (retry and isinstance(result, dict) and result.get('success') is False
+                and '验证码' in str(result.get('msg', ''))):
+            return _login(page, origin, role, account, adapter, interactive=True, retry=False)
+        otp = page.get_by_placeholder('请输入6位验证码')
+        page.wait_for_function("""() => location.pathname !== '/login'
+            || [...document.querySelectorAll('input[autocomplete="one-time-code"]')].some(input =>
+                input.getClientRects().length > 0)""", timeout=15000)
+        if otp.is_visible():
+            otp.fill(human_captcha(role))
+            otp.press('Enter')
+    else:
+        submit.click()
     return submitted
 
 
@@ -271,9 +324,14 @@ def execute(request, settings):
                               route.continue_() if route.request.url.startswith((origin + '/', 'data:', 'blob:'))
                               else route.abort())
                 page = context.new_page()
+                if not pages:
+                    response = page.goto(origin + '/web.json', timeout=15000)
+                    if not response or not response.ok or response.json().get('git.build.version') != version:
+                        raise WrongDeployment()
                 pages[role] = page
                 submitted = _login(page, origin, role, accounts[role], adapter,
-                                   verify_rejection=case == 'role-login' and role == 'security')
+                                   verify_rejection=case == 'role-login' and role == 'security',
+                                   interactive=settings.get('interactive_captcha') is True)
                 first = _state(page, origin, version, SUCCESS_PATHS[role])
                 page.reload()
                 if _state(page, origin, version, SUCCESS_PATHS[role]) != first:
@@ -318,6 +376,8 @@ def main():
         return 3
     except ModuleNotFoundError:
         return 4
+    except WrongDeployment:
+        return 7
     except Exception as exc:
         # Browser exceptions can contain entered values. Keep credentials out of logs.
         return 6 if 'net::ERR_CERT_' in str(exc) else 1

@@ -10,6 +10,7 @@ const section=$('#detail-page').dataset.section;
 let task,role='all',log='',logSequence=0,logTotal=0;
 let dispatchData=null,dispatchFilter='all',dispatchSequence=0;
 let previewPrompted=false,previewChanging=false;
+let shownCaptcha='', captchaSubmitting=false;
 const previewAPI=()=>`/api/tasks/${encodeURIComponent(id)}/local-preview`;
 
 function showPreviewPrompt(preview){
@@ -56,6 +57,33 @@ const receiptLabels={version:'实际版本',manifest_sha256:'产物清单 SHA-25
 function handoffClaimSlot(itemId){
  return `auto-monitor:handoff:${id}:${itemId}`;
 }
+function renderBrowserCaptcha(t, reopen=false){
+ const dialog=$('#browser-captcha-dialog');
+ const challenge=Object.values(t.field_handoff?.browser_inputs||{}).find(value=>
+  (value.kind==='otp'||/^[A-Za-z0-9+/]+={0,2}$/.test(value.image))&&value.expires>Date.now()/1000);
+ if(!challenge||t.status!=='action_required'){
+  if(dialog.open)dialog.close();
+  return;
+ }
+ if(dialog.open&&shownCaptcha===challenge.nonce)return;
+ if(!reopen&&shownCaptcha===challenge.nonce)return;
+ if(!dialog.open&&$('dialog[open]'))return;
+ shownCaptcha=challenge.nonce;
+ $('#browser-captcha-role').textContent=challenge.role;
+ const otp=challenge.kind==='otp',image=$('#browser-captcha-image');
+ image.hidden=otp;
+ if(otp)image.removeAttribute('src');
+ else image.src='data:image/png;base64,'+challenge.image;
+ $('#browser-captcha-title').textContent=otp?'填写六位动态验证码':'填写现场浏览器验证码';
+ const form=$('#browser-captcha-form');
+ form.reset();
+ const code=form.elements.code;
+ code.pattern=otp?'[0-9]{6}':'[A-Za-z0-9]{4}';
+ code.maxLength=otp?6:4;
+ code.inputMode=otp?'numeric':'text';
+ $('#browser-captcha-error').hidden=true;
+ if(!dialog.open)dialog.showModal();
+}
 function renderFieldHandoff(t){
  const panel=$('#detail-field-handoff');
  if(!panel)return;
@@ -79,6 +107,7 @@ function renderFieldHandoff(t){
   ${item.expected_manifest_sha256?`<p>归档清单 SHA-256 <code>${escape(item.expected_manifest_sha256)}</code></p>`:''}
   ${item.resources_expected?`<p>现场需对账 ${escape(item.resources_expected)} 个资源。</p>`:''}
   ${item.executor_task?`<p><a href="/tasks/${escape(item.executor_task)}">查看关联执行任务</a></p>`:''}
+  ${Object.values(handoff.browser_inputs||{}).some(input=>input.id===item.id)?'<button type="button" class="button secondary" data-browser-captcha>填写验证码</button>':''}
   ${canEdit&&item.url?`<p><a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">打开现场浏览器页</a>，完成操作后保留原标签页。</p>`:''}
   ${canEdit&&!item.claim?`<form data-field-claim="${escape(item.id)}"><label>认领人 <input name="name" required maxlength="100"></label>
     <button type="submit">认领</button></form>`:''}
@@ -136,6 +165,7 @@ function render(t){
  if(t.status==='interrupted')alerts.push(i18n('任务执行已中断，可查看工作记录后从检查点恢复。'));
  if($('#detail-alerts'))$('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
  renderFieldHandoff(t);
+ renderBrowserCaptcha(t);
 }
 function renderUsage(usage,estimate){
  const stages=usage.stage_elapsed_s||{};
@@ -248,6 +278,24 @@ async function loadLogs(){
  }catch(error){if(error.status===404&&log){log='';return loadLogs();}throw error;}
 }
 export function mount(){
+ $('#detail-field-handoff')?.addEventListener('click',event=>{
+  if(event.target.closest('[data-browser-captcha]')&&task)renderBrowserCaptcha(task,true);
+ });
+ $('#browser-captcha-form')?.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const handoff=task?.field_handoff,challenge=handoff?.browser_inputs?.[shownCaptcha];
+  if(!challenge||captchaSubmitting)return;
+  const form=event.currentTarget,error=$('#browser-captcha-error');
+  captchaSubmitting=true;
+  try{
+   await api(`/api/tasks/${encodeURIComponent(id)}/field-handoff`,{
+    action:'browser_captcha',id:challenge.id,binding:handoff.binding,revision:handoff.revision,
+    nonce:challenge.nonce,code:new FormData(form).get('code')
+   });
+   $('#browser-captcha-dialog').close();
+  }catch(exc){error.textContent=exc.message;error.hidden=false;}
+  finally{captchaSubmitting=false;}
+ });
  $('#detail-local-preview')?.addEventListener('click',async event=>{
   const button=event.target.closest('[data-preview-action]');
   if(!button)return;

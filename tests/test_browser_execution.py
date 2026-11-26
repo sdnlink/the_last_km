@@ -1,3 +1,4 @@
+import fcntl
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -15,6 +16,36 @@ from console.tasks import TaskStore
 
 
 class BrowserExecutionTests(unittest.TestCase):
+    def test_captcha_is_sent_only_to_the_live_bound_browser(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            value = {'binding': {'round': 9}, 'revision': 'current'}
+            item = {'id': '1', 'case_id': 'login-routes'}
+            config = {'url': 'https://example.test/login', 'expected_version': '1',
+                      'interactive_captcha': True}
+            job, _ = browser_execution._job(run, value, item, config)
+            job.mkdir(parents=True)
+            write_json(job / 'captcha.json', {
+                'nonce': 'current-image', 'expires': time.time() + 30, 'image': 'YWJj', 'role': 'member',
+            })
+            with (job / 'execution.lock').open('a') as server:
+                fcntl.flock(server, fcntl.LOCK_EX)
+                self.assertEqual(browser_execution.poll(run, value, item, config)['status'], 'needs_input')
+                with self.assertRaisesRegex(ValueError, '过期'):
+                    browser_execution.submit_captcha(run, value, item, config, 'stale', 'A123')
+                browser_execution.submit_captcha(run, value, item, config, 'current-image', 'A123')
+                self.assertEqual(browser_execution.poll(run, value, item, config)['status'], 'running')
+                answer = json.loads((job / 'captcha-answer.json').read_text())
+                self.assertEqual(answer, {'nonce': 'current-image', 'code': 'A123'})
+                (job / 'captcha-answer.json').unlink()
+                write_json(job / 'captcha.json', {
+                    'nonce': 'current-otp', 'expires': time.time() + 30, 'kind': 'otp', 'role': 'member',
+                })
+                with self.assertRaisesRegex(ValueError, '六位'):
+                    browser_execution.submit_captcha(run, value, item, config, 'current-otp', 'A123')
+                browser_execution.submit_captcha(run, value, item, config, 'current-otp', '013579')
+                self.assertEqual(json.loads((job / 'captcha-answer.json').read_text())['code'], '013579')
+
     def test_configured_case_is_collected_without_a_child_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -70,6 +101,8 @@ class BrowserExecutionTests(unittest.TestCase):
                 **checkpoint, 'id': '2', 'receipt': {'result': '构建通过'},
             })
             build = deepcopy(saved['items'][1])
+            saved['items'][0]['case_id'] = ''
+            write_json(run / field_handoff.FILE, saved)
             config = {'url': 'https://target.example/login', 'expected_version': '1.2.3'}
             bound = field_handoff.bind_browser_case(run, state, {
                 **checkpoint, 'id': '1', 'case_id': 'login-routes',

@@ -1955,7 +1955,9 @@ class Supervisor:
         staged.merge(proposed)
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
         preflight_repair = self._dispatch_preflight_repair()
-        if self._referee_replan and dispatch.current:
+        if next_function and self._independent_verification(assignment, backlog):
+            dispatch.current = None
+        elif self._referee_replan and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if self._assignment_worker_started(dispatch.current) and revised['id'] == dispatch.current['id']:
                 raise ValueError('Referee replacement of a started assignment requires a fresh task ID')
@@ -2017,6 +2019,34 @@ class Supervisor:
             if problems:
                 raise ValueError(problems[0])
         return staged, dispatch, complete
+
+    def _independent_verification(self, assignment, backlog, *, tree=None):
+        """Allow a plan to propose a previously listed read-only task while field work waits."""
+        from auto_moniter import field_handoff
+
+        current = self.function_tasks.current
+        if (not self.config.full_function_plan or not self._verification_only()
+                or current['delivery_scope'] != 'function' or not self._complete_function_plan_ready()
+                or not isinstance(backlog, list)
+                or not isinstance(assignment, dict) or assignment.get('kind') != 'verification'
+                or assignment.get('delivery_scope') != 'function'):
+            return False
+        try:
+            assignment = function_tasks.validate(assignment)
+            retained = [function_tasks.validate(item) for item in backlog
+                        if isinstance(item, dict) and item.get('id') == current['id']]
+        except ValueError:
+            return False
+        if retained != [current] or assignment not in function_plan.waiting(self.function_plan, self.function_tasks):
+            return False
+        handoff = field_handoff.read(self.run_dir)
+        binding = handoff.get('binding', {})
+        return bool(handoff.get('items') and not field_handoff.ready(handoff)
+                    and binding.get('task_sha256') == candidate_checks.digest(current)
+                    and binding.get('tree') == (tree or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
+                    and set(assignment.get('depends_on', [])) <= {row['task']['id'] for row in self.function_tasks.accepted}
+                    and not self._assignment_repository_conflict(assignment)
+                    and not self._missing_dispatch_inputs(assignment))
 
     def _retain_linked_contracts(self, assignment, backlog):
         if not (self.config.assignment_deliveries and self.function_plan and isinstance(backlog, list)
@@ -2095,6 +2125,14 @@ class Supervisor:
         prompt = requirement_coverage.prompt(
             sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted,
             scoped_dispatch=scoped_dispatch)
+        task = plan.get('next_task')
+        if scoped_dispatch and task:
+            missing = self._missing_dispatch_inputs(task)
+            prompt += ('\n\nWatcher 派前核对结果：' + json.dumps({
+                'task_id': task['id'],
+                'missing_check_inputs': missing,
+                'workspace_conflict': self._assignment_repository_conflict(task),
+            }, ensure_ascii=False))
         schema = self.schema_path
         self.schema_path = self.run_dir / 'requirement-coverage.schema.json'
         try:
@@ -2334,6 +2372,7 @@ class Supervisor:
                         return turn
                     sources = self._coverage_sources(directions)
                     modules = staged_plan[0].export() if staged_plan else self.modules.export()
+                    coverage_required |= self._independent_verification(assignment, plan.get('function_plan'))
                     coverage_required |= requirement_coverage.requires_review(
                         sources, modules, self.config.assignment_workspaces)
                     if coverage_required:
@@ -2524,6 +2563,14 @@ class Supervisor:
                                        'assignment fields and the rest of the plan unchanged. '
                                        'Keep next_task and the plan first entry equal.')
                         prompt += '\nExact unfinished assignment:\n' + json.dumps(self.function_tasks.current, ensure_ascii=False)
+                        if self.function_plan:
+                            pending = function_plan.waiting(self.function_plan, self.function_tasks)
+                            candidates = [item['id'] for item in pending if self._independent_verification(
+                                item, [item, self.function_tasks.current], tree=before)]
+                            if candidates:
+                                prompt += ('\nWatcher 已核对以下只读派单的依赖、工作区及检查输入。'
+                                           '可选择一项交独立复核，并在计划中保留原待验派单：'
+                                           + json.dumps(candidates, ensure_ascii=False))
             elif next_function:
                 prompt += ('\nReconcile new user amendments and changed inputs with the existing brief. '
                            'Merge overlapping work. Keep existing acceptance criteria in their original order and append new criteria. '
@@ -4324,6 +4371,10 @@ class Supervisor:
             'integration. Every target must change, and each role must cite every target file. Approved integration scopes: '
             + json.dumps(scopes, ensure_ascii=False)) if scopes else ''
         return ('\nFunction gate: use a supported source language and identify one exact qualified symbol. '
+                'When an unfinished read-only function is waiting for field evidence, you may propose an unchanged '
+                'read-only function from the previously saved plan as next_task, provided its dependencies and fixed '
+                'check inputs are ready. Keep the blocked function unchanged in function_plan after the proposed task. '
+                'Watcher checks this exception and requires independent coverage review before dispatch. '
                 + ('Fixed checks with a Watcher-configured FRONTEND_ROOT source alias: '
                    + json.dumps(self.config.check_source_aliases, ensure_ascii=False)
                    + '. The alias points to the current workspace. Treat execution environment readiness as the prerequisite; '

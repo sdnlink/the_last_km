@@ -60,6 +60,38 @@ def plan(first):
             'modules':_verdict('continue')['modules']})}
 
 class DispatchTests(unittest.TestCase):
+    def test_waiting_browser_does_not_lock_an_unchanged_read_only_assignment(self):
+        from types import SimpleNamespace
+        from auto_moniter import field_handoff, candidate_checks
+        from auto_moniter.storage import write_json
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            from auto_moniter.function_tasks import validate
+
+            waiting = validate({**verification_task('WAITING'), 'delivery_scope': 'function'})
+            independent = validate({**verification_task('LOCAL'), 'delivery_scope': 'function'})
+            dependent = {**independent, 'id': 'DEPENDENT', 'depends_on': ['WAITING']}
+            monitor = object.__new__(Supervisor)
+            monitor.run_dir = run
+            monitor.config = SimpleNamespace(full_function_plan=True)
+            monitor._function_gate = True
+            monitor.function_tasks = SimpleNamespace(current=waiting, accepted=[])
+            monitor.function_plan = {'tasks': [waiting, independent, dependent]}
+            write_json(run / field_handoff.FILE, {
+                'binding': {'task_sha256': candidate_checks.digest(waiting), 'tree': 'same'},
+                'items': [{'kind': 'browser'}],
+            })
+            with (patch.object(monitor, '_complete_function_plan_ready', return_value=True),
+                  patch.object(monitor, '_assignment_repository_conflict', return_value=''),
+                  patch.object(monitor, '_missing_dispatch_inputs', return_value=[])):
+                self.assertTrue(monitor._independent_verification(
+                    {**independent, 'review_test': None},
+                    [independent, {**waiting, 'review_test': None}], tree='same'))
+                self.assertFalse(monitor._independent_verification(dependent, [dependent, waiting], tree='same'))
+                self.assertFalse(monitor._independent_verification(independent, [independent], tree='same'))
+                self.assertFalse(monitor._independent_verification(independent, [independent, waiting], tree='changed'))
+
     def run_monitor(self, root, worker, reviewer, **kwargs):
         kwargs.setdefault('checks', [CHECK])
         kwargs.setdefault('review_every', 0)

@@ -171,13 +171,14 @@ def executor_prompt(cwd, run):
 
 
 def reopen(run, value, blockers, requests=()):
-    write_json(run / f"field-handoff-{value['revision']}.json", value, durable=True)
+    archived = {key: entry for key, entry in value.items() if key != 'browser_inputs'}
+    write_json(run / f"field-handoff-{value['revision']}.json", archived, durable=True)
     items = requests or [
         {'kind': 'observation', 'title': reason[:300], 'owner': '现场执行器'}
         for reason in blockers[:12]
     ]
     updated = {**{key: field for key, field in value.items()
-                  if key not in ('resume', 'dispatch', 'executor_status', 'fallback', 'failed_cases')},
+                  if key not in ('resume', 'dispatch', 'executor_status', 'fallback', 'failed_cases', 'browser_inputs')},
                'revision': uuid.uuid4().hex, 'review_feedback': safe(blockers),
                'retained_evidence': review_evidence(value)[-12:],
                'automatic': True,
@@ -256,6 +257,9 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
         value['retained_evidence'] = existing['retained_evidence']
     if existing.get('binding') == checkpoint and existing.get('fallback_history'):
         value['fallback_history'] = existing['fallback_history']
+    if existing:
+        archived = {key: entry for key, entry in existing.items() if key != 'browser_inputs'}
+        write_json(run / f"field-handoff-{existing['revision']}.json", archived, durable=True)
     write_json(run / FILE, value, durable=True)
     return value
 
@@ -287,7 +291,7 @@ def bind_browser_case(run, state, data, config):
     value, item = _select(run, state, data)
     case_id = data['case_id']
     if (item['kind'] != 'browser' or item.get('receipt') or item.get('claim')
-            or item.get('executor_task') or item.get('case_id', case_id) != case_id):
+            or item.get('executor_task') or item.get('case_id') not in (None, '', case_id)):
         raise ValueError('只可为尚未认领或提交的浏览器待办绑定用例。')
     if (item.get('url', config['url']) != config['url']
             or item.get('expected_version', config['expected_version']) != config['expected_version']):

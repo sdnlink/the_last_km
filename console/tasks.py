@@ -748,6 +748,15 @@ class TaskStore:
                     return field_handoff.claim(run, state, data)
                 if data.get('action') == 'release':
                     return field_handoff.release(run, state, data)
+                if data.get('action') == 'browser_captcha':
+                    value, item = field_handoff._select(run, state, data)
+                    cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
+                    config = cases.get(item.get('case_id'))
+                    if (not config or not config.get('interactive_captcha') or item.get('receipt')
+                            or not browser_execution.matches_item(config, value, item)):
+                        raise ValueError('浏览器会话已失效，请刷新任务。')
+                    browser_execution.submit_captcha(run, value, item, config, data.get('nonce'), data.get('code'))
+                    return {'submitted': True}
                 if data.get('action') == 'bind_browser_case':
                     case_id = data.get('case_id')
                     cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
@@ -842,6 +851,7 @@ class TaskStore:
     def _collect_field_results(self, meta, run, state, value):
         errors = {}
         failed_cases = {}
+        browser_inputs = {}
         browser_items = [item for item in value['items'] if item['kind'] == 'browser']
         cases = None
         for item in value['items']:
@@ -898,6 +908,10 @@ class TaskStore:
                         value = field_handoff.submit(run, state, submission, executor='browser:'+case_id)
                     else:
                         errors[item['id']] = result.get('reason', '已启动无头浏览器，等待执行结果。')
+                        if result['status'] == 'needs_input':
+                            challenge = result['challenge']
+                            browser_inputs.setdefault(challenge['nonce'], {**challenge, 'id': item['id']})
+                            errors[item['id']] = '无头浏览器正在等待验证码。'
                         if result['status'] == 'failed':
                             failed_cases[item['id']] = {'case_id':case_id, 'reason':errors[item['id']],
                                                        'role':(config or {}).get('fallback', 'reviewer')}
@@ -917,8 +931,10 @@ class TaskStore:
                 if not ident and item['kind'] == 'browser' and not item.get('allow_manual'):
                     failed_cases[item['id']] = {'case_id':item.get('case_id', ''),
                                                'reason':errors[item['id']], 'role':'reviewer'}
-        if errors != value.get('executor_status', {}) or failed_cases != value.get('failed_cases', {}):
-            value = {**value, 'executor_status': errors, 'failed_cases': failed_cases}
+        if (errors != value.get('executor_status', {}) or failed_cases != value.get('failed_cases', {})
+                or browser_inputs != value.get('browser_inputs', {})):
+            value = {**value, 'executor_status': errors, 'failed_cases': failed_cases,
+                     'browser_inputs': browser_inputs}
             write_json(run / field_handoff.FILE, value, durable=True)
         return value
 

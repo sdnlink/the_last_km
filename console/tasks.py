@@ -31,7 +31,7 @@ from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
-from auto_moniter import browser_execution, candidate_checks, field_handoff
+from auto_moniter import browser_execution, candidate_checks, field_handoff, referee
 from auto_moniter.requirement_queue import RequirementQueue
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
@@ -940,9 +940,10 @@ class TaskStore:
         return value
 
     def _route_browser_failure(self, meta, run, value):
-        failures = value.get('failed_cases') or {}
         missing = [item for item in value['items'] if not item.get('receipt')]
-        if not failures or any(item['id'] not in failures for item in missing):
+        failures = {item['id']: value['failed_cases'][item['id']] for item in missing
+                    if item['id'] in (value.get('failed_cases') or {})}
+        if not failures:
             return
         key = candidate_checks.digest([value['binding'], sorted(
             (f['case_id'], f['role'], f['reason']) for f in failures.values())])
@@ -952,7 +953,10 @@ class TaskStore:
         if not pending and (key in history or len(history) >= 6):
             return
         role = 'referee' if any(f['role'] == 'referee' for f in failures.values()) else 'reviewer'
+        waiting = {item['id']: value.get('executor_status', {}).get(item['id'], '等待回执。')
+                   for item in missing if item['id'] not in failures}
         updated = {**value, 'fallback': {'revision':value['revision'], 'role':role, 'failures':failures,
+                                         'waiting': waiting,
                                          'key':key, 'status':'pending'},
                    'fallback_history': history if pending else [*history, key]}
         write_json(run / field_handoff.FILE, updated, durable=True)
@@ -985,8 +989,35 @@ class TaskStore:
                                                  agent_calls=current['resume']['agent_calls'])
         return {**field_handoff.public(current), 'resuming': True}
 
+    @staticmethod
+    def _can_resume_field_archive(state, value, receipt):
+        return (state.get('full_function_plan') and state.get('referee', {}).get('enabled')
+                and field_handoff.archive_item(value) and receipt.get('passed') and receipt.get('checks'))
+
+    def _resume_field_archive(self, meta, run, value, *, retry_failed):
+        for entry in referee.Journal(run, archive=True).read()['decisions']:
+            if (entry.get('field_binding', entry.get('archive', {}).get('binding')) == value['binding']
+                    and (entry['status'] != 'captured' or entry['archive']['revision'] != value['revision'])):
+                return
+        key = candidate_checks.digest(value['binding'])
+        previous = value.get('archive_resume') or {}
+        if previous.get('key') == key and (previous.get('status') == 'launched'
+                                            or previous.get('error') and not retry_failed):
+            return
+        pending = {'key': key, 'status': 'pending'}
+        write_json(run / field_handoff.FILE, {**value, 'archive_resume': pending}, durable=True)
+        try:
+            self.action(meta['id'], 'resume')
+        except (TaskError, OSError, ValueError) as exc:
+            finished = {**pending, 'error': redact(str(exc))}
+        else:
+            finished = {**pending, 'status': 'launched'}
+        current = field_handoff.read(run)
+        if current.get('revision') == value['revision'] and current.get('archive_resume') == pending:
+            write_json(run / field_handoff.FILE, {**current, 'archive_resume': finished}, durable=True)
+
     def recover_field_handoffs(self, *, retry_failed=True):
-        """Replay submitted receipts that outlived the console before launch."""
+        """Collect receipts and resume eligible checkpoints even without an open task page."""
         from auto_moniter.workspace import workspace_fingerprint
 
         with self._lock:
@@ -1016,6 +1047,9 @@ class TaskStore:
                             or not candidate_checks.valid(receipt, run, receipt.get('context'))):
                         if field_handoff.ready(value):
                             field_handoff.update_resume(run, value, 'stale', error='候选、验收命令或用户要求已变化。')
+                        continue
+                    if 'resume' in view['actions'] and self._can_resume_field_archive(state, value, receipt):
+                        self._resume_field_archive(meta, run, value, retry_failed=retry_failed)
                         continue
                     if not field_handoff.ready(value):
                         value = self._collect_field_results(meta, run, state, value)
@@ -1680,7 +1714,14 @@ class TaskStore:
                     arguments = self._resume_args(meta)
                     saved_state = read_json(run / 'state.json')
                     handoff = self._field_handoff_view(run, saved_state)
+                    archive_resume = handoff.get('archive_resume') or {}
+                    automatic_archive = (archive_resume.get('status') == 'pending'
+                                         and archive_resume.get('key') == candidate_checks.digest(handoff.get('binding'))
+                                         and saved_state.get('full_function_plan')
+                                         and saved_state.get('referee', {}).get('enabled')
+                                         and field_handoff.archive_item(handoff))
                     if (handoff and not field_handoff.ready(handoff) and not handoff.get('fallback')
+                            and not automatic_archive
                             and [row['id'] for row in Directions(run).messages()] == handoff['binding']['directions']):
                         raise TaskError('现场回执尚未齐备，请在任务详情中补交。', 409)
                     usage = saved_state.get('usage', {})

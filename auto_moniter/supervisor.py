@@ -1159,8 +1159,9 @@ class Supervisor:
             fallback = handoff.get('fallback', {}) if handoff_bound else {}
             if fallback.get('revision') != handoff.get('revision'):
                 fallback = {}
+            fallback_evidence = {key: fallback[key] for key in ('failures', 'waiting') if key in fallback}
             if fallback.get('role') == 'referee' and self.config.referee:
-                reason = '浏览器自动用例未完成。请确定可执行的补证路径。' + json.dumps(fallback['failures'], ensure_ascii=False)
+                reason = '浏览器自动用例未完成。请确定可执行的补证路径。' + json.dumps(fallback_evidence, ensure_ascii=False)
                 if self._consult_referee('browser_evidence', reason, records, candidate=record):
                     if self._referee_replan:
                         raise RefereeRedirect(reason)
@@ -1172,7 +1173,7 @@ class Supervisor:
                 review_prompt += ('\n\n自动浏览器用例未取得以下证据。请在原权限内核对已有证据或批准的检查，'
                                   '能补齐时给出依据，仍有缺项时明确所需执行能力。'
                                   '自动化失败本身不证明现场行为通过。\n'
-                                  + json.dumps(fallback['failures'], ensure_ascii=False))
+                                  + json.dumps(fallback_evidence, ensure_ascii=False))
             if handoff_applied:
                 record.watcher_result['field_handoff_revision'] = handoff['revision']
                 review_prompt += ('\n\n以下是已保存的交接回执。Watcher 已核对派单、候选、轮次和检查记录。'

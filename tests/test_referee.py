@@ -115,6 +115,32 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual(len(reviewer.calls), 4)
         self.assertEqual(len(list(self.run_dir.glob('field-check-archive-*.json'))), 1)
 
+    def test_console_resumes_parked_archive_once_without_a_receipt(self):
+        import threading
+        from auto_moniter import field_handoff
+        from console.tasks import TaskStore
+
+        worker, responses = self.archive_scenario()
+        reviewer = ScriptedProvider('reviewer', responses[:2])
+        report = self.monitor(worker, reviewer, referee=False).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        path = self.run_dir / 'state.json'
+        state = json.loads(path.read_text())
+        state['referee']['enabled'] = True
+        path.write_text(json.dumps(state))
+        store = object.__new__(TaskStore)
+        store._lock = threading.RLock()
+        meta = {'id': 'test', 'managed': True, 'run_dir': str(self.run_dir)}
+        store._catalog = lambda: {'test': meta}
+        store._view = lambda *args, **kwargs: {'status': 'action_required', 'actions': ['resume']}
+        with patch.object(store, 'action') as launch:
+            store.recover_field_handoffs()
+            store.recover_field_handoffs(retry_failed=False)
+        launch.assert_called_once_with('test', 'resume')
+        handoff = field_handoff.read(self.run_dir)
+        self.assertFalse(field_handoff.ready(handoff))
+        self.assertEqual(handoff['archive_resume']['status'], 'launched')
+
     def test_review_interruption_reuses_worker_candidate_and_requires_fresh_review(self):
         worker = self.worker()
         reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),

@@ -72,6 +72,8 @@ class Journal:
             return None
         item = {'id': len(value['decisions']) + 1, 'key': key, 'status': 'requested',
                 'reason': safe(reason)[:4000]}
+        if once:
+            item['field_binding'] = context['field_binding']
         value['decisions'].append(item)
         write_json(self.path, value, durable=True)
         return item

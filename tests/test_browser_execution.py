@@ -205,7 +205,9 @@ class BrowserExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             value = {'binding':{'round':8}, 'revision':'initial',
-                     'items':[{'id':'1','kind':'browser','case_id':'role-login'}],
+                     'items':[{'id':'1','kind':'browser','case_id':'role-login'},
+                              {'id':'2','kind':'observation'}],
+                     'executor_status':{'2':'等待原站候选回执'},
                      'failed_cases':{'1':{'case_id':'role-login','reason':'未完成','role':'referee'}}}
             write_json(run / field_handoff.FILE, value)
             store = object.__new__(TaskStore)
@@ -216,6 +218,7 @@ class BrowserExecutionTests(unittest.TestCase):
                 start.assert_called_once_with('t', 'resume')
             self.assertEqual(current['fallback']['role'], 'referee')
             self.assertEqual(current['fallback']['status'], 'launched')
+            self.assertEqual(current['fallback']['waiting'], {'2':'等待原站候选回执'})
 
     def test_wrong_observed_version_cannot_create_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:

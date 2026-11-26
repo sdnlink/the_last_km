@@ -16,6 +16,79 @@ from console.tasks import TaskError, TaskStore
 
 
 class BrowserExecutionTests(unittest.TestCase):
+    def test_tig_session_reuses_connected_role_pages(self):
+        from unittest.mock import Mock
+        from auto_moniter import tig_browser_case
+
+        origin = 'https://example.test'
+        browser = Mock()
+        session = tig_browser_case.BrowserSession(browser)
+        for role, route in tig_browser_case.SUCCESS_PATHS.items():
+            page = Mock(url=origin + route)
+            session.pages[role] = (page, {'login_at': 'previous', 'reload_verified': True})
+        request = {'case_id': 'login-routes', 'url': origin + '/login', 'expected_version': '1'}
+        settings = {'origin': origin, 'accounts': {}, 'interactive_captcha': True}
+        with (patch.object(tig_browser_case, '_state', return_value={'menus': []}),
+              patch.object(tig_browser_case, '_route_checks', return_value={'navigation': []}) as checks,
+              patch.object(tig_browser_case, '_login') as login):
+            result = tig_browser_case.execute(request, settings, session=session)
+        login.assert_not_called()
+        browser.new_context.assert_not_called()
+        self.assertEqual(set(checks.call_args.args[0]), set(session.pages))
+        self.assertEqual(result['receipt']['version'], '1')
+
+    def test_tig_session_waits_through_handoff_and_closes_after_completion(self):
+        from auto_moniter import tig_browser_session
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            write_json(run/'state.json', {'status': 'action_required'})
+            self.assertFalse(tig_browser_session.finished(run))
+            write_json(run/'state.json', {'status': 'done'})
+            self.assertTrue(tig_browser_session.finished(run))
+            request = {'url': 'https://example.test/login', 'expected_version': '1', 'binding': {'tree': 'a'}}
+            changed = {**request, 'binding': {'tree': 'b'}}
+            self.assertNotEqual(tig_browser_session.address(run, request, 'settings'),
+                                tig_browser_session.address(run, changed, 'settings'))
+
+    def test_reopen_keeps_manual_browser_registration_only_for_unchanged_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            request = {'kind': 'browser', 'title': '核对返回', 'owner': '现场执行者', 'evidence_needed': '记录返回 URL'}
+            item = {**request, 'id': '1', 'allow_manual': True, 'browser_proof': True,
+                    'url': 'https://example.test/login', 'expected_version': '1',
+                    'receipt': {'result': '已有导航记录'}}
+            value = {'revision': 'original', 'binding': {'round': 39}, 'items': [item]}
+            field_handoff.reopen(run, value, ['需要补证'], [
+                {**request, 'evidence_needed': '记录刷新 URL'}, request,
+            ])
+            reopened = field_handoff.read(run)
+            changed, unchanged = reopened['items']
+            self.assertNotIn('allow_manual', changed)
+            self.assertEqual(unchanged['id'], '2')
+            self.assertTrue(unchanged['allow_manual'])
+            self.assertTrue(unchanged['browser_proof'])
+            self.assertEqual(unchanged['expected_version'], '1')
+            self.assertNotIn('receipt', unchanged)
+            self.assertEqual(reopened['retained_evidence'][0]['citation'], 'handoff:original:1')
+
+    def test_runner_update_keeps_the_session_for_the_same_approved_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            value = {'binding': {'round': 39}, 'revision': 'current'}
+            item = {'id': '2', 'case_id': 'login-routes'}
+            config = {'url': 'https://example.test/login', 'expected_version': '1',
+                      'runner_digest': 'old', 'settings_digest': 'same'}
+            job, request = browser_execution._job(run, value, item, config)
+            job.mkdir(parents=True)
+            write_json(job/'launch.json', {'request': request, 'runner_digest': 'old'})
+            updated = {**config, 'runner_digest': 'new'}
+            self.assertEqual(browser_execution._job(run, value, item, updated), (job, request))
+            changed = {**updated, 'settings_digest': 'changed'}
+            self.assertNotEqual(browser_execution._job(run, value, item, changed)[0], job)
+            write_json(job/'result.json', {'status': 'failed'})
+            self.assertNotEqual(browser_execution._job(run, value, item, updated)[0], job)
+
     def test_timed_out_captcha_can_retry_without_changing_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
@@ -302,6 +375,21 @@ class BrowserExecutionTests(unittest.TestCase):
                 self.assertEqual(current['fallback']['role'], 'referee')
                 store._route_browser_failure({'id': 't'}, run, current, referee_enabled=True)
                 self.assertEqual(start.call_count, 2)
+
+    def test_browser_receipt_links_raw_observations_to_the_bound_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            request = {'binding': {'round': 39}, 'revision': 'r', 'id': '2', 'expected_version': '1'}
+            output = {'receipt': {'version': '1', 'session_reference': 'session', 'result': '已观察'},
+                      'observations': {'desktop': {'1024': {'last_url': '/example'}}}}
+            write_json(job/'launch.json', {'request': request, 'argv': [sys.executable, '-c', f'print({json.dumps(output)!r})']})
+            browser_execution.run_case(job)
+            result = json.loads((job/'result.json').read_text())
+            raw = json.loads((job/'observations.json').read_text())
+            self.assertEqual(result['status'], 'ready')
+            self.assertEqual(raw['request'], request)
+            self.assertEqual(raw['observations'], output['observations'])
+            self.assertIn(raw['observations_sha256'], result['submission']['receipt']['result'])
 
     def test_wrong_observed_version_cannot_create_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:

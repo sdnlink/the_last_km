@@ -239,7 +239,8 @@ def _direct_snapshot(page, origin, path, marker, role):
         denied = page.locator('img[src="/img/404.png"]').first.is_visible() or url == '/403'
         target_visible = (page.get_by_role('tab', name=marker[1], exact=True).first.is_visible()
                           if marker[1] else page.locator(marker[0]).first.is_visible())
-        return {'url': url, 'result': 'denied' if denied else 'visible' if url == path and target_visible
+        return {'url': url, 'target_panel_visible': target_visible, 'not_found_visible': denied,
+                'result': 'denied' if denied else 'visible' if url == path and target_visible
                 else 'redirect' if url != path else 'unconfirmed'}
 
     page.goto(origin + path)
@@ -249,13 +250,43 @@ def _direct_snapshot(page, origin, path, marker, role):
 
 
 def _route_checks(pages, origin, version, records):
+    from playwright.sync_api import TimeoutError
+
     member = pages['member']
     member.get_by_text('内网拦截资产', exact=True).first.click()
     history = member.get_by_role('button', name='封禁历史列表', exact=True)
+    history.wait_for(state='visible')
+    history_source = _route_url(member, origin)
     navigation = {HISTORY_PATH: {'role': 'member',
+                                 'source': history_source,
                                  'click': _history_snapshot(member, origin, history.click),
                                  'refresh': _history_snapshot(member, origin, member.reload)}}
+    navigation[HISTORY_PATH]['return'] = _observe_browser_back(member, origin, history_source)
     security = pages['security']
+    desktop = {}
+    knowledge = '/knowledgeBase/whitelist'
+    for width in (1440, 1024):
+        security.set_viewport_size({'width': width, 'height': 900})
+        paths = desktop[str(width)] = {}
+        for path, (row, tab, panels) in WHITELIST_ROUTES.items():
+            observed = paths[path] = {}
+            security.goto(origin + WHITELIST_PATH)
+            try:
+                source = security.get_by_role('row').filter(has_text=row)
+                source.get_by_role('button', name='新增监测白名单').click(timeout=10000)
+                observed['click'] = _whitelist_snapshot(security, origin, path, tab, panels)
+                security.reload()
+                observed['refresh'] = _whitelist_snapshot(security, origin, path, tab, panels)
+                if path == knowledge:
+                    security.get_by_role('button', name=re.compile(r'跳\s*转')).first.click(timeout=10000)
+                    security.wait_for_url(origin + WHITELIST_PATH, timeout=10000)
+                else:
+                    observed['return'] = _observe_browser_back(security, origin, WHITELIST_PATH)
+            except TimeoutError:
+                observed['incomplete'] = '页面或控件在规定时间内未出现，参见已经记录的步骤。'
+            observed['last_url'] = _route_url(security, origin)
+            observed['vertical_sidebar_visible'] = security.locator('.ant-layout-sider').first.is_visible()
+    security.set_viewport_size({'width': 1440, 'height': 900})
     for path, (row, tab, panels) in WHITELIST_ROUTES.items():
         # Use the real row button for each transition; opening the target does not test the button.
         security.goto(origin + WHITELIST_PATH)
@@ -264,7 +295,8 @@ def _route_checks(pages, origin, version, records):
         click = _whitelist_snapshot(security, origin, path, tab, panels)
         security.reload()
         navigation[path] = {'role': 'security', 'click': click,
-                            'refresh': _whitelist_snapshot(security, origin, path, tab, panels)}
+                            'refresh': _whitelist_snapshot(security, origin, path, tab, panels),
+                            'return': _observe_browser_back(security, origin, WHITELIST_PATH)}
     active_path = '/protectionConfig/detectionStrategy?tab=activeDetection'
     security.goto(origin + active_path)
     active_probe = _active_detection_snapshot(security, origin)
@@ -276,16 +308,30 @@ def _route_checks(pages, origin, version, records):
     sessions = {}
     for role, page in pages.items():
         page.goto(origin + SUCCESS_PATHS[role])
-        _state(page, origin, version, SUCCESS_PATHS[role])
-        sessions[role] = {'login_at': records[role]['login_at'],
+        observed = _state(page, origin, version, SUCCESS_PATHS[role])
+        labels = page.get_by_text(re.compile(r'^【[^】]+】$')).all_inner_texts()
+        sessions[role] = {**observed, 'login_at': records[role]['login_at'],
+                          'displayed_role_labels': list(dict.fromkeys(labels)),
                           'layout': 'vertical' if page.locator('.ant-layout-sider').first.is_visible()
                           else 'horizontal'}
         direct[role] = [_direct_snapshot(page, origin, path, marker, role)
                         for path, marker in markers.items()]
     return {'navigation': navigation, 'active_detection': active_detection,
             'direct_route_order': list(markers), 'direct': direct,
-            'sessions': sessions, 'contexts': len({id(page.context) for page in pages.values()}),
+            'sessions': sessions, 'desktop_navigation': desktop,
+            'contexts': len({id(page.context) for page in pages.values()}),
             'layout_scope': '仅记录站点本次实际提供的布局，未更改设备或用户配置。'}
+
+
+def _observe_browser_back(page, origin, expected):
+    from playwright.sync_api import TimeoutError
+
+    try:
+        page.go_back(timeout=10000)
+        page.wait_for_url(origin + expected, timeout=10000)
+    except TimeoutError:
+        return {'expected_url': expected, 'observed_url': _route_url(page, origin), 'matched': False}
+    return {'expected_url': expected, 'observed_url': _route_url(page, origin), 'matched': True}
 
 
 def _active_detection_snapshot(page, origin):
@@ -296,7 +342,23 @@ def _active_detection_snapshot(page, origin):
             'active_tab': selected.inner_text().strip()}
 
 
-def execute(request, settings):
+def chrome_args(settings):
+    pin = settings.get('tls_public_key_sha256')
+    browser_args = []
+    if pin is not None:
+        if not isinstance(pin, str) or not re.fullmatch(r'[A-Za-z0-9+/]{43}=', pin):
+            raise ValueError('部署证书公钥指纹无效。')
+        browser_args.append('--ignore-certificate-errors-spki-list=' + pin)
+    return browser_args
+
+
+class BrowserSession:
+    def __init__(self, browser):
+        self.browser = browser
+        self.pages = {}
+
+
+def execute(request, settings, *, session=None):
     from playwright.sync_api import sync_playwright
 
     case = request['case_id']
@@ -309,30 +371,39 @@ def execute(request, settings):
     version = request['expected_version']
     accounts = settings['accounts']
     adapter = captcha_command(settings)
-    pin = settings.get('tls_public_key_sha256')
-    browser_args = []
-    if pin is not None:
-        if not isinstance(pin, str) or not re.fullmatch(r'[A-Za-z0-9+/]{43}=', pin):
-            raise ValueError('部署证书公钥指纹无效。')
-        browser_args.append('--ignore-certificate-errors-spki-list=' + pin)
+    if session is None:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=settings.get('chrome'), headless=True, args=chrome_args(settings))
+            try:
+                return execute(request, settings, session=BrowserSession(browser))
+            finally:
+                browser.close()
+    browser = session.browser
+    pages = session.pages
     records = {}
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=settings.get('chrome'), headless=True, args=browser_args)
-        try:
-            roles = ('audit', 'security') if case == 'login-audit' else SUCCESS_PATHS
-            pages = {}
-            before = []
-            for role in roles:
-                context = browser.new_context(service_workers='block')
+    roles = ('audit', 'security') if case == 'login-audit' else SUCCESS_PATHS
+    before = []
+    for role in roles:
+        saved = pages.get(role)
+        if saved and not (case in ('role-login', 'login-audit') and role == 'security'):
+            page, record = saved
+            page.goto(origin + SUCCESS_PATHS[role])
+            if urlsplit(page.url).path != '/login':
+                observed = _state(page, origin, version, SUCCESS_PATHS[role])
+                records[role] = {**record, **observed}
+        if role not in records:
+            if saved:
+                saved[0].context.close()
+                pages.pop(role)
+            context = browser.new_context(service_workers='block')
+            try:
                 context.route('**/*', lambda route:
                               route.continue_() if route.request.url.startswith((origin + '/', 'data:', 'blob:'))
                               else route.abort())
                 page = context.new_page()
-                if not pages:
-                    response = page.goto(origin + '/web.json', timeout=15000)
-                    if not response or not response.ok or response.json().get('git.build.version') != version:
-                        raise WrongDeployment()
-                pages[role] = page
+                response = page.goto(origin + '/web.json', timeout=15000)
+                if not response or not response.ok or response.json().get('git.build.version') != version:
+                    raise WrongDeployment()
                 submitted = _login(page, origin, role, accounts[role], adapter,
                                    verify_rejection=case == 'role-login' and role == 'security',
                                    interactive=settings.get('interactive_captcha') is True)
@@ -340,30 +411,54 @@ def execute(request, settings):
                 page.reload()
                 if _state(page, origin, version, SUCCESS_PATHS[role]) != first:
                     raise ValueError('刷新前后的授权菜单或落地页不同。')
-                records[role] = {**first, 'login_at': submitted, 'reload_verified': True}
-                if case == 'login-audit' and role == 'audit':
-                    before = _audit_rows(page, accounts['security']['username'])
-            if case == 'login-audit':
-                audit = pages['audit']
-                audit.reload()
-                audit.wait_for_url(origin + '/log')
-                after = _audit_rows(audit, accounts['security']['username'])
-                delta = [line for line in after if line not in before]
-                if len(delta) != 1 or delta[0][0] != '登录成功' or delta[0][-1] != '成功':
-                    raise ValueError('未唯一关联本次登录与新增的成功审计行。')
-                records['audit_correlation'] = {'before': len(before), 'after': len(after), 'new_row': delta[0],
-                                                'device_timezone': settings['device_timezone']}
-            elif case == 'login-routes':
-                records = _route_checks(pages, origin, version, records)
-            else:
-                records['security']['captcha_retry_verified'] = True
-        finally:
-            browser.close()
+            except Exception:
+                context.close()
+                raise
+            records[role] = {**first, 'login_at': submitted, 'reload_verified': True}
+            pages[role] = page, records[role]
+        if case == 'login-audit' and role == 'audit':
+            before = _audit_rows(page, accounts['security']['username'])
+    observed_pages = {role: pages[role][0] for role in roles}
+    if case == 'login-audit':
+        audit = observed_pages['audit']
+        audit.reload()
+        audit.wait_for_url(origin + '/log')
+        after = _audit_rows(audit, accounts['security']['username'])
+        delta = [line for line in after if line not in before]
+        if len(delta) != 1 or delta[0][0] != '登录成功' or delta[0][-1] != '成功':
+            raise ValueError('未唯一关联本次登录与新增的成功审计行。')
+        records['audit_correlation'] = {'before': len(before), 'after': len(after), 'new_row': delta[0],
+                                        'device_timezone': settings['device_timezone']}
+    elif case == 'login-routes':
+        records = _route_checks(observed_pages, origin, version, records)
+    else:
+        records['security']['captcha_retry_verified'] = True
     reference = 'headless-' + secrets.token_hex(12)
+    if case == 'login-routes':
+        return {'receipt': {'version': version, 'session_reference': reference,
+                            'result': '已记录实际导航、刷新、返回、桌面宽度、四角色菜单和独立会话的页面访问结果。'},
+                'proof': {'url': origin + SUCCESS_PATHS['audit'], 'session_reference': reference,
+                          'observed_at': datetime.now(timezone.utc).isoformat()},
+                'observations': records}
     return {'receipt': {'version': version, 'session_reference': reference,
                         'result': json.dumps(records, ensure_ascii=False, separators=(',', ':'))},
             'proof': {'url': origin + SUCCESS_PATHS['audit'], 'session_reference': reference,
                       'observed_at': datetime.now(timezone.utc).isoformat()}}
+
+
+def run_request(request, settings, *, session=None):
+    try:
+        return 0, execute(request, settings, session=session)
+    except CaptchaAdapterRequired:
+        return 3, None
+    except CaptchaExpired:
+        return 8, None
+    except ModuleNotFoundError:
+        return 4, None
+    except WrongDeployment:
+        return 7, None
+    except Exception as exc:
+        return (6 if 'net::ERR_CERT_' in str(exc) else 1), None
 
 
 def main():
@@ -375,19 +470,12 @@ def main():
             return 5
         with path.open(encoding='utf-8') as handle:
             settings = json.load(handle)
-        print(json.dumps(execute(request, settings), ensure_ascii=False))
-    except CaptchaAdapterRequired:
-        return 3
-    except CaptchaExpired:
-        return 8
-    except ModuleNotFoundError:
-        return 4
-    except WrongDeployment:
-        return 7
-    except Exception as exc:
-        # Browser exceptions can contain entered values. Keep credentials out of logs.
-        return 6 if 'net::ERR_CERT_' in str(exc) else 1
-    return 0
+    except (OSError, ValueError):
+        return 5
+    code, output = run_request(request, settings)
+    if output is not None:
+        print(json.dumps(output, ensure_ascii=False))
+    return code
 
 
 if __name__ == '__main__':

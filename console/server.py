@@ -42,6 +42,10 @@ class ConsoleServer(ThreadingHTTPServer):
             self._next_handoff_scan = time.monotonic() + 30
             self.store.recover_field_handoffs(retry_failed=False)
 
+    def scan_field_handoffs_soon(self):
+        if self._next_handoff_scan is not None:
+            self._next_handoff_scan = min(self._next_handoff_scan, time.monotonic() + 1)
+
 
 class Handler(BaseHTTPRequestHandler):
     server: ConsoleServer
@@ -183,7 +187,10 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == 'directions':
                     self._json(self.server.store.add_direction(parts[2], data), 201)
                 elif parts[3] == 'field-handoff':
-                    self._json(self.server.store.field_handoff(parts[2], data))
+                    result = self.server.store.field_handoff(parts[2], data)
+                    if data.get('action') in ('browser_captcha', 'retry_browser_captcha', 'bind_browser_case'):
+                        self.server.scan_field_handoffs_soon()
+                    self._json(result)
                 elif parts[3] == 'local-preview':
                     self._json(self.server.store.local_preview(parts[2], data))
                 elif parts[3] == 'requirement-queue':

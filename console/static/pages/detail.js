@@ -1,6 +1,6 @@
 import {i18n,i18nHTML,locale} from '../i18n.js';
 import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration} from '/ui.js';
-import {api,watch,toast} from '/core.js';
+import {api,watch,toast,refresh} from '/core.js';
 import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
 import {dispatchPlanHTML} from '/dispatch-plan.js';
@@ -59,6 +59,7 @@ function handoffClaimSlot(itemId){
 }
 function renderBrowserCaptcha(t, reopen=false){
  const dialog=$('#browser-captcha-dialog');
+ if(captchaSubmitting)return;
  const challenge=Object.values(t.field_handoff?.browser_inputs||{}).find(value=>
   (value.kind==='otp'||value.kind==='image')&&value.expires>Date.now()/1000);
  if(!challenge||t.status!=='action_required'){
@@ -110,9 +111,7 @@ function renderFieldHandoff(t){
   ${Object.values(handoff.browser_inputs||{}).some(input=>input.id===item.id)?'<button type="button" class="button secondary" data-browser-captcha>填写验证码</button>':''}
   ${t.status==='action_required'&&handoff.failed_cases?.[item.id]?.retry_captcha?`<button type="button" class="button secondary" data-browser-retry="${escape(item.id)}">重新获取验证码</button>`:''}
   ${canEdit&&item.url?`<p><a href="${escape(item.url)}" target="_blank" rel="noopener noreferrer">打开现场浏览器页</a>，完成操作后保留原标签页。</p>`:''}
-  ${canEdit&&!item.claim?`<form data-field-claim="${escape(item.id)}"><label>认领人 <input name="name" required maxlength="100"></label>
-    <button type="submit">认领</button></form>`:''}
-  ${canEdit&&claimedHere?`<form data-field-release="${escape(item.id)}"><button type="submit">撤销认领</button></form>`:''}
+  ${claimedHere&&!item.receipt&&t.status==='action_required'?`<form data-field-release="${escape(item.id)}"><button type="submit">撤销认领</button></form>`:''}
   ${canEdit&&(!item.claim||claimedHere)?`<form data-field-receipt="${escape(item.id)}">${receiptFields[item.kind].map(key=>
      `<label style="display:block">${escape(receiptLabels[key])}<textarea name="${key}" required maxlength="4000" rows="2"></textarea></label>`).join('')}
      ${item.resources_expected?`<label>部署资源对账 JSON（target、resources）<textarea name="proof" required maxlength="110000" rows="4"></textarea></label>`:''}
@@ -310,8 +309,9 @@ export function mount(){
     nonce:challenge.nonce,code:new FormData(form).get('code')
    });
    $('#browser-captcha-dialog').close();
+   toast('验证码已提交，浏览器将继续登录。');
   }catch(exc){error.textContent=exc.message;error.hidden=false;}
-  finally{captchaSubmitting=false;}
+  finally{captchaSubmitting=false;void refresh();}
  });
  $('#detail-local-preview')?.addEventListener('click',async event=>{
   const button=event.target.closest('[data-preview-action]');
@@ -335,26 +335,24 @@ export function mount(){
   finally{form.querySelector('[type=submit]').disabled=false;}
  });
  $('#detail-field-handoff')?.addEventListener('submit',async event=>{
-  const form=event.target.closest('[data-field-receipt],[data-field-claim],[data-field-release]');
+  const form=event.target.closest('[data-field-receipt],[data-field-release]');
   if(!form)return;
   event.preventDefault();
   const button=form.querySelector('button');
   button.disabled=true;
   try{
-   const itemId=form.dataset.fieldClaim||form.dataset.fieldRelease||form.dataset.fieldReceipt;
+   const itemId=form.dataset.fieldRelease||form.dataset.fieldReceipt;
    const slot=handoffClaimSlot(itemId), fields=Object.fromEntries(new FormData(form));
    const key=sessionStorage.getItem(slot);
    const proof=fields.proof?JSON.parse(fields.proof):undefined;
    delete fields.proof;
-   const payload=form.dataset.fieldClaim?{action:'claim',name:fields.name}:
-    form.dataset.fieldRelease?{action:'release',claim_key:key}:{receipt:fields,claim_key:key,proof};
+   const payload=form.dataset.fieldRelease?{action:'release',claim_key:key}:{receipt:fields,claim_key:key,proof};
    const result=await api(`/api/tasks/${encodeURIComponent(id)}/field-handoff`,{
     id:itemId,binding:task.field_handoff.binding,revision:task.field_handoff.revision,...payload
    });
-   if(result.claim_key)sessionStorage.setItem(slot,result.claim_key);
    if(form.dataset.fieldRelease)sessionStorage.removeItem(slot);
    toast(result.resume_error||(result.resuming?'回执已齐备，已启动原轮次复核。':
-    result.claim_key?'认领已保存。':form.dataset.fieldRelease?'已撤销认领。':'现场回执已保存。'),Boolean(result.resume_error));
+    form.dataset.fieldRelease?'已撤销认领。':'现场回执已保存。'),Boolean(result.resume_error));
    render(await api(`/api/tasks/${encodeURIComponent(id)}`));
   }catch(error){toast(error.message,true);}
   finally{button.disabled=false;}

@@ -239,12 +239,25 @@ def reopen(run, value, blockers, requests=()):
         {'kind': 'observation', 'title': reason[:300], 'owner': '现场执行器'}
         for reason in blockers[:12]
     ]
+    rows = []
+    for index, request in enumerate(items, 1):
+        row = dict(safe(request), id=str(index))
+        if row['kind'] == 'browser' and not row.get('case_id'):
+            # Carry the operator's registration only for an unchanged observation.
+            registered = [item for item in value['items']
+                          if item.get('allow_manual') and not item.get('executor_task')
+                          and all(item.get(key) == row.get(key) for key in REQUEST_FIELDS)]
+            if len(registered) == 1:
+                item = registered[0]
+                row.update({key: item[key] for key in ('allow_manual', 'url', 'expected_version', 'browser_proof')
+                            if key in item})
+        rows.append(row)
     updated = {**{key: field for key, field in value.items()
                   if key not in ('resume', 'dispatch', 'executor_status', 'fallback', 'failed_cases', 'browser_inputs')},
                'revision': uuid.uuid4().hex, 'review_feedback': safe(blockers),
                'retained_evidence': review_evidence(value)[-12:],
                'automatic': True,
-               'items': [dict(safe(row), id=str(index)) for index, row in enumerate(items, 1)]}
+               'items': rows}
     write_json(run / FILE, updated, durable=True)
 
 

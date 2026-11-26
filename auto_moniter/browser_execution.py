@@ -113,6 +113,11 @@ def cases(path, workspace):
             raise ValueError('浏览器用例须登记可执行文件的绝对路径。')
         else:
             config['argv'] = argv
+        keep_session = entry.get('keep_session', False)
+        if type(keep_session) is not bool or keep_session and settings is None:
+            raise ValueError('持续浏览器会话仅适用于已登记的内置 TIG 用例。')
+        if keep_session:
+            config['keep_session'] = True
         result[case] = config
     return result
 
@@ -176,7 +181,21 @@ def _job(run, value, item, config):
     if config.get('handoff_ids'):
         request['item_ids'] = item_ids
     key = candidate_checks.digest([request, config])
-    return run / 'browser-executions' / key, request
+    jobs = run / 'browser-executions'
+    current = jobs / key
+    if current.exists() or not config.get('runner_digest'):
+        return current, request
+    # Preserve the login started under the same request and approved settings.
+    for launch_path in jobs.glob('*/launch.json'):
+        launch = Directions(launch_path.parent).read(launch_path.name)
+        previous_digest = launch.get('runner_digest')
+        if (previous_digest and launch.get('request') == request
+                and launch_path.parent.name == candidate_checks.digest(
+                    [request, {**config, 'runner_digest': previous_digest}])):
+            result = Directions(launch_path.parent).read('result.json')
+            if not result or result.get('status') == 'ready':
+                return launch_path.parent, request
+    return current, request
 
 
 def _challenge(job):
@@ -243,6 +262,8 @@ def poll(run, value, item, config, *, retry_captcha=False):
             (job / name).unlink(missing_ok=True)
         write_json(job / 'launch.json', {'request': request, 'argv': config['argv'], 'attempts': attempts + 1,
                                        'interactive_captcha': bool(config.get('interactive_captcha')),
+                                       **({'runner_digest': config['runner_digest']} if config.get('runner_digest') else {}),
+                                       **({'session_settings_digest': config['settings_digest']} if config.get('keep_session') else {}),
                                        'sequence': launch.get('sequence', launch.get('attempts', 0)) + 1},
                    durable=True, mode=0o600)
         process = subprocess.Popen([sys.executable, '-m', 'auto_moniter.browser_execution', str(job)],
@@ -254,14 +275,24 @@ def poll(run, value, item, config, *, retry_captcha=False):
 
 
 def run_case(job):
-    from auto_moniter.providers import PreparedCommand
+    from auto_moniter.providers import PreparedCommand, TurnResult
     from auto_moniter.supervisor import run_command
 
     launch = Directions(job).read('launch.json')
     request = launch['request']
-    turn = run_command(PreparedCommand(launch['argv'], stdin_text=json.dumps(request, ensure_ascii=False)),
-                       job, timeout_s=900 if launch.get('interactive_captcha') else 240,
-                       detect_input_requests=False, max_output_bytes=64 * 1024)
+    if launch.get('session_settings_digest'):
+        from auto_moniter import tig_browser_session
+
+        try:
+            code, output = tig_browser_session.execute(job.parent.parent, job, request, Path(launch['argv'][-1]),
+                                                       launch['session_settings_digest'])
+            turn = TurnResult('', exit_code=code, stdout=json.dumps(output, ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError):
+            turn = TurnResult('', exit_code=1)
+    else:
+        turn = run_command(PreparedCommand(launch['argv'], stdin_text=json.dumps(request, ensure_ascii=False)),
+                           job, timeout_s=900 if launch.get('interactive_captcha') else 240,
+                           detect_input_requests=False, max_output_bytes=64 * 1024)
     reason = {3: '测试环境需要验证码输入程序，当前未配置。',
               4: '无头浏览器依赖未安装。',
               5: '浏览器账号配置须保存在当前用户的私有文件中。',
@@ -288,8 +319,18 @@ def run_case(job):
                 **{key: request[key] for key in ('id', 'binding', 'revision')}, 'receipt': safe(report)}}
             if 'proof' in output:
                 result['submission']['proof'] = safe(output['proof'])
+            if 'observations' in output:
+                if not isinstance(output['observations'], dict) or not output['observations']:
+                    raise ValueError()
+                observations = safe(output['observations'])
+                artifact = job / 'observations.json'
+                digest = candidate_checks.digest(observations)
+                write_json(artifact, {'request': request, 'session_reference': report['session_reference'],
+                                      'observations': observations, 'observations_sha256': digest},
+                           durable=True, mode=0o600)
+                result['submission']['receipt']['result'] += f' 原始观察见 {artifact}，摘要 {digest}。'
         except ValueError:
-            result['reason'] = '浏览器回执无效或现场版本与配置不符。'
+            result = {'status': 'failed', 'reason': '浏览器回执无效或现场版本与配置不符。'}
     write_json(job / 'result.json', result, durable=True, mode=0o600)
 
 

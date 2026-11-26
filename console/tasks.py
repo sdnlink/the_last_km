@@ -908,7 +908,8 @@ class TaskStore:
                         if len(matching) == 1:
                             case_id = matching[0]
                     if not case_id:
-                        errors[item['id']] = '尚未关联获准的执行任务。'
+                        errors[item['id']] = ('等待可见浏览器操作并提交回执。' if item.get('allow_manual')
+                                              else '尚未关联获准的执行任务。')
                         if not item.get('allow_manual'):
                             failed_cases[item['id']] = {'case_id':'', 'reason':errors[item['id']], 'role':'reviewer'}
                         continue

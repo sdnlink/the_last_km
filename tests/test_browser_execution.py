@@ -239,6 +239,24 @@ class BrowserExecutionTests(unittest.TestCase):
             self.assertEqual(current['fallback']['status'], 'launched')
             self.assertEqual(current['fallback']['waiting'], {'2':'等待原站候选回执'})
 
+    def test_enabled_referee_handles_failure_previously_routed_to_reviewer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            value = {'binding': {'round': 8}, 'revision': 'current',
+                     'items': [{'id': '1', 'kind': 'browser'}],
+                     'failed_cases': {'1': {'case_id': 'role-login', 'reason': '未完成', 'role': 'reviewer'}}}
+            write_json(run / field_handoff.FILE, value)
+            store = object.__new__(TaskStore)
+            with patch.object(store, 'action') as start:
+                store._route_browser_failure({'id': 't'}, run, value)
+                previous = field_handoff.read(run)
+                self.assertEqual(previous['fallback']['role'], 'reviewer')
+                store._route_browser_failure({'id': 't'}, run, previous, referee_enabled=True)
+                current = field_handoff.read(run)
+                self.assertEqual(current['fallback']['role'], 'referee')
+                store._route_browser_failure({'id': 't'}, run, current, referee_enabled=True)
+                self.assertEqual(start.call_count, 2)
+
     def test_wrong_observed_version_cannot_create_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             job = Path(tmp)

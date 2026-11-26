@@ -1023,9 +1023,11 @@ class Supervisor(
             fallback_evidence = {key: fallback[key] for key in ('failures', 'waiting') if key in fallback}
             if fallback.get('role') == 'referee' and self.config.referee:
                 reason = '浏览器自动用例未完成。请确定可执行的补证路径。' + json.dumps(fallback_evidence, ensure_ascii=False)
-                if self._consult_referee('browser_evidence', reason, records, candidate=record):
-                    if self._referee_replan:
-                        raise RefereeRedirect(reason)
+                action = self._consult_referee('browser_evidence', reason, records, candidate=record)
+                if action == 'replan':
+                    raise RefereeRedirect(reason)
+                if action == 'retry_reviewer':
+                    review_prompt += '\n\n裁判安排本轮补审。' + self._referee_decision['instructions']
                 if self._stop:
                     return self._finish('stopped' if self._stop_requested else 'action_required',
                                         self._stop_reason or reason, records, verdict)
@@ -2183,9 +2185,11 @@ class Supervisor(
                    'cycle': len(self.requirement_cycles) + 1, 'revision': revision,
                    'provider_config': self._provider_config(), 'checks': self.config.checks,
                    'referee_model': self.config.referee_model or self._reviewer_model()}
+        if browser_recovery := kind == 'browser_evidence':
+            context['browser_failure'] = candidate_checks.digest(reason)
         if archive:
             context['field_binding'] = archive['binding']
-        journal = referee.Journal(self.run_dir, archive=bool(archive))
+        journal = referee.Journal(self.run_dir, archive=bool(archive), browser=browser_recovery)
         try:
             ticket = journal.begin(context, reason, once=bool(archive))
         except (OSError, ValueError, RecursionError) as exc:
@@ -2198,11 +2202,13 @@ class Supervisor(
         if ticket is None:
             if archive:
                 return ''
-            self._event('referee_exhausted', incident=kind, reason=reason)
+            self._event('referee_recovery_unchanged', incident=kind, reason=reason)
             self._stop = True
-            self._stop_reason = 'Referee recovery exhausted; preserved work needs an external change or decision.'
+            self._stop_reason = '同一故障的裁判处理尚未完成或已失败。已保留进度，等待新的证据或执行条件。'
             return ''
-        index = (930000 if archive else 920000) + ticket['id']
+        index_base = 940000 if browser_recovery else 930000 if archive else 920000
+        ident = ticket['id']
+        index = index_base + ident if ident < 10000 else ident * 10 + index_base // 10000 + 10_000_000
         if archive and ticket['status'] == 'captured':
             try:
                 return self._apply_referee_archive(journal, ticket, archive, records, candidate)
@@ -2215,7 +2221,7 @@ class Supervisor(
             'original_plan': self.function_plan, 'assignments': self.function_tasks.export(),
             'modules': self.modules.export(), 'audit_issues': self.audit.export(), 'usage': self._usage(),
             'recent_records': [record for record in RunReport('', 0, '', '', records[-8:]).to_dict()['records']],
-            'prior_decisions': journal.read()['decisions'][:-1]}
+            'prior_decisions': journal.read()['decisions'][-13:-1]}
         if archive:
             diagnosis['archive_request'] = archive
             diagnosis['available_checks'] = candidate_checks.review_summary(candidate.watcher_result['candidate_checks'])
@@ -2255,6 +2261,8 @@ class Supervisor(
                 raise ValueError('Failing behavioral assertions require implementation repair or replanning')
             if action == 'replan' and self.config.workflow != 'review-first':
                 raise ValueError('Referee replanning requires the review-first workflow')
+            if not archive and journal.already_applied(ticket, action):
+                raise ValueError('同一故障已执行过这项恢复动作，需要新的证据或另一种处理方式。')
             # Save the decision before changing any scheduling state. A crash
             # here must not issue the same model call again on restart.
             captured = {'decision': decision, 'output_file': turn.output_path.name}

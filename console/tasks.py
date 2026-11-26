@@ -955,7 +955,7 @@ class TaskStore:
             write_json(run / field_handoff.FILE, value, durable=True)
         return value
 
-    def _route_browser_failure(self, meta, run, value):
+    def _route_browser_failure(self, meta, run, value, *, referee_enabled=False):
         missing = [item for item in value['items'] if not item.get('receipt')]
         failures = {item['id']: value['failed_cases'][item['id']] for item in missing
                     if item['id'] in (value.get('failed_cases') or {})}
@@ -963,12 +963,17 @@ class TaskStore:
             return
         key = candidate_checks.digest([value['binding'], sorted(
             (f['case_id'], f['role'], f['reason']) for f in failures.values())])
+        configured_role = 'referee' if any(f['role'] == 'referee' for f in failures.values()) else 'reviewer'
+        role = 'referee' if referee_enabled else configured_role
+        if role != configured_role:
+            # Let the Referee handle an incident already sent to the Reviewer
+            # under the previous routing rule, once per checkpoint.
+            key = candidate_checks.digest([key, role])
         history = value.get('fallback_history', [])
         previous = value.get('fallback') or {}
         pending = previous.get('key') == key and previous.get('status') == 'pending'
-        if not pending and (key in history or len(history) >= 6):
+        if not pending and key in history:
             return
-        role = 'referee' if any(f['role'] == 'referee' for f in failures.values()) else 'reviewer'
         waiting = {item['id']: value.get('executor_status', {}).get(item['id'], '等待回执。')
                    for item in missing if item['id'] not in failures}
         updated = {**value, 'fallback': {'revision':value['revision'], 'role':role, 'failures':failures,
@@ -1071,7 +1076,8 @@ class TaskStore:
                         value = self._collect_field_results(meta, run, state, value)
                         self._dispatch_handoff_tasks(meta, value)
                         if not field_handoff.ready(value) and 'resume' in view['actions']:
-                            self._route_browser_failure(meta, run, value)
+                            self._route_browser_failure(meta, run, value,
+                                referee_enabled=state.get('referee', {}).get('enabled') is True)
                     if field_handoff.ready(value) and 'resume' in view['actions']:
                         request = value.get('resume') or {}
                         if request.get('error') and not retry_failed:

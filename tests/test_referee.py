@@ -204,24 +204,21 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual((self.root / 'a.py').read_text(), 'def parse_input():\n    return 42\n')
         self.assertIn('Referee has directed replanning', reviewer.calls[3]['prompt'])
 
-    def test_arbitration_exhaustion_is_durable_and_never_repeats_implementation(self):
+    def test_identical_recovery_action_is_not_repeated_on_the_same_incident(self):
         worker = self.worker()
-        turns = [planning(final_task())]
-        for _ in range(referee.MAX_INCIDENT_DECISIONS):
-            turns.extend([review_failure(), review_failure(), decision('retry_reviewer')])
-        turns.extend([review_failure(), review_failure()])
+        turns = [planning(final_task()), *([review_failure(), review_failure(), decision('retry_reviewer')] * 2)]
         reviewer = ScriptedProvider('reviewer', turns)
         report = self.monitor(worker, reviewer).run()
         self.assertEqual(report.status, 'action_required', report.summary)
         self.assertEqual(len(worker.calls), 1)
-        self.assertEqual(len(self.journal()), referee.MAX_INCIDENT_DECISIONS)
+        self.assertEqual([entry['status'] for entry in self.journal()], ['applied', 'failed'])
         worker = FunctionWorker('worker', [])
         reviewer = ScriptedProvider('reviewer', [review_failure(), review_failure()])
         report = self.monitor(worker, reviewer, resume=True, referee=None).run()
         self.assertEqual(report.status, 'action_required', report.summary)
         self.assertEqual(len(reviewer.calls), 2)
         self.assertEqual(worker.calls, [])
-        self.assertEqual(len(self.journal()), referee.MAX_INCIDENT_DECISIONS)
+        self.assertEqual([entry['status'] for entry in self.journal()], ['applied', 'failed'])
 
     def test_failed_referee_is_not_reissued_blindly_on_resume(self):
         reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),
@@ -404,6 +401,14 @@ class RefereeTests(unittest.TestCase):
 
 
 class RefereeJournalTests(unittest.TestCase):
+    def test_distinct_incidents_can_continue_past_the_old_fixed_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = referee.Journal(directory)
+            for index in range(15):
+                ticket = journal.begin({'tree': str(index)}, 'interrupted')
+                journal.update(ticket['id'], 'applied')
+            self.assertEqual(len(journal.read()['decisions']), 15)
+
     def test_interrupted_request_cannot_be_replayed_and_changed_inputs_get_a_new_incident(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = referee.Journal(directory)

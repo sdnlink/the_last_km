@@ -10,7 +10,7 @@ import threading
 from auto_moniter.redaction import redactor
 
 PUBLIC_LOG_NAME = re.compile(
-    r'console\.log|monitor\.log|events(?:\.previous)?\.jsonl|referee(?:-archive)?-decisions\.json'
+    r'console\.log|monitor\.log|events(?:\.previous)?\.jsonl|referee(?:-archive|-browser)?-decisions\.json'
     r'|field-check-archive-[a-f0-9]{64}\.json'
     r'|requirements-workspace-change\.json|assignment-preflight\.log'
     r'|\d+-(?:(?:worker|referee|reviewer(?:-repair-\d+|-preflight)?)(?:-text)?\.(?:log|md)'

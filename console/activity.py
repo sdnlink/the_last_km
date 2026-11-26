@@ -53,6 +53,7 @@ EVENT_LABELS = {
     'referee_decision': '裁判已安排恢复路径',
     'referee_rejected': '裁判决策未通过执行校验',
     'referee_exhausted': '裁判恢复次数已用尽，保留工作等待处理',
+    'referee_recovery_unchanged': '裁判等待新的证据或执行条件，已保留工作',
     'git_checkpoint': '项目 Git 记录已保存',
     'agent_start': '开始执行', 'review_checkpoint': '提交独立审查', 'agent_failure': '执行异常，准备重试',
     'audit_issues_reported': '审查发现待解决问题', 'audit_issues_resolved': '审查问题已解决',

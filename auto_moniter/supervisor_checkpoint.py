@@ -333,7 +333,7 @@ class RunCheckpoint:
         decision = saved_referee['decision']
         if decision is not None:
             if (not isinstance(decision, dict) or set(decision) != set(referee.SCHEMA['required']) | {'id','cycle','incident','task_id'}
-                    or type(decision['id']) is not int or not 1 <= decision['id'] <= referee.MAX_DECISIONS
+                    or type(decision['id']) is not int or decision['id'] < 1
                     or type(decision['cycle']) is not int or decision['cycle'] < 1):
                 raise ValueError('Invalid saved referee decision')
             referee.parse(json.dumps({key: decision[key] for key in referee.SCHEMA['required']}))

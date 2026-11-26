@@ -6,8 +6,6 @@ from pathlib import Path
 from auto_moniter.redaction import safe
 from auto_moniter.storage import write_json
 
-MAX_DECISIONS = 12
-MAX_INCIDENT_DECISIONS = 3
 TURN_LIMIT_S = 1800
 DECISION_TIMEOUT_S = 180
 ACTIONS = {'retry_worker', 'retry_reviewer', 'replan', 'wait', 'archive_checks'}
@@ -39,17 +37,22 @@ def parse(text):
 
 
 class Journal:
-    def __init__(self, run, *, archive=False):
-        self.path = Path(run) / ('referee-archive-decisions.json' if archive else 'referee-decisions.json')
+    def __init__(self, run, *, archive=False, browser=False):
+        name = 'referee-decisions.json'
+        if archive:
+            name = 'referee-archive-decisions.json'
+        elif browser:
+            name = 'referee-browser-decisions.json'
+        self.path = Path(run) / name
 
     def read(self):
         if not self.path.exists() and not self.path.is_symlink():
             return {'version': 1, 'decisions': []}
-        if self.path.is_symlink() or self.path.stat().st_size > 512 * 1024:
+        if self.path.is_symlink():
             raise ValueError('Unsafe referee journal')
         value = json.loads(self.path.read_text(encoding='utf-8'))
         if (not isinstance(value, dict) or set(value) != {'version', 'decisions'} or value['version'] != 1
-                or not isinstance(value['decisions'], list) or len(value['decisions']) > MAX_DECISIONS):
+                or not isinstance(value['decisions'], list)):
             raise ValueError('Invalid referee journal')
         for index, item in enumerate(value['decisions'], 1):
             if (not isinstance(item, dict) or item.get('id') != index
@@ -67,8 +70,7 @@ class Journal:
         if once and history:
             last = history[-1]
             return last if last['status'] == 'captured' else None
-        if (len(value['decisions']) >= MAX_DECISIONS or len(history) >= MAX_INCIDENT_DECISIONS
-                or history and history[-1]['status'] in {'requested', 'captured', 'failed'}):
+        if history and history[-1]['status'] in {'requested', 'captured', 'failed'}:
             return None
         item = {'id': len(value['decisions']) + 1, 'key': key, 'status': 'requested',
                 'reason': safe(reason)[:4000]}
@@ -77,6 +79,11 @@ class Journal:
         value['decisions'].append(item)
         write_json(self.path, value, durable=True)
         return item
+
+    def already_applied(self, ticket, action):
+        return any(item['key'] == ticket['key'] and item['status'] == 'applied'
+                   and item.get('decision', {}).get('action') == action
+                   for item in self.read()['decisions'])
 
     def update(self, ident, status, **fields):
         value = self.read()

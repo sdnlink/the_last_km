@@ -720,7 +720,8 @@ class TaskStore:
                 raise TaskError('只有等待处理的任务可以登记或提交现场回执。', 409)
             state = Directions(run).read('state.json', 32 * 1024 * 1024)
             checkpoint = field_handoff.binding(state)
-            worker = next(row for row in reversed(state['rounds']) if row.get('role') == 'worker')
+            worker = next(row for row in reversed(state['rounds'])
+                          if row.get('role') == 'worker' and row.get('index') == checkpoint['round'])
             receipt = worker['watcher_result']['candidate_checks']
             if not candidate_checks.valid(receipt, run, receipt.get('context')):
                 raise TaskError('原轮次的检查回执已变化，请重新核对候选。', 409)
@@ -1007,7 +1008,7 @@ class TaskStore:
                     state = Directions(run).read('state.json', 32 * 1024 * 1024)
                     checkpoint = value['binding']
                     worker = next((row for row in reversed(state.get('rounds') or [])
-                                   if row.get('role') == 'worker'), {})
+                                   if row.get('role') == 'worker' and row.get('index') == checkpoint['round']), {})
                     receipt = worker.get('watcher_result', {}).get('candidate_checks') or {}
                     if (field_handoff.binding(state) != checkpoint
                             or [row['id'] for row in Directions(run).messages()] != checkpoint['directions']

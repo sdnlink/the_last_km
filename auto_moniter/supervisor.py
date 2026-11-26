@@ -635,7 +635,18 @@ class Supervisor:
                 protected_errors = self.quality.baseline_errors(self.config.cwd)
                 if protected_errors:
                     return self._finish('action_required', 'Protected acceptance baseline changed: ' + ', '.join(protected_errors), records, last_worker)
-            pending = None if separated_verification or foreign_assignment else saved_candidate or self._pending_review(records)
+            field_candidate = None
+            if not (separated_verification or foreign_assignment or saved_candidate):
+                field_candidate, waiting_review = self._waiting_field_review(records)
+                if waiting_review:
+                    if self._advance_local_assignment(records, field_waiting=True):
+                        last_worker = last_review = None
+                        stall, previous_gap_key, previous_tree = 0, '', ''
+                        continue
+                    return self._finish('action_required', self._field_wait_message(waiting_review.verdict),
+                                        records, waiting_review.verdict)
+            pending = (None if separated_verification or foreign_assignment else
+                       saved_candidate or field_candidate or self._pending_review(records))
             if saved_candidate:
                 if pending is not saved_candidate or not self._deferred_replan_applies():
                     return self._finish('action_required', '补审前派单或输入发生变化，请核对原检查点。', records, last_worker)
@@ -1383,10 +1394,9 @@ class Supervisor:
                                 continue
                         elif self._separate_verification_milestone(records):
                             continue
-                        reason = 'Verification needs an external prerequisite before it can continue.'
                         review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
                         self._event('verification_waiting', task_id=self.function_tasks.current['id'], round=round_index)
-                        result = self._finish('action_required', reason + ' ' + '; '.join(review.blockers), records, review)
+                        self._write_state(records, 'running', stall, previous_gap_key, review_tree)
                         try:
                             state = requirement_context.read(self.run_dir / 'state.json', limit=32 * 1024 * 1024)
                             if handoff_applied and handoff['binding'] == field_handoff.binding(state):
@@ -1398,7 +1408,12 @@ class Supervisor:
                                 ], automatic=True)
                         except (OSError, ValueError, KeyError) as exc:
                             self.log('现场交接记录未建立：' + redact(str(exc)))
-                        return result
+                        else:
+                            if not saved_candidate_review and self._advance_local_assignment(records, field_waiting=True):
+                                last_worker = last_review = None
+                                stall, previous_gap_key, previous_tree = 0, '', ''
+                                continue
+                        return self._finish('action_required', self._field_wait_message(review), records, review)
                     try:
                         previous_id = self.function_tasks.current['id']
                         staged = self._stage_verification_repair(review)
@@ -4853,12 +4868,64 @@ class Supervisor:
             return False
         return run_health(run)['health'] in {'active', 'recovering'}
 
-    def _advance_local_assignment(self, records, *, missing_inputs=False):
+    @staticmethod
+    def _field_wait_message(review):
+        return '验收缺少现场条件。' + '；'.join(review.blockers)
+
+    def _waiting_field_review(self, records):
+        from auto_moniter import field_handoff
+
+        task = self.function_tasks.current
+        if (not self._verification_only() or not self._complete_function_plan_ready()
+                or self._pending_directions() or self._unplanned_directions()):
+            return None, None
+        worker = next((row for row in reversed(records) if row.role == 'worker'
+                       and row.verdict.task_id == task['id']), None)
+        if not worker or worker.tree != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir):
+            return None, None
+        review = next((row for row in reversed(records) if row.role == 'reviewer' and row.index == worker.index), None)
+        if not review or review.watcher_result.get('status') != 'blocked' or not review.verdict.blockers:
+            return None, None
+        receipt = worker.watcher_result.get('candidate_checks', {})
+        context = self._candidate_check_context(worker)
+        if isinstance(self.git_history, ApprovedHistory) and self.git_history.candidate.get('round') != worker.index:
+            # Read-only dispatches share the same working tree. Recreate the
+            # publication preview only when the original review can continue.
+            expected = receipt.get('context', {})
+            if self.git_history.business_commits and 'publication_tree' in expected:
+                context['publication_tree'] = expected['publication_tree']
+        if not candidate_checks.valid(receipt, self.run_dir, context):
+            return None, None
+        binding = {'task_id': task['id'], 'task_sha256': candidate_checks.digest(task),
+                   'round': worker.index, 'tree': worker.tree, 'checks_digest': receipt['digest'],
+                   'configured_checks': candidate_checks.digest(self.config.checks),
+                   'directions': self._dispatch_directions}
+        handoff = field_handoff.activate(self.run_dir, binding)
+        if not handoff:
+            return None, None
+        if not (field_handoff.ready(handoff) or handoff.get('fallback', {}).get('revision') == handoff['revision']):
+            return None, review
+        if isinstance(self.git_history, ApprovedHistory) and self.git_history.candidate.get('round') != worker.index:
+            base = self.git_history.begin_round(worker.index)
+            self.git_history.prepare_review(worker.index, base, publication_paths=self._function_publication_paths())
+            if not candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(worker)):
+                return None, None
+        return worker, None
+
+    def _advance_local_assignment(self, records, *, missing_inputs=False, field_waiting=False):
         if (self.requirements_review.get('limited_dispatch') or not self._complete_function_plan_ready()
                 or self._unplanned_directions()):
             return False
         blocked = self.function_tasks.current
         snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+        tree = snapshot_fingerprint(self.config.cwd, snapshot)
+        waiting_ids = set()
+        if field_waiting:
+            if not self._verification_only() or blocked['delivery_scope'] != 'function':
+                return False
+            waiting_ids = {row.verdict.task_id for row in records
+                           if row.role == 'reviewer' and row.tree == tree
+                           and row.watcher_result.get('status') == 'blocked'}
         if self._assignment_worker_started(blocked):
             try:
                 if self._prepare_function_baseline(snapshot)['files'] != snapshot:
@@ -4868,6 +4935,9 @@ class Supervisor:
         waiting = function_plan.waiting(self.function_plan, self.function_tasks)
         for task in waiting:
             if task['delivery_scope'] == 'requirement' or self._assignment_repository_conflict(task):
+                continue
+            if field_waiting and (task.get('kind') != 'verification' or task['delivery_scope'] != 'function'
+                                  or task['id'] in waiting_ids):
                 continue
             staged = function_tasks.FunctionTasks(self.function_tasks.export())
             staged.current = None
@@ -4885,9 +4955,10 @@ class Supervisor:
             self.function_tasks, self.function_plan = staged, plan
             self._drop_worker_session = True
             self._record_assignment(task)
-            event = 'function_check_inputs_deferred' if missing_inputs else 'function_workspace_deferred'
+            event = ('function_field_handoff_deferred' if field_waiting else
+                     'function_check_inputs_deferred' if missing_inputs else 'function_workspace_deferred')
             self._event(event, task_id=blocked['id'], next_task_id=task['id'])
-            self._write_state(records, 'running', 0, '', snapshot_fingerprint(self.config.cwd, snapshot))
+            self._write_state(records, 'running', 0, '', tree)
             return True
         return False
 
@@ -5615,13 +5686,22 @@ class Supervisor:
         if not self.config.keep_rounds or not records:
             return
         first = max(record.index for record in records) - self.config.keep_rounds + 1
-        removed = [record for record in records if record.index < first]
+        protected_rounds = set()
+        if self.config.full_function_plan and self.function_plan:
+            accepted = {row['task']['id'] for row in self.function_tasks.accepted}
+            pending = {task['id'] for task in self.function_plan['tasks']
+                       if task.get('kind') == 'verification' and task['id'] not in accepted}
+            blocked_reviews = {record.verdict.task_id: record.index for record in records
+                               if record.role == 'reviewer' and record.verdict.task_id in pending
+                               and record.watcher_result.get('status') == 'blocked' and record.verdict.blockers}
+            protected_rounds = set(blocked_reviews.values())
+        removed = [record for record in records if record.index < first and record.index not in protected_rounds]
         for record in removed:
             self._pruned_failures[record.role] = self._pruned_failures.get(record.role, 0) + 1 if record.failure else 0
             self._pruned_worker_rounds += record.role == "worker"
         self._pruned_records += len(removed)
-        records[:] = [record for record in records if record.index >= first]
-        files = prune_files(self.run_dir, first)
+        records[:] = [record for record in records if record.index >= first or record.index in protected_rounds]
+        files = prune_files(self.run_dir, first, protected_rounds=protected_rounds)
         if removed or files:
             self._event("history_pruned", records=len(removed), files=files, first_round=first)
 

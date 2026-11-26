@@ -48,8 +48,10 @@ def binding(state):
     rows = state.get('rounds')
     if not isinstance(rows, list):
         rows = state.get('records') or []
-    worker = next((row for row in reversed(rows) if row.get('role') == 'worker'), {})
-    review = next((row for row in reversed(rows) if row.get('role') == 'reviewer'), {})
+    worker = next((row for row in reversed(rows) if row.get('role') == 'worker'
+                   and (row.get('watcher_result', {}).get('candidate_checks') or {}).get('context', {}).get('task') == task), {})
+    review = next((row for row in reversed(rows)
+                   if row.get('role') == 'reviewer' and row.get('index') == worker.get('index')), {})
     check = worker.get('watcher_result', {}).get('candidate_checks') or {}
     if (task.get('kind') != 'verification' or review.get('index') != worker.get('index')
             or not review.get('blockers') or review.get('task_status') != 'changes_required'
@@ -66,6 +68,29 @@ def binding(state):
 def read(run):
     path = run / FILE
     return Directions(run).read(FILE, 256 * 1024) if path.exists() or path.is_symlink() else {}
+
+
+def activate(run, checkpoint):
+    current = read(run)
+    if current.get('binding') == checkpoint:
+        return current
+    archives = sorted(run.glob('field-handoff-*.json'), key=lambda path: path.stat().st_mtime_ns,
+                      reverse=True)
+    for path in archives:
+        if not re.fullmatch(r'field-handoff-[a-f0-9]{32}\.json', path.name):
+            continue
+        value = Directions(run).read(path.name, 256 * 1024)
+        if value.get('binding') == checkpoint and path.name == f"field-handoff-{value.get('revision')}.json":
+            _archive(run, current)
+            write_json(run / FILE, value, durable=True)
+            return value
+    return {}
+
+
+def _archive(run, value):
+    if value:
+        archived = {key: entry for key, entry in value.items() if key != 'browser_inputs'}
+        write_json(run / f"field-handoff-{value['revision']}.json", archived, durable=True)
 
 
 def ready(value):
@@ -171,8 +196,7 @@ def executor_prompt(cwd, run):
 
 
 def reopen(run, value, blockers, requests=()):
-    archived = {key: entry for key, entry in value.items() if key != 'browser_inputs'}
-    write_json(run / f"field-handoff-{value['revision']}.json", archived, durable=True)
+    _archive(run, value)
     items = requests or [
         {'kind': 'observation', 'title': reason[:300], 'owner': '现场执行器'}
         for reason in blockers[:12]
@@ -257,9 +281,7 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
         value['retained_evidence'] = existing['retained_evidence']
     if existing.get('binding') == checkpoint and existing.get('fallback_history'):
         value['fallback_history'] = existing['fallback_history']
-    if existing:
-        archived = {key: entry for key, entry in existing.items() if key != 'browser_inputs'}
-        write_json(run / f"field-handoff-{existing['revision']}.json", archived, durable=True)
+    _archive(run, existing)
     write_json(run / FILE, value, durable=True)
     return value
 

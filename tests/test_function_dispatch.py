@@ -95,8 +95,9 @@ class DispatchTests(unittest.TestCase):
     def run_monitor(self, root, worker, reviewer, **kwargs):
         kwargs.setdefault('checks', [CHECK])
         kwargs.setdefault('review_every', 0)
+        kwargs.setdefault('git_history', 'off')
         return Supervisor(RunConfig('ORIGINAL BACKLOG MUST NOT REACH WORKER',root,worker,reviewer=reviewer,
-            workflow='review-first',function_dispatch=True,git_history='off',run_dir=root/'run',
+            workflow='review-first',function_dispatch=True,run_dir=root/'run',
             retry_delay_s=0,**kwargs),log=lambda _:None).run()
 
     def test_coverage_revision_releases_only_the_independently_approved_function(self):
@@ -1188,6 +1189,53 @@ class DispatchTests(unittest.TestCase):
             self.assertTrue(receipt['passed'])
             self.assertEqual(receipt['context']['supplemental_checks'][0]['audit_id'], 'AUD-1')
             self.assertIn('001-check-02.log', reviewer.calls[-1]['prompt'])
+
+    def test_field_wait_runs_independent_checks_then_resumes_original_review(self):
+        from auto_moniter import field_handoff
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            subprocess.run(['git', 'init', '-q'], cwd=root, check=True)
+            subprocess.run(['git', 'add', 'app.py'], cwd=root, check=True)
+            subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+                            'commit', '-qm', '初始版本'], cwd=root, check=True)
+            waiting = {**verification_task('FIELD'), 'delivery_scope': 'function'}
+            local = {**verification_task('LOCAL'), 'delivery_scope': 'function'}
+            followup = {**verification_task('FOLLOWUP', depends=['LOCAL']), 'delivery_scope': 'function'}
+            final = verification_task('FINAL', depends=['FIELD', 'FOLLOWUP'])
+            initial = json.loads(plan(waiting)['text'])
+            initial['function_plan'] = [waiting, local, followup, final]
+            blocked = result('FIELD', 'changes_required')
+            blocked['verdict']['blockers'] = ['现场版本需要核对']
+            worker = FunctionWorker('worker', [result(key, 'done') for key in ('FIELD', 'LOCAL', 'FOLLOWUP')])
+            reviewer = ScriptedProvider('reviewer', [
+                {'verdict': {}, 'text': json.dumps(initial)}, blocked,
+                result('LOCAL', 'accepted'), result('FOLLOWUP', 'accepted'),
+            ])
+            report = self.run_monitor(root, worker, reviewer, full_function_plan=True,
+                                      keep_rounds=1, git_history='auto')
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertEqual(len(worker.calls), 3)
+            self.assertEqual(len(reviewer.calls), 4)
+            run = root/'run'
+            state = json.loads((run/'state.json').read_text())
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['LOCAL', 'FOLLOWUP'])
+            handoff = field_handoff.read(run)
+            checkpoint = field_handoff.binding(state)
+            self.assertEqual(checkpoint, handoff['binding'])
+            self.assertEqual(checkpoint['round'], 1)
+            field_handoff.submit(run, state, {'binding': checkpoint, 'revision': handoff['revision'],
+                'id': '1', 'receipt': {'result': '现场版本已核对'}})
+            worker = FunctionWorker('worker', [])
+            reviewer = ScriptedProvider('reviewer', [result('FIELD', 'accepted')])
+            report = self.run_monitor(root, worker, reviewer, full_function_plan=True,
+                                      resume=True, max_rounds=3, git_history='auto')
+            self.assertEqual(report.status, 'max_rounds', report.summary)
+            self.assertEqual(len(worker.calls), 0)
+            self.assertIn('现场版本已核对', reviewer.calls[0]['prompt'])
+            state = json.loads((run/'state.json').read_text())
+            self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['LOCAL', 'FOLLOWUP', 'FIELD'])
 
     def test_verification_waits_for_an_external_prerequisite_without_redispatch(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -224,6 +224,11 @@ def _assignment_target_state(root, task, file, symbol):
     return measured
 
 
+def verify_read_only_target(root, task):
+    for file, symbol in targets(task):
+        _assignment_target_state(root, task, file, symbol)
+
+
 def criteria(modules, module_id):
     return {f'{module_id}:{i}': text
             for i, text in enumerate(modules[module_id]['acceptance'], 1)}
@@ -305,8 +310,7 @@ def validate_task(task, root, modules, checks, brief, *, approvals=(), regressio
         if test_asset(name) or name in task['test_files'] or path.is_dir():
             raise ValueError('edit_files cannot grant directory or regression/test configuration edits: ' + name)
     if not future and task.get('kind') == 'verification':
-        for file, symbol in targets(task):
-            _assignment_target_state(root, task, file, symbol)
+        verify_read_only_target(root, task)
     if task.get('kind') == 'integration':
         verify_integration_approval(task, approvals)
     module_criteria = criteria(modules, task['module_id'])

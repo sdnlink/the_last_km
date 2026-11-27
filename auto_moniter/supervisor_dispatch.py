@@ -185,6 +185,18 @@ class FunctionDispatch:
 
     def _prepare_function_baseline(self, snapshot=None):
         task = self.function_tasks.current
+        if task.get('kind') == 'verification':
+            from auto_moniter import verification_baseline
+            if snapshot is None:
+                snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+            saved, recovered = verification_baseline.prepare(
+                self.run_dir, self.config.cwd, task, snapshot,
+                cycle=len(self.requirement_cycles) + 1, after_round=self._verification_attempt_boundary(),
+                started=self._assignment_worker_started(task), records=self._records)
+            if recovered:
+                self._event('verification_baseline_recovered', task_id=task['id'],
+                            tree=snapshot_fingerprint(self.config.cwd, snapshot))
+            return saved
         if self._function_baseline is not None and self._function_baseline['id'] == task['id']:
             return self._function_baseline
         if snapshot is None:
@@ -358,12 +370,13 @@ class FunctionDispatch:
                     'original_sha256': requirements_review.requirement_hash(self.config.requirement)}
         return {}
 
+    def _verification_attempt_boundary(self):
+        return max((item['round'] for item in self.function_tasks.accepted), default=0)
+
     def _assignment_worker_started(self, task):
         # Verification can be reassigned under the same ID after an accepted
         # repair. Only calls after that repair belong to the new attempt.
-        after_round = 0
-        if task.get('kind') == 'verification':
-            after_round = max((item['round'] for item in self.function_tasks.accepted), default=0)
+        after_round = self._verification_attempt_boundary() if task.get('kind') == 'verification' else 0
         return any(call.get('role') == 'worker' and call.get('task_id') == task['id']
                    and call['round'] > after_round
                    for call in (self._last_worker_invocation, self._last_invocation)) or any(

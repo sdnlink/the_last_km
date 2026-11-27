@@ -5,8 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from auto_moniter import function_gate
 from auto_moniter.directions import Directions
 from auto_moniter.supervisor import RunConfig, Supervisor
+from auto_moniter.workspace import file_snapshot
 from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
 from tests.test_review_first import approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider
@@ -37,6 +39,70 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
     def resume(self, root, worker, reviewer):
         return Supervisor(RunConfig('', root, worker, reviewer=reviewer, workflow='review-first',
             resume=True, git_history='off', run_dir=root/'run', retry_delay_s=0), log=lambda _: None)
+
+    def test_read_only_reassignment_recovers_the_original_source_boundary(self):
+        for mode in ('saved', 'legacy', 'damaged_legacy', 'changed', 'missing_log'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root/'app.py').write_text('def parse_input(): return 42\n')
+                run = root/'run'
+                first = {**verification_task('FIELD'), 'delivery_scope': 'function'}
+                second = {**verification_task('LOCAL'), 'delivery_scope': 'function'}
+                final = verification_task('FINAL', depends=['FIELD', 'LOCAL'])
+                planning = plan(first)
+                content = json.loads(planning['text'])
+                content['function_plan'] = [first, second, final]
+                planning['text'] = json.dumps(content)
+                blocked = [result(task_id, 'changes_required') for task_id in ('FIELD', 'LOCAL')]
+                for turn in blocked:
+                    turn['verdict']['blockers'] = ['需要现场浏览器回执']
+                worker = FunctionWorker('worker', [result(task_id, 'done') for task_id in ('FIELD', 'LOCAL')])
+                reviewer = ScriptedProvider('reviewer', [planning, *blocked])
+                monitor = Supervisor(RunConfig('Verify the current candidate', root, worker, reviewer=reviewer,
+                    workflow='review-first', function_dispatch=True, full_function_plan=True, git_history='off',
+                    run_dir=run, checks=[CHECK], retry_delay_s=0), log=lambda _: None)
+                self.assertEqual(monitor.run().status, 'action_required')
+                self.assertEqual(len(worker.calls), 2)
+                scope = run/'verification-baseline-1-0-FIELD.json'
+                self.assertTrue(scope.is_file())
+                self.assertTrue((run/'verification-baseline-1-0-LOCAL.json').is_file())
+
+                # Restore the first assignment with new wording, as when the
+                # coverage review approves its return to the front of the plan.
+                path = run/'state.json'
+                state = json.loads(path.read_text())
+                self.assertEqual(state['function_tasks']['current']['id'], 'LOCAL')
+                original = next(item for item in state['function_plan']['tasks'] if item['id'] == 'FIELD')
+                revised = {**original, 'objective': 'Inspect the source again for field verification'}
+                state['function_tasks']['current'] = revised
+                state['function_plan']['tasks'] = [revised, *[item for item in state['function_plan']['tasks']
+                                                              if item['id'] != revised['id']]]
+                path.write_text(json.dumps(state))
+                if mode != 'saved':
+                    scope.unlink()
+                    legacy = run/'function-baseline.json.gz'
+                    if mode == 'damaged_legacy':
+                        legacy.write_bytes(b'incomplete baseline')
+                    else:
+                        function_gate.baseline(legacy, root, second, file_snapshot(root, ignore_dir=run), missing_ok=True)
+                if mode == 'changed':
+                    (root/'app.py').write_text('def parse_input(): return 99\n')
+                if mode == 'missing_log':
+                    (run/'001-check-01.log').unlink()
+                worker = FunctionWorker('worker', [result('FIELD', 'done')])
+                reviewer = ScriptedProvider('reviewer', [blocked[0]])
+                report = self.resume(root, worker, reviewer).run()
+                self.assertEqual(report.status, 'action_required', report.summary)
+                if mode in ('changed', 'missing_log'):
+                    self.assertIn('缺少范围基线', report.summary)
+                    self.assertFalse(worker.calls)
+                    self.assertFalse(scope.exists())
+                else:
+                    self.assertIn('需要现场浏览器回执', report.summary)
+                    self.assertEqual([call['read_only'] for call in worker.calls], [True])
+                    self.assertTrue(scope.is_file())
+                    if mode in ('legacy', 'damaged_legacy'):
+                        self.assertIn('verification_baseline_recovered', (run/'events.jsonl').read_text())
 
     def test_verification_can_run_again_after_an_accepted_repair(self):
         for mode in ('continuous', 'resume', 'interrupted'):
@@ -85,7 +151,7 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
                 report = monitor.run()
                 if mode == 'interrupted':
                     self.assertEqual(report.status, 'action_required', report.summary)
-                    self.assertIn('baseline is missing', report.summary)
+                    self.assertIn('缺少范围基线', report.summary)
                     self.assertEqual(len(worker.calls), 2)
                     continue
                 self.assertEqual(report.status, 'done', report.summary)

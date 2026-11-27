@@ -664,7 +664,7 @@ class Supervisor(
                             function_gate.materialize_review_test(self.config.cwd, self.function_tasks.current, baseline)
                             before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
                     except (OSError, ValueError) as exc:
-                        return self._finish('action_required', 'Function scope could not be initialized: ' + str(exc), records, last_worker)
+                        return self._finish('action_required', '派单的工作范围无法初始化。' + str(exc), records, last_worker)
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
                                      workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir))
                 worker_directions = None

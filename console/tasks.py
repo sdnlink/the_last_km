@@ -29,6 +29,7 @@ from console.deletion import run_key, inactive_run, purge_run_logs, validate_log
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
 from console.acceptance import validate_commands
 from auto_moniter.redaction import redact, safe
+from auto_moniter.run_storage import open_log
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
 from auto_moniter import browser_execution, candidate_checks, field_handoff, referee
@@ -1847,17 +1848,18 @@ class TaskStore:
 
     def _log_selection(self, ident: str, name: str):
         run = Path(self._get(ident)['run_dir'])
-        files = []
+        files = {}
         for path in run.glob('*'):
             if path.is_symlink() or not path.is_file():
                 continue
-            if not PUBLIC_LOG_NAME.fullmatch(path.name):
+            logical_name = path.name.removesuffix('.gz')
+            if not PUBLIC_LOG_NAME.fullmatch(logical_name):
                 continue
             try:
-                files.append((path.stat().st_mtime, path.name))
+                files[logical_name] = max(files.get(logical_name, 0), path.stat().st_mtime)
             except FileNotFoundError:
                 continue  # The supervisor can rotate/prune logs during enumeration.
-        names = [name for _, name in sorted(files, reverse=True)]
+        names = sorted(files, key=lambda name: (files[name], name), reverse=True)
         selected = name or next((n for n in names if '-text.md' in n), names[0] if names else '')
         if selected and selected not in names:
             raise TaskError('日志文件不存在', 404)
@@ -1870,7 +1872,7 @@ class TaskStore:
         with self._lock:
             run, _, selected = self._log_selection(ident, name)
             try:
-                with os.fdopen(os.open(run/selected, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+                with open_log(run / selected) as (stream, _, _):
                     raw = stream.read(8 * 1024 * 1024 + 1)
             except FileNotFoundError:
                 raise TaskError('日志文件不存在', 404) from None

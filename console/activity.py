@@ -11,6 +11,7 @@ from pathlib import Path
 
 from auto_moniter.live import public_events
 from auto_moniter.redaction import safe
+from auto_moniter.run_storage import available_log
 from console.diagnostics import present_summary
 
 
@@ -261,7 +262,7 @@ class ActivityReader:
             if round_id.isdecimal() and len(round_id) <= 9 and entry_role in {'worker', 'reviewer', 'referee'}:
                 name = f'{int(round_id):03d}-{entry_role}-text.md'
                 path = run / name
-                if path.is_file() and not path.is_symlink():
+                if available_log(path):
                     entry['text_file'] = name
         messages = [e for e in current_entries if e.get('kind') in {'message', 'output'}]
         operations = [e for e in current_entries if e.get('kind') in {'command', 'file', 'tool'}]

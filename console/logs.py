@@ -3,11 +3,11 @@
 from array import array
 from collections import OrderedDict
 from pathlib import Path
-import os
 import re
 import threading
 
 from auto_moniter.redaction import redactor
+from auto_moniter.run_storage import open_log
 
 PUBLIC_LOG_NAME = re.compile(
     r'console\.log|monitor\.log|events(?:\.previous)?\.jsonl|referee(?:-archive|-browser)?-decisions\.json'
@@ -35,21 +35,23 @@ class LogReader:
     def read(self, path: Path | None, page: int, page_size: int) -> dict:
         if path is None:
             return self._empty(page_size)
-        with path.open('rb') as stream:
-            stat = os.fstat(stream.fileno())
+        with open_log(path) as (stream, stat, archived):
             identity = (stat.st_dev, stat.st_ino)
             with self._lock:
                 previous = self.indexes.pop(str(path), None)
-            if (previous and previous['identity'] == identity and stat.st_size >= previous['size']
-                    and (stat.st_size != previous['size'] or stat.st_mtime_ns == previous['mtime'])):
+            if (previous and previous['identity'] == identity and stat.st_size >= previous['physical_size']
+                    and (not archived and stat.st_size > previous['physical_size']
+                         or stat.st_size == previous['physical_size'] and stat.st_mtime_ns == previous['mtime'])):
                 index = previous
             else:
                 index = {'identity': identity, 'size': 0, 'breaks': 0,
                          'anchors': array('Q', [0]), 'newline': False}
-            stream.seek(index['size'])
             offset = index['size']
-            while offset < stat.st_size:
-                block = stream.read(min(65536, stat.st_size - offset))
+            scan = not archived or not index.get('complete')
+            if scan:
+                stream.seek(offset)
+            while scan and (archived or offset < stat.st_size):
+                block = stream.read(65536 if archived else min(65536, stat.st_size - offset))
                 if not block:
                     break
                 pos = 0
@@ -63,7 +65,7 @@ class LogReader:
                     pos = found + 1
                 index['newline'] = block.endswith(b'\n')
                 offset += len(block)
-            index.update(size=offset, mtime=stat.st_mtime_ns)
+            index.update(size=offset, physical_size=stat.st_size, mtime=stat.st_mtime_ns, complete=archived)
             with self._lock:
                 self.indexes[str(path)] = index
                 while len(self.indexes) > 8:

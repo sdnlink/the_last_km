@@ -26,6 +26,7 @@ from auto_moniter.workspace import (
 from auto_moniter.verdict import VERDICT_SCHEMA, Verdict, parse_verdict
 from auto_moniter.modules import ModuleLedger
 from auto_moniter.storage import write_json
+from auto_moniter.run_storage import maintain_run_storage
 from auto_moniter.paths import default_run_dir, private_directory, state_root
 from auto_moniter.processes import process_identity, recover_process
 from auto_moniter.events import record as record_event
@@ -1529,17 +1530,7 @@ class Supervisor(
                 self._project_replan = True
                 self._event('project_observation_failed', reason=str(exc))
         self._check_storage_quota()
-        if self.config.max_run_bytes and time.monotonic() - self._last_space_check >= 1:
-            self._last_space_check = time.monotonic()
-            size = 0
-            for parent, dirs, files in os.walk(self.run_dir, followlinks=False):
-                dirs[:] = [name for name in dirs if not (Path(parent) / name).is_symlink()]
-                for name in files:
-                    try:
-                        size += (Path(parent) / name).lstat().st_size
-                    except FileNotFoundError:
-                        pass
-            self._space_exceeded = size >= self.config.max_run_bytes
+        maintain_run_storage(self)
         return self._stop or self._space_exceeded or bool(getattr(self, '_quota_exceeded', '')) or bool(self.config.max_runtime_s and self._elapsed() >= self.config.max_runtime_s)
 
     def _check_storage_quota(self) -> None:
@@ -1610,6 +1601,7 @@ class Supervisor(
         self._check_storage_quota()
         if getattr(self, '_quota_exceeded', ''):
             raise BudgetExceeded('Storage quota exhausted: ' + self._quota_exceeded)
+        maintain_run_storage(self)
         if self._space_exceeded:
             raise BudgetExceeded("Run directory storage budget exhausted")
         if self.config.max_runtime_s and self._elapsed() >= self.config.max_runtime_s:

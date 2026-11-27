@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from auto_moniter.redaction import redact, safe
+from auto_moniter.run_storage import available_log
 from console.logs import PUBLIC_LOG_NAME
 
 TERMINAL = {'failed','invalid','action_required','budget_exceeded','recovery_failed',
@@ -236,7 +237,7 @@ def diagnose(status, state, meta, health, guardian, run, *, details=True):
     if details:
         names = dict.fromkeys(re.findall(r'[A-Za-z0-9_.-]+', result['raw_summary']))
         result['reason_files'] = [name for name in names if PUBLIC_LOG_NAME.fullmatch(name)
-                                  and not (Path(run)/name).is_symlink() and (Path(run)/name).is_file()]
+                                  and available_log(Path(run) / name)]
     if code=='requirement_workspace_changed':
         changes=brief.get('workspace_changes') if isinstance(brief,dict) else None
         if isinstance(changes,dict):

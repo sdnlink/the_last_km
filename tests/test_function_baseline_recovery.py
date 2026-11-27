@@ -8,6 +8,7 @@ from pathlib import Path
 from auto_moniter.directions import Directions
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
+from tests.test_review_first import approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider
 
 
@@ -105,12 +106,12 @@ class FunctionBaselineRecoveryTests(unittest.TestCase):
                 amendment = Directions(root/'run').append('Preserve F2; add the report view after it.')
                 worker = FunctionWorker('worker', [{**result('F2', 'done', status='done', file='next.py'),
                                                    'touch': 'next.py'}])
-                reviewer = ScriptedProvider('reviewer', [plan(second),
+                reviewer = ScriptedProvider('reviewer', [plan(second), approve_requirement_coverage(),
                     result('F2', 'accepted', status='done', file='next.py')])
                 report = self.resume(root, worker, reviewer).run()
                 self.assertEqual(report.status, 'done', report.summary)
                 self.assertEqual(len(worker.calls), 1)
-                self.assertEqual(len(reviewer.calls), 2)
+                self.assertEqual(len(reviewer.calls), 3)
                 state = json.loads((root/'run/state.json').read_text())
                 self.assertEqual(state['last_invocation']['role'], 'reviewer')
                 self.assertEqual(state['last_worker_invocation']['task_id'], 'F2')

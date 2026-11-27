@@ -176,7 +176,12 @@ class AgentPrompts:
         if last_worker and last_worker.raw:
             return last_worker.raw[-8000:]
         path = self.run_dir / f"{self._next_round - 2:03d}-worker-text.md"
-        return path.read_text(encoding="utf-8")[-8000:] if path.exists() else "(no earlier response)"
+        from auto_moniter.run_storage import open_log
+        try:
+            with open_log(path) as (stream, _, _):
+                return stream.read().decode("utf-8", errors="replace")[-8000:]
+        except FileNotFoundError:
+            return "(no earlier response)"
 
     def _module_progress(self) -> str:
         role = "worker" if self.config.no_review else "reviewer"

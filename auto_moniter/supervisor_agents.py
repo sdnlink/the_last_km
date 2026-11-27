@@ -255,9 +255,11 @@ class AgentExecution:
             prompt += executor_prompt(self.config.cwd, self.run_dir)
         if role == 'reviewer' and self._verification_only():
             from auto_moniter.browser_execution import reviewer_cases
+            from auto_moniter.field_executors import capability_prompt
 
             try:
                 prompt += reviewer_cases(self.config.cwd, self.function_tasks.current['id'], self.run_dir)
+                prompt += capability_prompt(self.config.cwd)
             except (OSError, ValueError, TypeError):
                 pass
         schema_path = self.schema_path
@@ -287,6 +289,10 @@ class AgentExecution:
             )
         self._event("agent_start", role=role, round=index, provider=provider.name)
         self._check_budget(new_call=True)
+        reserve = self.quality.config.get('recovery_reserve_calls', 0)
+        if (role != 'referee' and self.config.referee and reserve and self.config.max_agent_calls
+                and self._agent_calls >= max(1, self.config.max_agent_calls - reserve)):
+            raise BudgetExceeded('模型调用剩余配额已预留给裁判，当前检查点已保留。')
         self._agent_calls += 1
         messages = self.directions.messages() if direction_snapshot is None else direction_snapshot
         revision = self.directions.revision(self.config.requirement, messages)

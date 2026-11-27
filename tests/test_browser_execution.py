@@ -388,6 +388,58 @@ class BrowserExecutionTests(unittest.TestCase):
             self.assertEqual(current['fallback']['status'], 'launched')
             self.assertEqual(current['fallback']['waiting'], {'2':'等待原站候选回执'})
 
+    def test_unassigned_deployment_routes_to_referee_without_starting_dependent_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            value = {'binding': {'round': 8}, 'revision': 'current', 'items': [
+                {'id': '1', 'kind': 'deployment'},
+                {'id': '2', 'kind': 'browser', 'case_id': 'role-login'},
+            ]}
+            store = object.__new__(TaskStore)
+            with patch.object(browser_execution, 'poll') as poll, patch.object(store, 'action') as launch:
+                current = store._collect_field_results({'id': 't'}, run, {}, value)
+                self.assertEqual(list(current['failed_cases']), ['1'])
+                self.assertEqual(current['failed_cases']['1']['kind'], 'deployment')
+                store._route_browser_failure({'id': 't'}, run, current, referee_enabled=True)
+                poll.assert_not_called()
+                launch.assert_called_once_with('t', 'resume')
+            fallback = field_handoff.read(run)['fallback']
+            self.assertEqual(fallback['role'], 'referee')
+            self.assertEqual(fallback['waiting'], {'2': '等待同一候选的部署回执。'})
+
+    def test_fallback_retries_temporary_launch_failure_before_marking_dispatched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            value = {'binding': {'round': 8}, 'revision': 'current', 'items': [{'id': '1', 'kind': 'deployment'}],
+                     'failed_cases': {'1': {'case_id': '', 'kind': 'deployment', 'reason': '缺少执行器', 'role': 'reviewer'}}}
+            store = object.__new__(TaskStore)
+            with patch('console.tasks.time.time', return_value=100) as clock, patch.object(
+                    store, 'action', side_effect=[
+                        TaskError('该项目已有任务执行中', 409, retryable=True), {}]) as launch:
+                store._route_browser_failure({'id': 't'}, run, value, referee_enabled=True)
+                retry = field_handoff.read(run)
+                self.assertEqual(retry['fallback']['status'], 'pending')
+                self.assertFalse(retry.get('fallback_history'))
+                store._route_browser_failure({'id': 't'}, run, retry, referee_enabled=True)
+                launch.assert_called_once()
+                clock.return_value = 115
+                store._route_browser_failure({'id': 't'}, run, retry, referee_enabled=True)
+                launched = field_handoff.read(run)
+                store._route_browser_failure({'id': 't'}, run, launched, referee_enabled=True)
+                self.assertEqual(launch.call_count, 2)
+                self.assertEqual(launched['fallback']['status'], 'launched')
+                self.assertFalse(launched.get('fallback_history'))
+                clock.return_value = launched['fallback']['retry_at']
+                launch.side_effect = None
+                store._route_browser_failure({'id': 't'}, run, launched, referee_enabled=True)
+                self.assertEqual(launch.call_count, 3)
+                field_handoff.finish_fallback(run, launched['fallback'])
+                handled = field_handoff.read(run)
+                store._route_browser_failure({'id': 't'}, run, handled, referee_enabled=True)
+                self.assertEqual(launch.call_count, 3)
+            self.assertEqual(handled['fallback']['status'], 'handled')
+            self.assertEqual(handled['fallback_history'], [launched['fallback']['key']])
+
     def test_enabled_referee_handles_failure_previously_routed_to_reviewer(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

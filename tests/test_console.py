@@ -429,8 +429,9 @@ print(json.dumps({{'status':'continue','scope':'requirement','summary':'仍在�
             self.assertFalse((run / '001-worker.log').exists())
             restored = TaskStore(self.root / 'data', self.project)
             self.assertEqual(restored.detail(ident)['status'], 'running')
-            with self.assertRaises(TaskError):
-                self.create(auto_start=True)
+            waiting = self.create(auto_start=True)
+            self.assertEqual(waiting['status'], 'queued')
+            self.assertIn('已有任务执行中', waiting['launch_error'])
             self.store.action(ident, 'pause')
             self.wait_for(lambda: self.store.detail(ident)['status'] == 'paused')
             paused = self.store.detail(ident)

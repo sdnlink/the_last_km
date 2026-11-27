@@ -216,13 +216,15 @@ class NodeAcceptanceTests(unittest.TestCase):
                 with patch('console.tasks.discover_providers', return_value={'codex': True, 'claude': True}), \
                         patch('console.acceptance.shutil.which', return_value=None), \
                         patch.object(self.store, '_launch') as launch:
-                    status, result = request('POST', '/api/tasks', {**payload, 'title': 'must not start',
+                    status, result = request('POST', '/api/tasks', {**payload, 'title': 'wait for Node',
                         'requirement': 'implement', 'verification_mode': 'executable',
                         'acceptance_plan': plan, 'auto_start': True}, token)
-                    self.assertEqual(status, 409)
-                    self.assertIn('环境不可用', result['error'])
+                    self.assertEqual(status, 201)
+                    self.assertEqual(result['status'], 'queued')
+                    self.assertEqual(result['automatic_recovery']['condition'], 'startup')
+                    self.assertIn('环境不可用', self.store._get(result['id'])['error'])
                     launch.assert_not_called()
-                self.assertEqual(len(self.store.task_summaries()['tasks']), 1)
+                self.assertEqual(len(self.store.task_summaries()['tasks']), 2)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

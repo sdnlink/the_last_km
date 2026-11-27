@@ -23,6 +23,16 @@ function failureHTML(task){
  const reviewHTML=f.review_output_file?i18nHTML`<p><a href="${escape(fullLogURL(task.id,f.review_output_file))}" target="_blank" rel="noopener">查看 reviewer 完整原始结果（未获 watcher 接受）</a></p>`:'';
  return i18nHTML`<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · '+i18n`第 ${escape(f.round)} 轮`:''} · ${escape(f.role||'watcher')}${f.exit_code!=null?i18n(' · 监督进程退出码 ')+escape(f.exit_code):''}</p>${f.expected_commit?i18nHTML`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?i18nHTML`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?i18nHTML`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||i18n('运行记录'))}</summary><pre>${failureReasonHTML(task)}</pre></details>`:''}${f.recent_failures?.length?i18nHTML`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>i18nHTML`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
 }
+function automaticRecoveryHTML(task){
+ const recovery=task.automatic_recovery;
+ if(!recovery?.action)return '';
+ if(recovery.blocked)return i18nHTML`<p class="detail-alert" role="status">自动恢复遇到阻塞。 ${escape(recovery.error)}</p>`;
+ const retryAt=Number(recovery.retry_at)*1000;
+ const label=retryAt>Date.now()
+   ? i18n`等待自动重试，最早 ${dateTimeLabel(retryAt)}。`
+   : i18n('等待监督器再次尝试。');
+ return `<p class="control-hint" role="status">${escape(label)}</p>`;
+}
 function checkpointHTML(id, c) {
   const cp=c.git_checkpoint||c;
   if(!cp.commit)return '';
@@ -197,4 +207,4 @@ function renderConclusions(t, {groupByRound=false} = {}) {
   stableHTML(root,html+page.controls);
 }
 
-export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions,selectWorkflowStage,requirementReviewHTML,fullLogURL};
+export {failureHTML,automaticRecoveryHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions,selectWorkflowStage,requirementReviewHTML,fullLogURL};

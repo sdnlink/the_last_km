@@ -1,7 +1,7 @@
 import {i18n,i18nHTML} from '../i18n.js';
 import {$,escape,badge,taskButtons,active,taskPriority,stableHTML,rolesHTML,taskNarrativeHTML,taskNarrative} from '/ui.js';
 import {api,watch} from '/core.js';
-import {failureHTML,renderWorkflow,selectWorkflowStage,renderConclusions} from '/task-view.js';
+import {failureHTML,automaticRecoveryHTML,renderWorkflow,selectWorkflowStage,renderConclusions} from '/task-view.js';
 import {paginate,resetPage,onPaginationChange} from '/pagination.js';
 const selected=new URLSearchParams(location.search).get('task');
 let tasks=[],current=null,firstList=true;
@@ -20,7 +20,7 @@ function renderCurrent(t){
  const isLive=['running','starting'].includes(t.status),roles=t.work?.roles||{};
  const role=Object.values(roles).find(r=>r.status==='running');
  const work=t.failure?.reason||role?.last_conclusion?.summary||roles.referee?.decision?.summary||(isLive?i18n('等待本轮结论'):i18n('当前任务未在执行'));
- $('#progress-notice').innerHTML=failureHTML(t)+`${!isLive?`<p class="detail-alert">${t.status==='paused'?i18n('任务已暂停，当前展示最近一轮记录。'):t.status==='done'?i18n('任务已完成，当前展示最终工作记录。'):i18n('任务当前未在执行，以下为最近工作记录。')}</p>`:''}${t.control_message?`<p class="control-hint">${escape(t.control_message)}</p>`:''}`;
+ $('#progress-notice').innerHTML=automaticRecoveryHTML(t)+failureHTML(t)+`${!isLive?`<p class="detail-alert">${t.status==='paused'?i18n('任务已暂停，当前展示最近一轮记录。'):t.status==='done'?i18n('任务已完成，当前展示最终工作记录。'):i18n('任务当前未在执行，以下为最近工作记录。')}</p>`:''}${t.control_message?`<p class="control-hint">${escape(t.control_message)}</p>`:''}`;
  if(roles.reviewer?.wait_reason)$('#progress-notice').insertAdjacentHTML('beforeend',i18nHTML`<p class="control-hint"><strong>审核调度：</strong>${escape(roles.reviewer.wait_reason)}</p>`);
  stableHTML($('#progress-focus'),i18nHTML`${taskNarrativeHTML(t)}<div class="progress-focus-label">${isLive?i18n('当前工作'):i18n('最近工作')} · 第 ${t.activity?.round||t.health.rounds||0} 轮</div><h3>${escape(work)}</h3><div class="board-roles">${rolesHTML(t,roles)}</div>`);
  $('#progress-freshness').textContent=i18n('结论随任务进展自动更新');

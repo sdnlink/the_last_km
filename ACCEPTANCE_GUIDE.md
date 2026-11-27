@@ -23,6 +23,57 @@
 - 部署任务使用独立的远程预检、构建、打包、部署、运行验证流程，不要求源码函数或预先提供的本地检查命令。最终必须提交本次任务的部署证据文件与日志，由 Watcher 检查完整性、独立 Reviewer 审查实际结果；用户明确选择的补充检查仍必须通过。详见[控制台部署任务说明](console/README.md)。
 - 文档任务不使用逐函数派单，本地检查可选。分析类任务保留原输入，另存带引用的分析报告；独立 Reviewer 核对范围、引用和结论。分析发现缺陷不代表本次分析未完成，也不授权实现产品修复。已有固定检查继续执行；没有报告、没有依据或所选检查失败不能判为完成。文档结论不等于运行验收或合规认证。
 
+## 派单前置条件
+
+在任务的高级质量策略中，可用 `assignment_inputs` 为特定派单登记工作区内必须准备好的文件或目录。例如移动端派单 `APP-DEVICE` 依赖由获准执行器准备的设备记录：
+
+```json
+{
+  "assignment_inputs": {
+    "APP-DEVICE": [{
+      "path": ".auto-moniter/device-ready.json",
+      "environment": "android-35",
+      "executor": "android-ui",
+      "max_age_s": 300
+    }]
+  }
+}
+```
+
+普通文件或目录可直接写相对路径。结构化回执由获准环境执行方签名，包含 `candidate_tree`（当前工作区指纹）、`environment`、`executor`、`resource`、`workspace`（绝对路径）、`path`（策略中的相对路径）、`ready`（布尔值）和 `observed_at`（Unix 秒）。
+
+管理员在工作区外设置 `AUTO_MONITOR_READINESS_TRUST_DIRECTORY`，并在该目录内创建 `dispatch-readiness-executors.json`。文件以 `executors` 数组登记每个执行方的 `workspace`、`environment`、`executor`、`resource` 和 `public_key`（不含注释的 OpenSSH Ed25519 公钥）。控制台和独立启动的 Watcher 均从各自的服务环境读取该目录。
+
+执行方用 `auto_moniter.readiness_proof.signing_bytes(payload)` 序列化上述字段，以 `ssh-keygen -Y sign -f <执行方私钥> -n auto-moniter-readiness <序列化文件>` 生成签名。将完整的 SSH 签名文本写入回执 JSON 的 `signature` 字段。私钥由执行方保管。Watcher 在派单、候选验收和提交时核对签名、资源、候选和有效期。Worker 修改源码后，获准执行方须为新候选签发回执，控制台收到后从已保存的候选继续检查。已有结构化回执也须按签名格式重新签发。其他依赖已满足的派单可以先执行。应用的实际行为继续通过正式检查和回执验收。
+
+### 现场执行器
+
+控制台数据目录的 `field-executors.json` 可以登记已经创建并批准的执行任务。例如：
+
+```json
+{
+  "executors": [{
+    "task_id": "0123456789abcdef0123456789abcdef",
+    "workspace": "/path/to/main-project",
+    "kind": "observation",
+    "capability": "android-ui",
+    "resource": "android-device-1"
+  }]
+}
+```
+
+交接项填写对应 `capability` 时，Watcher 会匹配该项目的已登记任务，保存绑定当前候选的取证请求，再启动任务并收取正式验收后的回执。指向同一设备、模拟器或桌面会话的任务使用相同的 `resource`，调度时等待占用释放。每个执行任务绑定一份交接请求。执行失败后，Watcher 保留失败记录，确认原进程和资源已释放，再使用已登记且能力相同的备用任务。没有可用的备用任务时，将失败原因交给裁判处理。已配置的浏览器用例仍可通过 `case_id` 运行。
+
+交接项用 `depends_on` 引用同一交接中编号更小的待办，填 `[]` 表示可独立取证。历史浏览器待办省略这个字段时，沿用等待部署回执的规则。
+
+### 异常恢复
+
+开启裁判后，短暂的模型服务中断会保留裁判请求并按间隔重试。高级质量策略可设置 `recovery_reserve_calls`，从有限的模型调用配额中为裁判保留调用次数。若已配置不同的 Worker 执行器且其支持只读审核，可显式设置 `referee_transport_fallback: true`，允许裁判在主服务连接中断时使用已配置的备用执行器。裁判重排需要独立核对用户要求及受影响的验收条目。
+
+控制台会按间隔尝试启动因临时工作区占用或验收环境未就绪而排队的任务。最终验收后的会话清理可以从独立检查点续跑。候选、待办队列或用户要求发生变化时，需要重新校对交付条件。
+
+跨仓派单使用项目已登记的路径与工作区绑定，例如 `--assignment-workspace 'backend=/path/to/backend'`。相邻仓库有同名文件时，未绑定的目标仍按当前工作区的派单处理。
+
 ## Reviewer、Worker 和 Watcher 的验收职责
 
 Reviewer 负责需求到断言的映射，派单 `test_files` 仅列新增聚焦回归的准确相对路径，不提供可执行 Shell 文本。支持的入口会生成 `auto:N` 检查 ID，N 为 `test_files` 的一基索引；也可继续选择已有 `check:N`。已接受测试另有 `regression:N` 编号，可供 `test_files=[]` 的只读模块或最终验收任务选择，全程不必补写命令。Worker 负责补齐真实测试，提供修复前失败、修复后通过的证据，保留既有断言。Reviewer 再独立审查测试与真实调用链；Watcher 负责执行、拒绝空测试或全部跳过，并在模块和整份需求交付时重跑此前已接受的回归。恢复运行会从已接受任务中重建测试目录，无需重新让模型编写命令。

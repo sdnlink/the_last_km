@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import test_console_restart as fixtures
+from tests import test_console_restart as fixtures
 from auto_moniter.processes import process_identity
 from auto_moniter.supervisor import PreparedCommand, run_command
 

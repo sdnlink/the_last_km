@@ -117,9 +117,12 @@ class ContinuousLoopTests(unittest.TestCase):
             supervisor.run_dir.mkdir(parents=True)
             messages = []
             supervisor.log = messages.append
-            with patch.object(supervisor._stop_event, "wait") as wait, patch("auto_moniter.supervisor.time.monotonic", side_effect=[0, 0, 0, 60]):
+            with patch.object(supervisor._stop_event, "wait") as wait, \
+                 patch.object(supervisor, "_check_budget") as check_budget, \
+                 patch("auto_moniter.supervisor.time.monotonic", side_effect=[0, 0, 0, 60]):
                 supervisor._retry_pause(1000, "failure")
                 wait.assert_called_once_with(0.2)
+                check_budget.assert_called_once_with()
             self.assertIn("retrying in 60s", messages[0])
             started = threading.Event()
 

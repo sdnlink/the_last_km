@@ -175,7 +175,7 @@ else:
                     self.assertIn(["agent", "archive", "--json", reviewer_id], events)
                     final_worker = "33333333-3333-3333-3333-333333333333" if fail == "modules" else worker_id
                     self.assertEqual(events[-2:], [["agent", "stop", "--json", final_worker], ["agent", "archive", "--json", final_worker]])
-                    self.assertEqual(report.status, "failed" if fail in {"stop", "archive"} else "done")
+                    self.assertEqual(report.status, "recovery_failed" if fail in {"stop", "archive"} else "done")
                     if fail in {"stop", "archive"}:
                         self.assertIn("cleanup failed", report.summary)
                     if fail == "modules":

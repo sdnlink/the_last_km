@@ -11,6 +11,7 @@ from auto_moniter.directions import Directions
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_requirement_follow_up import BRIEF, FOLLOW, NEXT, CitingReviewer, _git
+from tests.test_review_first import approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider, _verdict
 
 
@@ -119,7 +120,7 @@ class RequirementFollowUpAmendmentsTests(unittest.TestCase):
         revised = {**BRIEF, 'refined_requirement': 'Handle empty and negative inputs.',
                    'acceptance_criteria': [*BRIEF['acceptance_criteria'], 'negative input is rejected']}
         worker = self.next_worker()
-        reviewer = CitingReviewer([self.brief(BRIEF), self.brief(revised)], self.root)
+        reviewer = CitingReviewer([self.brief(BRIEF), self.brief(revised), approve_requirement_coverage()], self.root)
         monitor = self.supervisor(worker, reviewer)
         original_beat = monitor._beat
         added = []
@@ -132,8 +133,8 @@ class RequirementFollowUpAmendmentsTests(unittest.TestCase):
         with patch.object(monitor, '_beat', side_effect=amend_at_dispatch), \
                 patch.object(monitor, '_invoke', wraps=monitor._invoke) as invoke:
             monitor.run()
-        self.assertEqual([call.kwargs['role'] for call in invoke.call_args_list[:3]],
-                         ['reviewer', 'reviewer', 'worker'])
+        self.assertEqual([call.kwargs['role'] for call in invoke.call_args_list[:4]],
+                         ['reviewer', 'reviewer', 'reviewer', 'worker'])
         self.assertIn(revised['refined_requirement'], worker.calls[0]['prompt'])
         self.assertNotIn(amendment, worker.calls[0]['prompt'])
         self.assertEqual(self.state()['requirements_review']['acceptance_criteria'], revised['acceptance_criteria'])

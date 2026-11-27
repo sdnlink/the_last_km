@@ -166,6 +166,9 @@ class Guardian:
                         self._write("recovery_failed", stopped.summary)
                         return stopped
                     self._write("restart_limit", f"Unexpected monitor exit {self._child.exitcode}")
+                    if self.config.referee:
+                        from auto_moniter import recovery_wait
+                        recovery_wait.schedule(self.run_dir, 'guardian_crash', 'resume')
                     return RunReport("restart_limit", 0, "Guardian restart limit reached; inspect the run before resuming.", "restart_limit")
                 self._restarts += 1
                 self._write("restarting", f"Unexpected monitor exit {self._child.exitcode}")

@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+from auto_moniter.redaction import redact
 from auto_moniter.storage import write_json
 
 
@@ -75,6 +76,24 @@ def log_hashes(run, results):
     return hashes
 
 
+def intact(receipt):
+    return (isinstance(receipt, dict) and receipt.get('version') == 1
+            and receipt.get('digest') == digest({key: value for key, value in receipt.items() if key != 'digest'}))
+
+
+def retained_results(receipt, run, context):
+    """Keep individual passing results whose original bytes can still be verified."""
+    if (not intact(receipt) or receipt.get('context') != context or not receipt.get('passed')
+            or not isinstance(receipt.get('checks'), list) or not isinstance(receipt.get('logs'), dict)):
+        return {}
+    return {
+        command: result for command, result in zip(context['commands'], receipt['checks'])
+        if isinstance(result, dict) and result.get('status') == 'passed' and result.get('command') == redact(command)
+        and (hashes := log_hashes(run, [result]))
+        and all(receipt['logs'].get(name) == value for name, value in hashes.items())
+    }
+
+
 def create(run, context, snapshot, passed):
     results = snapshot.get('checks', [])
     receipt = {'version': 1, 'context': context, 'checks': results,
@@ -115,9 +134,7 @@ def valid(receipt, run, context):
             or any(not isinstance(item,dict) or item.get('status') != 'passed' for item in receipt['checks'])
             or set(receipt['passed_commands']) != set(context['commands'])):
         return False
-    payload = {key: value for key, value in receipt.items() if key != 'digest'}
-    return (receipt.get('digest') == digest(payload) and isinstance(receipt.get('checks'), list)
-            and receipt.get('logs') is not None
+    return (intact(receipt) and receipt.get('logs') is not None
             and log_hashes(run, receipt['checks']) == receipt['logs'])
 
 

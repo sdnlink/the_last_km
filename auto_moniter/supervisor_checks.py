@@ -23,7 +23,7 @@ from auto_moniter.verification import outcome as check_outcome
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context
 from auto_moniter import check_environment
-from auto_moniter import deployment
+from auto_moniter import deployment, dispatch_inputs
 from auto_moniter.supervisor_models import (
     BudgetExceeded,
     RecoveryError,
@@ -635,34 +635,54 @@ class AcceptanceChecks:
         return list(dict.fromkeys([*(catalog[key] for key in task['check_ids']),
                                     *self._local_test_commands(task['test_files']), *fixed]))
 
-    def _missing_dispatch_inputs(self, task):
-        bindings = self.config.quality_policy.get('check_inputs', {})
-        if not bindings:
-            return []
-        try:
-            commands = self._assignment_check_commands(task)
-        except KeyError:
-            # The existing dispatch validator reports unknown check IDs.
-            return []
-        missing = []
-        root = self.config.cwd
-        for key, paths in bindings.items():
-            index = int(key.split(':')[1]) - 1
-            if self.config.checks[index] not in commands:
-                continue
-            for name in paths:
-                try:
-                    path = (root / name).resolve()
-                    available = path.is_relative_to(root) and path.exists()
-                except (OSError, RuntimeError):
-                    available = False
-                if not available:
-                    missing.append(f'{key} {name}')
-        return missing
+    def _dispatch_input_pairs(self, task):
+        policy = self.config.quality_policy
+        pairs = [(task['id'], name) for name in policy.get('assignment_inputs', {}).get(task['id'], [])]
+        bindings = policy.get('check_inputs', {})
+        if bindings:
+            try:
+                commands = self._assignment_check_commands(task)
+            except KeyError:
+                commands = []  # The dispatch validator reports unknown check IDs.
+            for key, paths in bindings.items():
+                index = int(key.split(':')[1]) - 1
+                if self.config.checks[index] in commands:
+                    pairs.extend((key, name) for name in paths)
+        return pairs
+
+    def _missing_dispatch_inputs(self, task, *, candidate_only=False):
+        pairs = [(key, entry) for key, entry in self._dispatch_input_pairs(task)
+                 if not candidate_only or isinstance(entry, dict)]
+        unavailable = dispatch_inputs.missing(self.config.cwd, [value for _, value in pairs], run=self.run_dir)
+        return [(key, name) for key, name in pairs if name in unavailable]
+
+    def _candidate_input_wait(self, task=None):
+        task = task or self.function_tasks.current
+        if self._function_gate and task:
+            missing = self._missing_dispatch_inputs(task, candidate_only=True)
+            if missing:
+                return self._wait_for_dispatch_inputs(task, missing)
+        return ''
+
+    def _wait_for_dispatch_inputs(self, task, missing):
+        labels = '、'.join(f'{key} {value["path"] if isinstance(value, dict) else value}' for key, value in missing)
+        summary = f'派单 {task["id"]} 的验收检查缺少工作区输入。{labels}。输入就绪后可继续执行。'
+        if any(isinstance(value, dict) for _, value in missing):
+            summary += '环境准备回执须由获准执行方签名，并与当前候选、资源和有效期相符。'
+        self._write_dispatch_input_wait(task, [value for _, value in self._dispatch_input_pairs(task)], summary)
+        return summary
+
+    def _write_dispatch_input_wait(self, task, inputs, summary='', *, delivery=False):
+        name = dispatch_inputs.DELIVERY_WAIT_FILE if delivery else dispatch_inputs.WAIT_FILE
+        write_json(self.run_dir / name, {
+            'binding': dispatch_inputs.binding(task, self.config.cwd, self.config.checks,
+                                               self.config.quality_policy, self._dispatch_directions),
+            'inputs': inputs, 'summary': summary,
+        }, durable=True)
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
-                         pre_review=False, reusable=None, prior_results=()) -> bool:
+                         pre_review=False, reusable=None, prior_results=(), retained=None, log_attempt=0) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
         if final and self.config.task_type == 'deployment':
             try:
@@ -756,6 +776,9 @@ class AcceptanceChecks:
                     verdict.gaps.extend(failures)
                     raise budget_stop
                 return False
+            if retained and command in retained:
+                check_results.append(retained[command])
+                continue
             if reusable and self._reuse_local_check(index, number, command, reusable.get(command), before, check_results):
                 self._progress_reset |= self.quality.check_result(command, True)
                 self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
@@ -790,7 +813,8 @@ class AcceptanceChecks:
                 self._forget_child(completed=completed)
                 if result is not None:
                     path = self._record_check_result(index, number, command, result, before, final, check_results, failures, verdict,
-                                                     source_alias=source_alias)
+                                                     **({'source_alias': source_alias} if source_alias is not None else {}),
+                                                     **({'log_attempt': log_attempt} if log_attempt else {}))
                     self._record_stage_elapsed('checks', check_elapsed)
             if result is None:
                 self._write_acceptance_snapshot(index, before, final, check_results, failures, True, False)
@@ -845,6 +869,11 @@ class AcceptanceChecks:
             verdict.status = 'continue'
             verdict.next_actions.append('Read the new human instructions before the next delivery attempt.')
             return False
+        if final and not pre_review:
+            context = {'round': index, 'tree': before, 'final': True, 'commands': commands}
+            if self.config.task_type == 'deployment':
+                context['deployment_evidence'] = deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)
+            self._final_check_receipt = candidate_checks.create(self.run_dir, context, {'checks': check_results}, True)
         return not self._stop
 
     def _checks_changed_published_source(self, before: str) -> bool:
@@ -861,8 +890,10 @@ class AcceptanceChecks:
         # unrelated staged path.
         return current != candidate
 
-    def _record_check_result(self, index, number, command, result, before, final, check_results, failures, verdict, *, source_alias=None):
-        path = self.run_dir / f"{index:03d}-check-{number:02d}.log"
+    def _record_check_result(self, index, number, command, result, before, final, check_results, failures, verdict, *,
+                             source_alias=None, log_attempt=0):
+        attempt = f'-attempt-{log_attempt:03d}' if log_attempt else ''
+        path = self.run_dir / f"{index:03d}-check-{number:02d}{attempt}.log"
         environment = f"FRONTEND_ROOT={source_alias}\ncwd={self.config.cwd}\n" if source_alias else ''
         path.write_text(
             f"$ {redact(command)}\nexit={result.exit_code} timed_out={result.timed_out} interruption={result.interruption or '-'}\n"

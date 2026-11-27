@@ -16,7 +16,9 @@ DEFAULTS = {'protect_tests': True, 'verified_progress': True, 'no_progress_limit
 
 
 def policy(value):
-    if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {'integration_scopes', 'check_inputs', 'operator_preflights'}):
+    if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {
+            'integration_scopes', 'check_inputs', 'assignment_inputs', 'operator_preflights',
+            'recovery_reserve_calls', 'referee_transport_fallback'}):
         raise ValueError('Unknown or invalid quality policy field')
     result = {**DEFAULTS, **value}
     if len(json.dumps(result, ensure_ascii=False).encode()) > 128 * 1024:
@@ -27,6 +29,11 @@ def policy(value):
     for key in ('no_progress_limit', 'review_interval_s', 'review_changed_files', 'blocked_review_limit', 'max_tokens', 'network_retry_s'):
         if type(result[key]) is not int or not 0 <= result[key] <= 10**12:
             raise ValueError(key + ' must be a nonnegative integer')
+    reserve = result.get('recovery_reserve_calls', 0)
+    if type(reserve) is not int or not 0 <= reserve <= 100:
+        raise ValueError('裁判预留调用次数须在 0 至 100 之间。')
+    if type(result.get('referee_transport_fallback', False)) is not bool:
+        raise ValueError('裁判备用执行器设置须为布尔值。')
     cost = result['max_cost_usd']
     if type(cost) not in (int, float) or not 0 <= cost <= 10**9:
         raise ValueError('max_cost_usd must be finite and nonnegative')
@@ -66,6 +73,22 @@ def policy(value):
                 relative_path(path)
                 if len(path) > 2000 or not Path(path).parts:
                     raise ValueError('检查输入须指向工作区内的具体路径。')
+    if 'assignment_inputs' in result:
+        from auto_moniter.function_tasks import identifier
+        inputs = result['assignment_inputs']
+        if not isinstance(inputs, dict) or len(inputs) > 100 or not all(identifier(key) for key in inputs):
+            raise ValueError('派单输入须按有效的派单编号配置。')
+        for paths in inputs.values():
+            if not isinstance(paths, list) or not 1 <= len(paths) <= 30:
+                raise ValueError('每项派单输入须列出 1 至 30 个工作区内的路径。')
+            for path in paths:
+                if isinstance(path, dict):
+                    from auto_moniter.dispatch_inputs import validate_readiness
+                    validate_readiness(path)
+                    continue
+                relative_path(path)
+                if len(path) > 2000 or not Path(path).parts:
+                    raise ValueError('派单输入须指向工作区内的具体路径。')
     if 'operator_preflights' in result:
         from auto_moniter.function_tasks import identifier
         names = result['operator_preflights']

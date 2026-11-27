@@ -336,7 +336,9 @@ class RunCheckpoint:
             self.config.referee_model = saved_referee['model']
         decision = saved_referee['decision']
         if decision is not None:
-            if (not isinstance(decision, dict) or set(decision) != set(referee.SCHEMA['required']) | {'id','cycle','incident','task_id'}
+            if (not isinstance(decision, dict)
+                    or set(decision) - {'decision_key'} != set(referee.SCHEMA['required']) | {'id','cycle','incident','task_id'}
+                    or ('decision_key' in decision and not re.fullmatch(r'[a-f0-9]{64}', str(decision['decision_key'])))
                     or type(decision['id']) is not int or decision['id'] < 1
                     or type(decision['cycle']) is not int or decision['cycle'] < 1):
                 raise ValueError('Invalid saved referee decision')
@@ -488,14 +490,8 @@ class RunCheckpoint:
                 seconds = stage_elapsed.get(stage)
                 if type(seconds) in (int, float) and 0 <= seconds <= 1e15:
                     self._stage_elapsed[stage] = float(seconds)
-        self._elapsed_before = float(usage.get("elapsed_s") or 0)
-        try:
-            heartbeat = json.loads(self._heartbeat.read_text(encoding="utf-8"))
-            last_tick = datetime.fromisoformat(heartbeat["at"])
-            recorded = datetime.fromisoformat(usage["recorded_at"])
-            self._elapsed_before += max(0, (last_tick - recorded).total_seconds())
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
+        from auto_moniter.run_timing import restore
+        self._elapsed_before = restore(usage, self._heartbeat)
         self._agent_calls = int(usage.get("agent_calls") or 0)
         for name in ("memory_bytes", "file_bytes", "max_run_bytes", "max_history_bytes", "max_agent_state_bytes"):
             if not getattr(self.config, name):

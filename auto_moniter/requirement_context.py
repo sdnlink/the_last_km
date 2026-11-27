@@ -9,6 +9,7 @@ from pathlib import Path
 
 from auto_moniter import requirements_review
 from auto_moniter.redaction import safe
+from auto_moniter.run_storage import open_log
 from auto_moniter.storage import write_json
 from auto_moniter.workspace import snapshot_fingerprint
 
@@ -157,7 +158,12 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
                 or not re.fullmatch(r'\d+-reviewer(?:-repair-\d+)?-text\.md',name)):
             return None
         try:
-            response = parsed_response(read(run/name, 1024*1024))
+            with open_log(run / name) as (stream, _, _):
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                return None
+            response = parsed_response(json.loads(data.decode('utf-8')))
+            json.dumps(response, ensure_ascii=False).encode('utf-8')
         except (OSError,ValueError,TypeError,RecursionError):
             return None
         context = {'previous_response':response, 'workspace_changed':True,

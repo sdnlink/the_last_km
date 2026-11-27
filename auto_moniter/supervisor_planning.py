@@ -277,6 +277,8 @@ class RequirementPlanning:
         preflight_repair = self._dispatch_preflight_repair()
         if next_function and self._independent_verification(assignment, backlog):
             dispatch.current = None
+        elif next_function and self._amended_verification_replacement(assignment, backlog):
+            dispatch.current = None
         elif self._referee_replan and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if self._assignment_worker_started(dispatch.current) and revised['id'] == dispatch.current['id']:
@@ -339,6 +341,37 @@ class RequirementPlanning:
             if problems:
                 raise ValueError(problems[0])
         return staged, dispatch, complete
+
+    def _can_revise_waiting_verification(self):
+        current = self.function_tasks.current
+        return bool(self._verification_only() and current
+                    and self._unplanned_directions()
+                    and any(row.role == 'reviewer' and row.verdict.task_id == current['id']
+                            and row.watcher_result.get('status') == 'blocked' for row in self._records))
+
+    def _amended_verification_replacement(self, assignment, backlog=None):
+        if not self._can_revise_waiting_verification() or not isinstance(assignment, dict):
+            return False
+        current = self.function_tasks.current
+        revised = function_tasks.validate(assignment)
+        inputs = self.config.quality_policy.get('assignment_inputs', {})
+        if revised.get('kind') != 'verification' or revised['id'] == current['id']:
+            return False
+        # The environment amendment may move a read-only task ahead of a
+        # retained external delivery, including a module-level checkpoint.
+        if isinstance(backlog, list) and current in backlog:
+            original = next((task for task in (self.function_plan or {}).get('tasks', [])
+                             if task['id'] == revised['id']), None)
+            return bool(revised['delivery_scope'] != 'requirement'
+                        and (original is None or (
+                            set(original['check_ids']) <= set(revised['check_ids'])
+                            and set(original['criterion_ids']) <= set(revised['criterion_ids']))))
+        # A new ID forces a fresh worker/check/review cycle. Original check and
+        # criterion references remain enforceable under the amended environment.
+        return (all(revised[key] == current[key] for key in ('module_id', 'delivery_scope'))
+                and all(item in inputs.get(revised['id'], []) for item in inputs.get(current['id'], []))
+                and set(current['check_ids']) <= set(revised['check_ids'])
+                and set(current['criterion_ids']) <= set(revised['criterion_ids']))
 
     def _independent_verification(self, assignment, backlog, *, tree=None):
         """Allow a plan to propose a previously listed read-only task while field work waits."""
@@ -693,6 +726,10 @@ class RequirementPlanning:
                         return turn
                     sources = self._coverage_sources(directions)
                     modules = staged_plan[0].export() if staged_plan else self.modules.export()
+                    revised_environment = (self._can_revise_waiting_verification()
+                                           and assignment != self.function_tasks.current)
+                    coverage_required |= (revised_environment or self._referee_replan
+                                          or next_function and self._unplanned_directions(directions))
                     coverage_required |= self._independent_verification(assignment, plan.get('function_plan'))
                     coverage_required |= requirement_coverage.requires_review(
                         sources, modules, self.config.assignment_workspaces)
@@ -715,7 +752,7 @@ class RequirementPlanning:
                         review, receipt = outcome
                         if review['status'] == 'revise':
                             task = reviewed_plan.get('next_task')
-                            if (self._function_gate and self.config.full_function_plan
+                            if (not revised_environment and self._function_gate and self.config.full_function_plan
                                     and requirement_coverage.independent_dispatch(
                                         review, reviewed_plan, self.function_tasks.accepted)
                                     and not self._assignment_repository_conflict(task)
@@ -867,6 +904,13 @@ class RequirementPlanning:
                                        'Use its accepted receipt for any matching handoff. Replan only unfinished successors '
                                        'and preserve distinct outstanding checks and original acceptance criteria.')
                     elif self.function_tasks.current:
+                        if self._can_revise_waiting_verification():
+                            prompt += ('\n若最新用户原文明确替换验收环境或执行方式，允许为当前受阻的只读派单创建新编号。'
+                                       '按授权调整验证目标，保留所属模块、交付层级、固定检查和验收条目。'
+                                       '也可先安排另一个只读派单，并在队列中原样保留当前外部待办。'
+                                       '将仍适用的外部要求安排在相应后续派单中，只让实际依赖它的任务等待。'
+                                       '分别核对执行环境、候选版本、获准执行方和可观察结果。'
+                                       '独立覆盖复核必须用用户原文核对变更依据，旧回执继续保留。\n')
                         if self._dispatch_preflight_repair():
                             prompt += ('\nWatcher rejected the unstarted assignment at dispatch. Correct the exact validation error. '
                                        'You may repair the target before the worker starts. Keep the assignment ID, module, '

@@ -473,32 +473,12 @@ class FunctionDispatch:
         root = self.config.cwd
         from auto_moniter.project_workspace import assignment_workspaces
         bindings = assignment_workspaces(self.config.assignment_workspaces or [])
-        explicitly_local = set()
         for file in function_tasks.writable_files(task):
             path = Path(file)
             match = next((workspace for prefix, workspace in bindings if path.is_relative_to(prefix)), None)
             if match is not None and match != root:
                 return self._assignment_repository_message(task, file, match)
-            if match == root:
-                explicitly_local.add(file)
-        missing = [file for file, _ in function_tasks.targets(task)
-                   if file not in explicitly_local and not (root / file).is_file()]
-        if not missing:
-            return ''
-        # A missing file alone is valid for implementation. Only flag a
-        # positive match in a neighboring Git worktree; never execute there.
-        try:
-            from itertools import islice
-            siblings = list(islice(root.parent.iterdir(), 128))
-            for sibling in siblings:
-                if sibling == root or sibling.is_symlink() or not (sibling / '.git').exists():
-                    continue
-                for file in missing:
-                    target = sibling / file
-                    if target.is_file() and target.resolve().is_relative_to(sibling):
-                        return self._assignment_repository_message(task, file, sibling)
-        except OSError:
-            pass
+        # The same relative path in an unrelated checkout does not establish ownership.
         return ''
 
     def _assignment_repository_message(self, task, file, workspace):
@@ -644,7 +624,7 @@ class FunctionDispatch:
         handoff = field_handoff.activate(self.run_dir, binding)
         if not handoff:
             return None, None
-        if not (field_handoff.ready(handoff) or handoff.get('fallback', {}).get('revision') == handoff['revision']):
+        if not (field_handoff.ready(handoff) or field_handoff.pending_fallback(handoff)):
             if not self._recover_check_archive(records, worker, review.verdict):
                 return None, review
         if isinstance(self.git_history, ApprovedHistory) and self.git_history.candidate.get('round') != worker.index:
@@ -663,7 +643,7 @@ class FunctionDispatch:
         tree = snapshot_fingerprint(self.config.cwd, snapshot)
         waiting_ids = set()
         if field_waiting:
-            if not self._verification_only() or blocked['delivery_scope'] != 'function':
+            if not self._verification_only() or blocked['delivery_scope'] == 'requirement':
                 return False
             waiting_ids = {row.verdict.task_id for row in records
                            if row.role == 'reviewer' and row.tree == tree
@@ -818,6 +798,10 @@ class FunctionDispatch:
 
     def _finish_function_acceptance(self, record, records, reasons):
         """A watcher rejection is not a new implementation assignment."""
+        from auto_moniter import dispatch_inputs
+        if self.directions.read(dispatch_inputs.WAIT_FILE).get('summary') == self._stop_reason and self._stop_reason:
+            record.watcher_result.update(status='blocked', reasons=[self._stop_reason], function_gate='checks')
+            return self._finish('action_required', self._stop_reason, records, record.verdict)
         reasons = list(dict.fromkeys(reasons or ['Function acceptance did not complete']))
         worker = next((item for item in reversed(records) if item.role == 'worker'), None)
         if self._consult_referee('candidate_checks', '; '.join(reasons), records, candidate=worker):

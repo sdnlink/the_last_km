@@ -31,16 +31,37 @@ REQUEST_SCHEMA = {'type': 'array', 'maxItems': 12, 'items': {
 REQUEST_SCHEMA['items']['properties']['case_id'] = {'type': 'string'}
 REQUEST_SCHEMA['items']['required'].append('case_id')
 REQUEST_SCHEMA['items']['properties']['kind']['enum'] = list(FIELDS)
+REQUEST_SCHEMA['items']['properties']['depends_on'] = {
+    'type': 'array', 'maxItems': 11, 'items': {'type': 'string'},
+    'description': 'Numbered earlier handoff items required by this item. Use [] for independent work.',
+}
+REQUEST_SCHEMA['items']['properties']['capability'] = {
+    'type': 'string', 'description': 'Exact operator-registered executor capability, or empty.',
+}
+REQUEST_SCHEMA['items']['required'].extend(['depends_on', 'capability'])
+
+
+def valid_dependencies(values, index):
+    return (isinstance(values, list) and len(values) < index
+            and all(isinstance(value, str) and value in {str(n) for n in range(1, index)} for value in values)
+            and len(set(values)) == len(values))
+
+
+def valid_capability(value):
+    return isinstance(value, str) and bool(re.fullmatch(r'[a-z][a-z0-9-]{0,63}', value))
 
 
 def requests_valid(requests):
     return (isinstance(requests, list) and len(requests) <= 12
-            and all(isinstance(row, dict) and REQUEST_FIELDS <= row.keys() <= REQUEST_FIELDS | {'case_id'}
+            and all(isinstance(row, dict) and REQUEST_FIELDS <= row.keys() <= REQUEST_FIELDS | {'case_id', 'depends_on', 'capability'}
                     and all(isinstance(v, str) and 0 < len(v.strip()) <= 300 and '\0' not in v
-                            for k, v in row.items() if k != 'case_id')
+                            for k, v in row.items() if k in REQUEST_FIELDS)
                     and isinstance(row.get('case_id', ''), str)
                     and _valid_case(row['kind'], row.get('case_id', ''))
-                    and row['kind'] in FIELDS for row in requests))
+                    and row['kind'] in FIELDS
+                    and ('depends_on' not in row or valid_dependencies(row['depends_on'], index))
+                    and (row.get('capability', '') == '' or valid_capability(row['capability']))
+                    for index, row in enumerate(requests, 1)))
 
 
 def _valid_case(kind, case_id):
@@ -73,6 +94,22 @@ def binding(state):
 def read(run):
     path = run / FILE
     return Directions(run).read(FILE, 256 * 1024) if path.exists() or path.is_symlink() else {}
+
+
+def pending_fallback(value):
+    fallback = value.get('fallback') or {}
+    return fallback if (fallback.get('key') and fallback.get('revision') == value.get('revision')
+                        and fallback.get('status') != 'handled') else {}
+
+
+def finish_fallback(run, fallback):
+    value = read(run)
+    active = pending_fallback(value)
+    if not active or (active['key'], active['revision']) != (fallback['key'], fallback['revision']):
+        return
+    value['fallback'] = {**active, 'status': 'handled'}
+    value['fallback_history'] = list(dict.fromkeys([*value.get('fallback_history', []), active['key']]))
+    write_json(run / FILE, value, durable=True)
 
 
 def activate(run, checkpoint):
@@ -195,7 +232,7 @@ def prepare_executor(run, parent_id, value, item):
         'parent_task': parent_id, 'binding': value['binding'], 'revision': value['revision'],
         'item': {key: item[key] for key in (
             'id', 'kind', 'title', 'evidence_needed', 'url', 'expected_target',
-            'expected_version', 'expected_manifest_sha256', 'artifact_manifest', 'browser_proof'
+            'expected_version', 'expected_manifest_sha256', 'artifact_manifest', 'browser_proof', 'capability', 'executor_resource'
         ) if key in item},
     }
     existing = Directions(run).read(EXECUTOR_REQUEST)
@@ -246,7 +283,8 @@ def reopen(run, value, blockers, requests=()):
             # Carry the operator's registration only for an unchanged observation.
             registered = [item for item in value['items']
                           if item.get('allow_manual') and not item.get('executor_task')
-                          and all(item.get(key) == row.get(key) for key in REQUEST_FIELDS)]
+                          and all(item.get(key) == row.get(key)
+                                  for key in REQUEST_FIELDS | {'depends_on', 'capability'})]
             if len(registered) == 1:
                 item = registered[0]
                 row.update({key: item[key] for key in ('allow_manual', 'url', 'expected_version', 'browser_proof')
@@ -295,6 +333,14 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
                'owner': _text(item.get('owner'), 200)}
         if 'evidence_needed' in item:
             row['evidence_needed'] = _text(item['evidence_needed'], 300)
+        if 'depends_on' in item:
+            if not valid_dependencies(item['depends_on'], index):
+                raise ValueError('交接依赖须引用编号更小的待办，且不得重复。')
+            row['depends_on'] = list(item['depends_on'])
+        if item.get('capability', '') != '':
+            if not valid_capability(item['capability']):
+                raise ValueError('执行能力编号无效。')
+            row['capability'] = item['capability']
         for key in ('url', 'expected_version', 'expected_manifest_sha256', 'expected_target', 'executor_task', 'case_id',
                     'artifact_manifest'):
             if key in item and not (key == 'case_id' and item[key] == ''):
@@ -385,10 +431,21 @@ def release(run, state, data):
     return public(value)
 
 
-def _require_dependencies(value, item):
+def dependency_error(value, item):
+    if 'depends_on' in item:
+        received = {row['id'] for row in value['items'] if row.get('receipt')}
+        missing = [ident for ident in item['depends_on'] if ident not in received]
+        return '等待同一候选的前置回执：' + '、'.join(missing) if missing else ''
     if item['kind'] == 'browser' and any(
             row['kind'] == 'deployment' and not row.get('receipt') for row in value['items']):
-        raise ValueError('请先提交同一候选的部署回执，再进行浏览器取证。')
+        return '等待同一候选的部署回执。'
+    return ''
+
+
+def _require_dependencies(value, item):
+    error = dependency_error(value, item)
+    if error:
+        raise ValueError(error if 'depends_on' in item else '请先提交同一候选的部署回执，再进行浏览器取证。')
 
 
 def _check_claim(item, data):

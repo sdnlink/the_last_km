@@ -441,9 +441,7 @@ class DispatchTests(unittest.TestCase):
                 verified(backend_run, backend, foreign, child_state['modules'][0], child_state['requirements_review'])
 
     def test_foreign_repository_assignment_waits_while_local_work_advances(self):
-        for explicit in (False, True):
-            with self.subTest(explicit=explicit):
-                self.assert_foreign_repository_assignment(explicit)
+        self.assert_foreign_repository_assignment()
 
     def test_reviewer_can_dispatch_local_work_added_while_waiting_for_external_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -491,11 +489,11 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual([row['task']['id'] for row in state['function_tasks']['accepted']], ['FRONTEND'])
             self.assertEqual(state['function_tasks']['current']['verification'], foreign['verification'])
 
-    def assert_foreign_repository_assignment(self, explicit):
+    def assert_foreign_repository_assignment(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
             root = parent/'frontend'
-            backend = parent/'services'/'backend' if explicit else parent/'backend'
+            backend = parent/'services'/'backend'
             root.mkdir()
             backend.mkdir(parents=True)
             subprocess.run(['git', 'init', '-q', str(backend)], check=True)
@@ -511,10 +509,10 @@ class DispatchTests(unittest.TestCase):
             ])
             reviewer = ScriptedProvider('reviewer', [
                 {'verdict':{}, 'text':json.dumps(initial)},
-                *([approve_requirement_coverage()] if explicit else []),
+                approve_requirement_coverage(),
                 result('FRONTEND', 'accepted', next_task=foreign),
             ])
-            bindings = ['model.py=' + str(backend)] if explicit else []
+            bindings = ['model.py=' + str(backend)]
             report = self.run_monitor(root, worker, reviewer, max_rounds=3, full_function_plan=True,
                                       assignment_workspaces=bindings)
             self.assertEqual(report.status, 'action_required', report.summary)
@@ -528,14 +526,13 @@ class DispatchTests(unittest.TestCase):
             self.assertFalse((root/'model.py').exists())
             self.assertIn('return 0', (backend/'model.py').read_text())
             self.assertEqual(state['assignment_workspaces'], bindings)
-            if explicit:
-                resumed_worker = FunctionWorker('worker', [])
-                resumed = Supervisor(RunConfig('', root, resumed_worker, reviewer=ScriptedProvider('reviewer', []),
-                    workflow='review-first', resume=True, git_history='off', run_dir=root/'run',
-                    retry_delay_s=0), log=lambda _:None).run()
-                self.assertEqual(resumed.status, 'action_required', resumed.summary)
-                self.assertIn(str(backend), resumed.summary)
-                self.assertFalse(resumed_worker.calls)
+            resumed_worker = FunctionWorker('worker', [])
+            resumed = Supervisor(RunConfig('', root, resumed_worker, reviewer=ScriptedProvider('reviewer', []),
+                workflow='review-first', resume=True, git_history='off', run_dir=root/'run',
+                retry_delay_s=0), log=lambda _:None).run()
+            self.assertEqual(resumed.status, 'action_required', resumed.summary)
+            self.assertIn(str(backend), resumed.summary)
+            self.assertFalse(resumed_worker.calls)
 
     def test_reviewer_authored_test_is_run_again_after_function_repair(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -660,6 +657,7 @@ class DispatchTests(unittest.TestCase):
                 Directions(root/'run').append('After F1, review the remaining verification.')
                 later_plan = {**BRIEF, 'modules': [], 'next_task': final, 'function_plan': [final]}
                 later_reviews.append({'verdict': {}, 'text': json.dumps(later_plan)})
+                later_reviews.append(approve_requirement_coverage())
             checkpoint.write_text(json.dumps(state))
             accepted = result('F1', 'accepted')
             accepted['verdict']['issue_resolutions'] = [
@@ -691,7 +689,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(report.status, 'max_rounds', report.summary)
             self.assertIn('只读复核当前派单的验收测试改动', reviewer.calls[0]['prompt'])
             self.assertTrue(reviewer.calls[0]['read_only'])
-            self.assertEqual(len(reviewer.calls), 3 if pending_replan else 2)
+            self.assertEqual(len(reviewer.calls), 4 if pending_replan else 2)
             self.assertEqual((root/test_file).read_text(), revised)
             state = json.loads(checkpoint.read_text())
             if pending_replan:

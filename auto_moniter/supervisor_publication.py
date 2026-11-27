@@ -5,17 +5,187 @@ from __future__ import annotations
 import json
 from auto_moniter.workspace import file_snapshot, snapshot_fingerprint, workspace_fingerprint
 from auto_moniter.storage import write_json
-from auto_moniter import function_gate
+from auto_moniter import candidate_checks, deployment, function_gate
 from auto_moniter.git_history import GitHistoryError
 from auto_moniter.publication import StagedChangesConflict
 from auto_moniter.business_recovery import BusinessHeadChanged
 from auto_moniter.project_workspace import ProjectInputsChanged
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter.supervisor_models import BudgetExceeded, RecoveryError, RunReport
+from auto_moniter.directions import Directions
+from auto_moniter import recovery_wait
 
 
 class Publication:
     """Business branch synchronization and approved publication."""
+
+    def _prepare_lifecycle_recovery(self, status, summary):
+        if self._stop_requested:
+            return
+        condition = ''
+        if status == 'recovery_failed' and (self.run_dir / 'delivery-cleanup.json').is_file():
+            condition = 'delivery_cleanup'
+        elif status == 'recovery_failed' and 'Referee recovery cannot close previous agents:' in summary:
+            condition = 'referee_cleanup'
+        elif status == 'action_required' and getattr(self, '_delivery_readiness_missing', False):
+            condition = 'delivery_readiness'
+        elif status == 'action_required' and summary.startswith('派单 '):
+            from auto_moniter.dispatch_inputs import WAIT_FILE
+            if self.directions.read(WAIT_FILE).get('summary') == summary:
+                condition = 'dispatch_inputs'
+        elif (status == 'action_required' and self._stop_reason.startswith('Acceptance environment unavailable;')
+              and ((self.run_dir / 'delivery-cleanup.json').is_file() or not self.config.no_review)):
+            snapshot = self.directions.read('acceptance-results.json', 4 * 1024 * 1024)
+            outcomes = [item['status'] for item in snapshot.get('checks', [])]
+            if outcomes and outcomes[-1] == 'environment_unavailable' and set(outcomes) <= {'passed', 'environment_unavailable'}:
+                condition = 'check_environment'
+        elif status == 'action_required' and (
+                self.requirements_review.get('failure_kind') == 'model_transport'
+                or self._stop_reason.startswith('裁判模型服务暂不可用')
+                or summary.startswith('Continuous model connection failures exceeded')):
+            condition = 'model_transport'
+        if condition:
+            recovery_wait.schedule(self.run_dir, condition, 'resume', detail=summary, terminal_status=status)
+
+    def _schedule_lifecycle_recovery(self, status, summary):
+        recovery_wait.seal(self.run_dir, status, summary)
+
+    def _adopt_lifecycle_recovery(self):
+        recovery_wait.adopted(self.run_dir)
+
+    def _delivery_cleanup_binding(self, tree):
+        return {
+            'tree': tree,
+            'requirement': self.directions.revision(self.config.requirement)['sha256'],
+            'checks': self.config.checks,
+            'check_source_aliases': self.config.check_source_aliases or [],
+            'check_timeout_s': self.config.check_timeout_s,
+            'quality_policy': self.config.quality_policy,
+            'queue': self.requirement_queue.snapshot(self._requirement_queue_state()),
+            'git': getattr(self.git_history, 'business_head', {}),
+        }
+
+    def _save_delivery_cleanup(self, summary, records):
+        from auto_moniter.redaction import redact
+
+        receipt = self._delivery_receipt(records)
+        write_json(self.run_dir / 'delivery-cleanup.json', {
+            'summary': redact(summary), 'binding': self._delivery_cleanup_binding(self._delivery_tree),
+            'receipt': receipt, 'artifacts': recovery_wait.delivery_artifacts(self.run_dir),
+            'recovery_inputs': recovery_wait.inputs(self.run_dir),
+        }, durable=True)
+        self._write_state(records, 'running', 0, '', self._delivery_tree)
+        if not self._valid_delivery_receipt(receipt, self._delivery_tree):
+            raise RecoveryError('最终候选的正式验收回执发生变化，需要恢复后复验。')
+
+    def _delivery_receipt(self, records):
+        receipt = getattr(self, '_final_check_receipt', None)
+        if receipt and receipt['context']['tree'] == self._delivery_tree:
+            return receipt
+        for record in reversed(records):
+            receipt = record.watcher_result.get('candidate_checks')
+            if record.role == 'worker' and record.tree == self._delivery_tree and receipt:
+                if receipt.get('context', {}).get('final'):
+                    return receipt
+        return None
+
+    def _valid_delivery_receipt(self, receipt, tree):
+        context = receipt.get('context') if isinstance(receipt, dict) else None
+        if not (isinstance(context, dict) and context.get('final') and context.get('tree') == tree
+                and candidate_checks.valid(receipt, self.run_dir, context) and receipt['passed']
+                and set(self.config.checks).issubset(context['commands'])):
+            return False
+        if self.config.task_type != 'deployment':
+            return True
+        expected = context.get('deployment_evidence')
+        return bool(expected and 'error' not in expected and expected == deployment.fingerprint(
+            self.config.cwd, self.run_dir, self.config.requirement))
+
+    def _revalidate_saved_delivery(self, marker, records, tree):
+        import copy
+
+        receipt = marker.get('receipt')
+        saved = self._delivery_receipt(records)
+        reference = next((proof for proof in (saved, receipt)
+                          if candidate_checks.intact(proof) and isinstance(proof.get('context'), dict)), {})
+        context = reference.get('context') or {}
+        if self.config.task_type == 'deployment' and context.get('deployment_evidence') != deployment.fingerprint(
+                self.config.cwd, self.run_dir, self.config.requirement):
+            return ['部署证据已变化，需要独立审查确认新的部署结果。']
+        conclusion = next((r for r in reversed(records) if r.tree == tree and r.verdict.scope == 'requirement'
+                           and r.verdict.status == 'done' and not (r.failure or r.interruption)), None)
+        if not conclusion:
+            return ['缺少绑定最终候选的审查结论。']
+        original_commands = context.get('commands')
+        if (context.get('final') and context.get('tree') == tree and context.get('round') == conclusion.index
+                and isinstance(original_commands, list) and set(self.config.checks).issubset(original_commands)):
+            commands = original_commands
+            retained = candidate_checks.retained_results(reference, self.run_dir, context)
+        else:
+            commands = self._acceptance_commands(True, conclusion.verdict.module_ids)
+            retained = {}
+        verdict = copy.deepcopy(conclusion.verdict)
+        old_gaps = len(verdict.gaps)
+        index = conclusion.index
+        attempt = max((int(path.stem.rsplit('-', 1)[1])
+                       for path in self.run_dir.glob(f'{index:03d}-check-*-attempt-*.log')
+                       if path.stem.rsplit('-', 1)[1].isdigit()), default=0) + 1
+        if self._delivery_checks(index, verdict, expected_tree=tree, function_commands=commands,
+                                 retained=retained, log_attempt=attempt):
+            return []
+        return verdict.gaps[old_gaps:] or ['最终候选的验收复验未完成。']
+
+    def _resume_delivery_cleanup(self, records):
+        marker = Directions(self.run_dir).read('delivery-cleanup.json', 32 * 1024 * 1024)
+        if not marker or self._stop_requested:
+            return None
+        self._process_control()
+        if self._stop_requested:
+            return self._finish('stopped', self._stop_reason, records, None)
+        tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        binding = self._delivery_cleanup_binding(tree)
+        if 'receipt' not in marker:
+            binding = {key: binding[key] for key in ('tree', 'requirement', 'checks', 'queue', 'git')}
+        if marker.get('binding') != binding:
+            (self.run_dir / 'delivery-cleanup.json').unlink(missing_ok=True)
+            return None
+        self._delivery_tree = tree
+        if (not self._valid_delivery_receipt(marker.get('receipt'), tree)
+                or marker.get('artifacts') != recovery_wait.delivery_artifacts(self.run_dir)):
+            self._event('delivery_evidence_recheck', tree=tree)
+            context = (marker.get('receipt') or {}).get('context') or {}
+            if task := context.get('task'):
+                missing = self._missing_dispatch_inputs(task, candidate_only=True)
+                if missing:
+                    self._delivery_readiness_missing = True
+                    self._write_dispatch_input_wait(task, [value for _, value in missing], delivery=True)
+                    labels = '、'.join(value['path'] for _, value in missing)
+                    return self._finish('action_required', '最终候选的环境准备回执尚未就绪。' + labels, records, None)
+            problems = self._revalidate_saved_delivery(marker, records, tree)
+            if problems:
+                return self._finish('stopped' if self._stop_requested else 'action_required',
+                                    '最终候选需要通过正式复验。' + '；'.join(problems), records, None)
+        else:
+            self._final_check_receipt = marker['receipt']
+        self._event('delivery_cleanup_resumed', tree=tree)
+        self._closing_saved_delivery = True
+        try:
+            return self._finish('done', marker['summary'], records, None)
+        finally:
+            self._closing_saved_delivery = False
+
+    def _verify_delivery_cleanup(self):
+        if self._business_head_changed():
+            raise BusinessHeadChanged('Business HEAD changed while closing the accepted delivery')
+        marker = self.directions.read('delivery-cleanup.json', 32 * 1024 * 1024)
+        if (not self._valid_delivery_receipt(marker.get('receipt'), self._delivery_tree)
+                or marker.get('artifacts') != recovery_wait.delivery_artifacts(self.run_dir)):
+            raise RecoveryError('收尾期间正式验收证据发生变化，需要恢复后复验。')
+
+    def _final_delivery_proof(self):
+        marker = self.directions.read('delivery-cleanup.json', 32 * 1024 * 1024)
+        receipt = marker.get('receipt') or {}
+        return {key: receipt[key] for key in ('digest', 'checks', 'logs') if key in receipt}
 
     def _business_head_changed(self):
         return (isinstance(self.git_history, ApprovedHistory)
@@ -55,6 +225,7 @@ class Publication:
         reopened = self.audit.invalidate(identity)
         self.quality.state['checks'] = {}
         self._delivery_tree = ''
+        self._final_check_receipt = None
         self.worker_session_id = self.reviewer_session_id = self._active_reviewer_id = ''
         self._drop_worker_session = True
         self._impact_snapshot = current
@@ -118,6 +289,8 @@ class Publication:
             raise ProjectInputsChanged('Final project inputs need fresh review')
 
     def _commit_approved(self,worker,reviewer,worker_text,review_text,tree):
+        if not self._publication_check_inputs(reviewer):
+            return False
         problem = self._external_delivery_problem()
         if problem:
             reviewer.verdict.gaps.append(problem)
@@ -144,6 +317,14 @@ class Publication:
             return True
         with self.directions.lock():
             return self._commit_approved_locked(worker,reviewer,worker_text,review_text,tree)
+
+    def _publication_check_inputs(self, reviewer):
+        problem = self._candidate_input_wait()
+        if not problem:
+            return True
+        reviewer.verdict.gaps.append(problem)
+        self._stop_reason = problem
+        return False
 
     def _publication_boundary(self, reviewer) -> bool:
         """Refuse a new local publication once stop or the cumulative budget is known.
@@ -230,7 +411,8 @@ class Publication:
             try:
                 worker.git_checkpoint, reviewer.git_checkpoint = publish(
                     self.git_history, worker.index, payload(worker), payload(reviewer), worker_text, review_text,
-                    boundary=lambda: self._publication_boundary(reviewer), receipt=receipt)
+                    boundary=lambda: (self._publication_boundary(reviewer)
+                                      and self._publication_check_inputs(reviewer)), receipt=receipt)
             except PublicationRefused:
                 return False
             except BusinessHeadChanged:

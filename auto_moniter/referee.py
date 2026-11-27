@@ -20,6 +20,11 @@ def fingerprint(context):
     return hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def incident_key(context):
+    # Keep the duplicate-action guard across rounds on the same failing tree.
+    return fingerprint({key: value for key, value in context.items() if key != 'candidate'})
+
+
 def parse(text):
     if len(text.encode('utf-8')) > 24 * 1024:
         raise ValueError('Referee decision exceeds 24 KiB')
@@ -57,25 +62,38 @@ class Journal:
         for index, item in enumerate(value['decisions'], 1):
             if (not isinstance(item, dict) or item.get('id') != index
                     or not isinstance(item.get('key'), str) or len(item['key']) != 64
-                    or item.get('status') not in {'requested', 'captured', 'applied', 'failed'}):
+                    or item.get('status') not in {'requested', 'captured', 'applied', 'failed', 'superseded'}):
                 raise ValueError('Invalid saved referee decision')
             if 'decision' in item:
                 parse(json.dumps(item['decision']))
         return value
 
-    def begin(self, context, reason, *, once=False):
+    def begin(self, context, reason, *, once=False, resume=False):
         value = self.read()
-        key = fingerprint(context)
+        key = incident_key(context)
         history = [item for item in value['decisions'] if item['key'] == key]
         if once and history:
             last = history[-1]
-            return last if last['status'] == 'captured' else None
-        if history and history[-1]['status'] in {'requested', 'captured', 'failed'}:
-            return None
+            return last if (last['status'] == 'captured' or resume and last['status'] == 'requested') else None
+        if history:
+            last = history[-1]
+            pending = last['status'] in {'requested', 'captured'}
+            if pending and last.get('candidate') and last['candidate'] != context.get('candidate'):
+                last['status'] = 'superseded'
+            elif resume and pending:
+                return last
+            elif pending or last['status'] == 'failed':
+                return None
         item = {'id': len(value['decisions']) + 1, 'key': key, 'status': 'requested',
                 'reason': safe(reason)[:4000]}
         if once:
             item['field_binding'] = context['field_binding']
+        if isinstance(context.get('kind'), str):
+            item['incident'] = context['kind']
+        if 'browser_failure' in context:
+            item['browser_failure'] = context['browser_failure']
+        if 'candidate' in context:
+            item['candidate'] = context['candidate']
         value['decisions'].append(item)
         write_json(self.path, value, durable=True)
         return item
@@ -84,6 +102,10 @@ class Journal:
         return any(item['key'] == ticket['key'] and item['status'] == 'applied'
                    and item.get('decision', {}).get('action') == action
                    for item in self.read()['decisions'])
+
+    def actions_applied(self, ticket):
+        return sorted({item['decision']['action'] for item in self.read()['decisions']
+                       if item['key'] == ticket['key'] and item['status'] == 'applied' and 'decision' in item})
 
     def update(self, ident, status, **fields):
         value = self.read()
@@ -110,6 +132,8 @@ def prompt(context):
         'replacement must get a fresh ID. The requirement planner will implement your decision subject to unchanged '
         'scope, coverage and executable gates. Never delete remaining planned behavior to manufacture completion. '
         'Use wait only for a concrete external prerequisite after independent authorized work is exhausted. '
+        'Refer to the registered prerequisite or executor receipt that will wake the task. '
+        'If a previously applied action is listed, choose a distinct action and explain what will change. '
         'For field_archive incidents, choose archive_checks only when the indicated observation can be answered '
         'by archiving the listed passing Watcher checks and their candidate metadata. The archive can document '
         'only these existing records. It cannot prove a new browser action, deployment, or observation. '

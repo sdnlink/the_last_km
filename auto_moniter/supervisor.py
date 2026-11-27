@@ -376,6 +376,7 @@ class Supervisor(
         # Git history, quality policy and process recovery belong to startup,
         # too. Until all have succeeded, preserve the original durable state.
         self._write_state(records, "running", stall, previous_gap_key, previous_tree)
+        self._adopt_lifecycle_recovery()
         self._resume_loaded = True
         (self.run_dir / 'resume-error.json').unlink(missing_ok=True)
         (self.run_dir / "report.json").unlink(missing_ok=True)
@@ -385,6 +386,13 @@ class Supervisor(
             return self._finish('action_required',
                 'Requirement cycle limit reached; committed work saved. Start a new run to continue.', records, last_worker)
         if loaded:
+            recovered_delivery = self._resume_delivery_cleanup(records)
+            if recovered_delivery is not None:
+                return recovered_delivery
+            self._resume_referee_decision(records)
+            if self._stop:
+                return self._finish('stopped' if self._stop_requested else 'action_required',
+                                    self._stop_reason, records, last_worker)
             published_review = self._recover_requirement_handoff(records)
             if published_review:
                 if not self._record_follow_up(records, published_review.verdict, published_review):
@@ -597,8 +605,7 @@ class Supervisor(
                         if self._advance_local_assignment(records, missing_inputs=True):
                             continue
                         return self._finish('action_required',
-                            f'派单 {task["id"]} 的验收检查缺少工作区输入。'
-                            + '、'.join(missing) + '。补齐输入后可从原任务恢复。', records, last_worker)
+                            self._wait_for_dispatch_inputs(task, missing), records, last_worker)
                 self._check_budget(new_call=True)
                 outside_check = self._assignment_whitespace_preflight()
                 self._process_control()
@@ -986,6 +993,8 @@ class Supervisor(
                     if not _accepted(verdict):
                         last_worker = verdict
                         continue
+            if problem := self._candidate_input_wait():
+                return self._finish('action_required', problem, records, verdict)
             screened_review = self._repair_preflight(record, reviewer, last_review)
             check_failure = (['No current pre-review check result for this candidate']
                              if self.config.workflow == 'review-first' else [])
@@ -1021,23 +1030,16 @@ class Supervisor(
                 task=self.function_tasks.current, round_index=round_index, tree=tree,
                 checks_digest=record.watcher_result.get('candidate_checks', {}).get('digest'),
                 directions=self._dispatch_directions)
-            fallback = handoff.get('fallback', {}) if handoff_bound and not field_handoff.ready(handoff) else {}
-            if fallback.get('revision') != handoff.get('revision'):
-                fallback = {}
-            fallback_evidence = {key: fallback[key] for key in ('failures', 'waiting') if key in fallback}
-            if fallback.get('role') == 'referee' and self.config.referee:
-                reason = '浏览器自动用例未完成。请确定可执行的补证路径。' + json.dumps(fallback_evidence, ensure_ascii=False)
-                action = self._consult_referee('browser_evidence', reason, records, candidate=record)
-                if action == 'replan':
-                    raise RefereeRedirect(reason)
-                if action == 'retry_reviewer':
-                    review_prompt += '\n\n裁判安排本轮补审。' + self._referee_decision['instructions']
-                if self._stop:
-                    return self._finish('stopped' if self._stop_requested else 'action_required',
-                                        self._stop_reason or reason, records, verdict)
+            fallback = field_handoff.pending_fallback(handoff) if handoff_bound and not field_handoff.ready(handoff) else {}
+            instructions, fallback_evidence = self._field_fallback_route(fallback, records, record)
+            if instructions:
+                review_prompt += '\n\n裁判安排本轮补审。' + instructions
+            if fallback and self._stop:
+                return self._finish('stopped' if self._stop_requested else 'action_required',
+                                    self._stop_reason, records, verdict)
             handoff_applied = handoff_bound and (field_handoff.ready(handoff) or bool(fallback))
             if fallback:
-                review_prompt += ('\n\n自动浏览器用例未取得以下证据。请在原权限内核对已有证据或批准的检查，'
+                review_prompt += ('\n\n现场执行尚未取得以下证据。请在原权限内核对已有证据或批准的检查，'
                                   '能补齐时给出依据，仍有缺项时明确所需执行能力。'
                                   '自动化失败本身不证明现场行为通过。\n'
                                   + json.dumps(fallback_evidence, ensure_ascii=False))
@@ -1194,6 +1196,8 @@ class Supervisor(
             if self.git_history and self.config.workflow!='review-first':
                 self._checkpoint(review_record, review_turn.text, self.git_history.last_worker['commit'])
             self._write_state(records, "running", stall, previous_gap_key, tree)
+            if fallback and not (review_failure or review_turn.interruption or review.parse_error):
+                field_handoff.finish_fallback(self.run_dir, fallback)
             self.log(
                 f"round {round_index}: reviewer status={review.status} gaps={len(review.gaps)} "
                 + " ".join(review.summary.split())[:200]
@@ -1495,7 +1499,7 @@ class Supervisor(
                 )
             self._retry_pause(stall + 1, "unfinished review")
 
-        follow_up_stopped = self._stop_reason.startswith('Next requirement not ready')
+        follow_up_stopped = self._stop_reason.startswith(('Next requirement not ready', '裁判模型服务暂不可用', '派单 '))
         return self._finish('action_required' if follow_up_stopped or self._stop_reason.startswith(
                                 ('Verified progress', 'Acceptance environment', 'Project dependencies cancelled', 'Referee')) else 'stopped',
                             self._stop_reason if follow_up_stopped else f"Stopped: {self._stop_reason or 'stop requested'}.", records, last_worker)
@@ -1517,7 +1521,8 @@ class Supervisor(
             self._process_control()
 
     def _elapsed(self) -> float:
-        return self._elapsed_before + time.monotonic() - self._started
+        paused_at = getattr(self, '_paused_at', None)
+        return self._elapsed_before + (time.monotonic() if paused_at is None else paused_at) - self._started
 
     def _should_stop(self) -> bool:
         self._process_control(active=True)
@@ -1578,20 +1583,8 @@ class Supervisor(
                 self._stop_reason += ': ' + reason.strip()[:500]
             self._stop_event.set()
         elif action == "pause" and not active:
-            self._event("paused")
-            while not self._stop:
-                self._check_budget()
-                self._beat("paused at a turn boundary")
-                self._stop_event.wait(0.2)
-                value = self._read_control()
-                if value is None:
-                    continue  # An unreadable request cannot release an existing pause.
-                action = value.get('action')
-                if action == "stop":
-                    self._process_control(active=True)
-                elif action != "pause":
-                    break
-            self._event("pause_ended", stopped=self._stop)
+            from auto_moniter.run_timing import pause_at_boundary
+            pause_at_boundary(self)
 
     def _check_budget(self, *, new_call: bool = False) -> None:
         if getattr(self, '_meter_missing', False):
@@ -1611,6 +1604,7 @@ class Supervisor(
 
     def _usage(self) -> dict:
         return {"elapsed_s": round(self._elapsed(), 3), "agent_calls": self._agent_calls,
+                "paused": hasattr(self, '_paused_at'),
                 "max_runtime_s": self.config.max_runtime_s, "max_agent_calls": self.config.max_agent_calls,
                 "max_output_bytes": self.config.max_output_bytes, "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "memory_bytes": self.config.memory_bytes, "file_bytes": self.config.file_bytes, "max_run_bytes": self.config.max_run_bytes,
@@ -1813,19 +1807,22 @@ class Supervisor(
                 'modules': self.modules.export(), 'audit_issues': self.audit.export(),
                 'note': 'Unaccepted work and interrupted output require independent review; no delivery implied.'}), durable=True)
         if status == "done":
-            self._check_budget()
+            if not getattr(self, '_closing_saved_delivery', False):
+                self._check_budget()
             self._check_project_delivery(records)
             current = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
             if current != self._delivery_tree:
                 raise RuntimeError("Workspace changed since final acceptance; refusing stale delivery")
             self._no_progress = 0
+            self._save_delivery_cleanup(summary, records)
             cleanup_errors = self._close_delivered_sessions()
             if cleanup_errors:
-                status = "failed"
+                status = "recovery_failed"
                 summary = "Work accepted, but agent cleanup failed: " + "; ".join(cleanup_errors)
             self._check_project_delivery(records)
             if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != self._delivery_tree:
                 raise RuntimeError("Workspace changed while closing agents; refusing stale delivery")
+            self._verify_delivery_cleanup()
         report = RunReport(
             status=status,
             rounds=self._pruned_worker_rounds + sum(1 for record in records if record.role == "worker"),
@@ -1866,6 +1863,8 @@ class Supervisor(
                                          "function_tasks": self.function_tasks.export(),
                                          "referee": self._referee_snapshot(),
                                          "history": self._history_info()})
+        if status == 'done':
+            report_payload['delivery_checks'] = self._final_delivery_proof()
         if status == 'action_required' and self.requirement_cycles and self.requirements_review.get('status') == 'needs_input':
             from auto_moniter.health import follow_up_wait_digest
             try:
@@ -1876,8 +1875,12 @@ class Supervisor(
                 digest = follow_up_wait_digest(self.run_dir, running_state, report_payload)
                 if digest:
                     report_payload['follow_up_wait_digest'] = digest
+        self._prepare_lifecycle_recovery(status, report.summary)
         write_json(path, report_payload, durable=True)
         self._write_state(records, status, 0, "", records[-1].tree if records else "", result_summary=report.summary)
+        if status == 'done':
+            (self.run_dir / 'delivery-cleanup.json').unlink(missing_ok=True)
+        self._schedule_lifecycle_recovery(status, report.summary)
         self._beat(f"finished: {status}")
         self.log(f"finished: {status} after {report.rounds} worker rounds")
         self.log(f"report: {path}")

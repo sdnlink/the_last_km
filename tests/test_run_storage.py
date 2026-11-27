@@ -65,3 +65,28 @@ class RunStorageTests(unittest.TestCase):
             {path.name for path in self.run.iterdir()},
             set(names) - {names[0], names[3]} | {'state.json', '.state.json-symlink0'},
         )
+
+    def test_special_round_logs_archive_without_touching_active_or_referenced_files(self):
+        archived = ['2000009-reviewer-prompt.md', '910003-reviewer-prompt.md', '830003-referee.log']
+        keep = ['2000012-reviewer-prompt.md', '910004-reviewer-text.md', '910005-reviewer-prompt.md',
+                '001-check-01.log']
+        content = b'detailed work record\n' * 512
+        for name in [*archived, *keep]:
+            (self.run / name).write_bytes(content)
+        for name in ('2000009-reviewer.log', '910003-reviewer.log', '910004-reviewer.log'):
+            (self.run / name).write_text('finished')
+        monitor = SimpleNamespace(run_dir=self.run, _next_round=10, _last_space_check=0,
+                                  _last_invocation={'round': 2000012},
+                                  requirements_review={'output_file': '910004-reviewer-text.md'},
+                                  config=SimpleNamespace(max_run_bytes=60000))
+        maintain_run_storage(monitor)
+        store = TaskStore(self.run / 'console', self.run)
+        store._get = lambda _: {'run_dir': str(self.run)}
+        for name in archived:
+            self.assertFalse((self.run / name).exists(), name)
+            with open_log(self.run / name) as (stream, _, compressed):
+                self.assertTrue(compressed)
+                self.assertEqual(stream.read(), content)
+        self.assertEqual(store.log_text('task', '830003-referee.log'), content.decode())
+        for name in keep:
+            self.assertEqual((self.run / name).read_bytes(), content)

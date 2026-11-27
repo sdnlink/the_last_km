@@ -12,6 +12,7 @@ from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_modules import PLAN, outcome
 from tests.test_requirement_follow_up import BRIEF, FOLLOW, NEXT, CitingReviewer, _git
+from tests.test_review_first import approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider, _verdict
 
 
@@ -123,7 +124,7 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         report = resumed.run()
         self.assertEqual(report.status, 'max_rounds', report.summary)
         self.assertEqual(len(worker.calls), 1)
-        self.assertEqual(len(reviewer.calls), 2 if planning else 1)
+        self.assertEqual(len(reviewer.calls), 3 if planning else 1)
         self.assertTrue(all(call['read_only'] for call in reviewer.calls))
         self.assertIn('Worker checkpoint:', reviewer.calls[-1]['prompt'])
         state = self.state()
@@ -158,6 +159,7 @@ class RequirementHandoffRecoveryTests(unittest.TestCase):
         worker = ScriptedProvider('worker', [{'verdict': outcome(['A', 'B'], scope='requirement')}])
         reviewer = CitingReviewer([
             {'verdict': {}, 'text': json.dumps({**BRIEF, 'refined_requirement': integrated})},
+            approve_requirement_coverage(),
             {'verdict': _verdict('continue', ['verify the current inputs'])},
         ], self.root)
         receipt = self.assert_revalidation(original, head, worker, reviewer, planning=True)

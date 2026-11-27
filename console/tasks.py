@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -25,6 +26,7 @@ from auto_moniter.locking import workspaces_overlap
 from auto_moniter.workspace import LockError
 from auto_moniter.check_history import configurations
 from console.settings import settings, DEFAULTS
+from console import lifecycle
 from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
 from console.acceptance import validate_commands
@@ -32,7 +34,7 @@ from auto_moniter.redaction import redact, safe
 from auto_moniter.run_storage import open_log
 from auto_moniter.storage import write_json
 from auto_moniter.directions import Directions
-from auto_moniter import browser_execution, candidate_checks, field_handoff, referee
+from auto_moniter import browser_execution, candidate_checks, dispatch_inputs, field_executors, field_handoff, recovery_wait, referee
 from auto_moniter.requirement_queue import RequirementQueue
 from console.metrics import Metrics, process_tree
 from console.activity import ActivityReader
@@ -55,9 +57,10 @@ logger = logging.getLogger(__name__)
 
 
 class TaskError(ValueError):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, *, retryable=False):
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
 
 
 def read_json(path: Path) -> dict:
@@ -319,6 +322,10 @@ class TaskStore:
                 status = 'starting'
             elif meta.get('started_at'):
                 status = 'failed'
+        if status == 'failed' and not state and not live and not (meta.get('error') or meta.get('exit_summary')):
+            intent = read_json(run / recovery_wait.FILE)
+            if intent.get('condition') == 'startup' and intent.get('phase') == 'starting':
+                status = 'queued'
         heartbeat = read_json(run / 'heartbeat')
         guardian = health.get('guardian') or read_json(run / 'guardian.json')
         roots = []
@@ -492,6 +499,7 @@ class TaskStore:
                      'quality_state': state.get('quality_state', {}) if include_details else {},
                      'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},
                      'field_handoff': self._field_handoff_view(run, state) if include_details else {},
+                     'automatic_recovery': lifecycle.presentation(run, status, control) if include_details else {},
                      'local_preview': self._local_preview_view(meta) if include_details else {},
                      'activity': progress,
                      'work': work,
@@ -561,7 +569,7 @@ class TaskStore:
     def progress(self, ident: str) -> dict:
         view = self.detail(ident)
         keys = ('id', 'title', 'cwd', 'status', 'workflow', 'health', 'activity', 'work', 'actions', 'control',
-                'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable', 'failure')
+                'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable', 'failure', 'automatic_recovery')
         result = {key: view.get(key) for key in keys}
         work = view.get('work') or {}
         result['work'] = {**work, 'conclusions': [next((c for c in reversed(work.get('conclusions', []))
@@ -820,18 +828,21 @@ class TaskStore:
             return field_handoff.public(value)
         run = Path(meta['run_dir'])
         targets = dict.fromkeys(value.get('independent_tasks', []))
-        deployment_pending = any(item['kind'] == 'deployment' and not item.get('receipt') for item in value['items'])
         targets.update((item['executor_task'], item) for item in value['items']
                        if item.get('executor_task') and not item.get('receipt')
-                       and not (item['kind'] == 'browser' and deployment_pending))
+                       and not field_handoff.dependency_error(value, item))
         dispatch = dict(value.get('dispatch') or {})
         for ident, item in targets.items():
-            if dispatch.get(ident, {}).get('status') == 'dispatched':
+            previous = dispatch.get(ident, {})
+            if previous.get('status') in {'dispatched', 'failed'} or previous.get('retry_at', 0) > time.time():
                 continue
             try:
                 child = self._validate_handoff_task(meta, ident, deployment=bool(item and item['kind'] == 'deployment'))
                 status = self._view(child, {}, include_details=False)['status']
                 if status == 'queued':
+                    if item and item.get('executor_resource') and field_executors.resource_busy(
+                            self, item['executor_resource'], except_id=ident):
+                        continue
                     if item:
                         field_handoff.prepare_executor(Path(child['run_dir']), meta['id'], value, item)
                     self.action(ident, 'start')
@@ -839,7 +850,7 @@ class TaskStore:
                     raise TaskError('关联执行任务未就绪，请核对其状态。', 409)
                 dispatch[ident] = {'status': 'dispatched'}
             except (TaskError, OSError, ValueError) as exc:
-                dispatch[ident] = {'status': 'waiting', 'error': redact(str(exc))}
+                dispatch[ident] = field_executors.dispatch_failure(exc, previous)
         if dispatch != value.get('dispatch', {}):
             value = {**value, 'dispatch': dispatch}
             write_json(run / field_handoff.FILE, value, durable=True)
@@ -879,7 +890,7 @@ class TaskStore:
             raise ValueError('执行回执须为工作区内经过验收的普通文件。')
         return requirement_context.read(path, limit=128 * 1024)
 
-    def _collect_field_results(self, meta, run, state, value):
+    def _collect_field_results(self, meta, run, state, value, *, executor_waiting=None):
         errors = {}
         failed_cases = {}
         browser_inputs = {}
@@ -888,18 +899,26 @@ class TaskStore:
         for item in value['items']:
             if item.get('receipt'):
                 continue
+            external = item['kind'] in {'deployment', 'observation'} and item.get('case_id') != field_handoff.CHECK_ARCHIVE_CASE
             ident = item.get('executor_task')
-            if item['kind'] == 'browser' and any(row['kind'] == 'deployment' and not row.get('receipt')
-                                                for row in value['items']):
-                errors[item['id']] = '等待同一候选的部署回执。'
+            dependency = field_handoff.dependency_error(value, item)
+            if dependency:
+                errors[item['id']] = dependency
                 continue
             try:
                 if not ident:
-                    if item['kind'] != 'browser':
-                        errors[item['id']] = '尚未关联获准的执行任务。'
-                        continue
                     if item.get('claim'):
                         errors[item['id']] = '等待认领人提交现场回执。'
+                        continue
+                    if item['id'] in (executor_waiting or {}):
+                        errors[item['id']] = executor_waiting[item['id']]
+                        continue
+                    if item['kind'] != 'browser':
+                        errors[item['id']] = '尚未关联获准的执行任务。'
+                        if external:
+                            reason = ('部署核对缺少获准执行任务，下游浏览器验证无法启动。'
+                                      if item['kind'] == 'deployment' else '现场观察缺少获准执行任务。')
+                            failed_cases[item['id']] = {'case_id':'', 'kind':item['kind'], 'role':'reviewer', 'reason':reason}
                         continue
                     if cases is None:
                         cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
@@ -954,8 +973,11 @@ class TaskStore:
                 child = self._validate_handoff_task(meta, ident, deployment=item['kind'] == 'deployment')
                 child_view = self._view(child, {}, include_details=False)
                 if child_view['status'] != 'done':
-                    errors[item['id']] = '等待关联执行任务完成验收。' if child_view['status'] in {
-                        'queued', 'starting', 'running', 'paused'} else '关联执行任务未通过验收，请查看该任务的停止原因。'
+                    reason, waiting = field_executors.collect_failure(value, ident, child_view)
+                    errors[item['id']] = redact(reason)
+                    if not waiting:
+                        failed_cases[item['id']] = {'case_id':'', 'kind':item['kind'], 'role':'reviewer',
+                            'executor_task':ident, 'reason':errors[item['id']]}
                     continue
                 result = self._executor_field_result(child, item)
                 if not isinstance(result, dict) or result.get('id') != item['id']:
@@ -963,7 +985,10 @@ class TaskStore:
                 value = field_handoff.submit(run, state, result, executor=ident)
             except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
                 errors[item['id']] = redact(str(exc))
-                if not ident and item['kind'] == 'browser' and not item.get('allow_manual'):
+                if ident or external:
+                    failed_cases[item['id']] = {'case_id':'', 'kind':item['kind'], 'role':'reviewer',
+                                               'reason':errors[item['id']], **({'executor_task':ident} if ident else {})}
+                elif not ident and item['kind'] == 'browser' and not item.get('allow_manual'):
                     failed_cases[item['id']] = {'case_id':item.get('case_id', ''),
                                                'reason':errors[item['id']], 'role':'reviewer'}
         if (errors != value.get('executor_status', {}) or failed_cases != value.get('failed_cases', {})
@@ -981,7 +1006,8 @@ class TaskStore:
         if not failures:
             return
         key = candidate_checks.digest([value['binding'], sorted(
-            (f['case_id'], f['role'], f['reason']) for f in failures.values())])
+            (item_id, f['case_id'], f['role'], f['reason'], f.get('executor_task', ''))
+            for item_id, f in failures.items())])
         configured_role = 'referee' if any(f['role'] == 'referee' for f in failures.values()) else 'reviewer'
         role = 'referee' if referee_enabled else configured_role
         if role != configured_role:
@@ -990,26 +1016,36 @@ class TaskStore:
             key = candidate_checks.digest([key, role])
         history = value.get('fallback_history', [])
         previous = value.get('fallback') or {}
-        pending = previous.get('key') == key and previous.get('status') == 'pending'
-        if not pending and key in history:
+        pending = previous.get('key') == key and previous.get('status') in {'pending', 'launched'}
+        if key in history or (pending and previous.get('retry_at', 0) > time.time()):
             return
         waiting = {item['id']: value.get('executor_status', {}).get(item['id'], '等待回执。')
                    for item in missing if item['id'] not in failures}
+        attempts = previous.get('attempts', 0) if pending else 0
         updated = {**value, 'fallback': {'revision':value['revision'], 'role':role, 'failures':failures,
                                          'waiting': waiting,
-                                         'key':key, 'status':'pending'},
-                   'fallback_history': history if pending else [*history, key]}
+                                         'key':key, 'status':'pending', 'attempts':attempts}}
         write_json(run / field_handoff.FILE, updated, durable=True)
         try:
             self.action(meta['id'], 'resume')
         except (TaskError, OSError, ValueError) as exc:
-            write_json(run / field_handoff.FILE, {**value, 'fallback_history': updated['fallback_history'],
-                         'executor_status': {**value.get('executor_status', {}),
-                             'fallback': redact(str(exc))}}, durable=True)
+            current = field_handoff.read(run)
+            if current.get('fallback') != updated['fallback']:
+                return
+            retryable = isinstance(exc, OSError) or isinstance(exc, TaskError) and (exc.retryable or exc.status == 503)
+            if retryable:
+                current['fallback'].update(attempts=attempts + 1,
+                                           retry_at=time.time() + min(15 * 2 ** min(attempts, 5), 300))
+            else:
+                current['fallback']['status'] = 'blocked'
+                current['fallback_history'] = [*dict.fromkeys([*history, key])]
+            current.setdefault('executor_status', {})['fallback'] = redact(str(exc))
+            write_json(run / field_handoff.FILE, current, durable=True)
         else:
             current = field_handoff.read(run)
             if current.get('revision') == value['revision'] and current.get('fallback') == updated['fallback']:
-                current['fallback']['status'] = 'launched'
+                current['fallback'].update(status='launched', attempts=attempts + 1,
+                                           retry_at=time.time() + min(15 * 2 ** min(attempts, 5), 300))
                 write_json(run / field_handoff.FILE, current, durable=True)
 
     def _resume_field_handoff(self, ident, run, value):
@@ -1022,8 +1058,7 @@ class TaskStore:
         except (TaskError, OSError, ValueError) as exc:
             failure = redact(str(exc))
             retry = {}
-            if (isinstance(exc, OSError) or isinstance(exc, TaskError) and
-                    (exc.status == 503 or str(exc) == '任务进程仍在运行或等待回收，请稍后重试')):
+            if isinstance(exc, OSError) or isinstance(exc, TaskError) and (exc.retryable or exc.status == 503):
                 attempts = request.get('attempts', 0) + 1
                 retry = {'attempts': attempts, 'retry_at': time.time() + min(15 * 2 ** min(attempts - 1, 5), 300)}
             updated = field_handoff.update_resume(run, value, 'pending',
@@ -1044,24 +1079,30 @@ class TaskStore:
     def _resume_field_archive(self, meta, run, value, *, retry_failed):
         for entry in referee.Journal(run, archive=True).read()['decisions']:
             if (entry.get('field_binding', entry.get('archive', {}).get('binding')) == value['binding']
-                    and (entry['status'] != 'captured' or entry['archive']['revision'] != value['revision'])):
+                    and (entry['status'] not in {'requested', 'captured'}
+                         or entry.get('archive', {}).get('revision', value['revision']) != value['revision'])):
                 return
         key = candidate_checks.digest(value['binding'])
         previous = value.get('archive_resume') or {}
-        if previous.get('key') == key and (previous.get('status') == 'launched'
-                                            or previous.get('error') and not retry_failed):
+        if previous.get('key') == key and (previous.get('retry_at', 0) > time.time()
+                or previous.get('error') and not previous.get('retry_at') and not retry_failed):
             return
-        pending = {'key': key, 'status': 'pending'}
+        attempts = previous.get('attempts', 0) + 1 if previous.get('key') == key else 1
+        pending = {'key': key, 'status': 'pending', 'attempts': attempts}
         write_json(run / field_handoff.FILE, {**value, 'archive_resume': pending}, durable=True)
         try:
             self.action(meta['id'], 'resume')
         except (TaskError, OSError, ValueError) as exc:
-            finished = {**pending, 'error': redact(str(exc))}
+            retry = field_executors.dispatch_failure(exc, {'attempts': attempts - 1})
+            finished = {**retry, **pending}
         else:
-            finished = {**pending, 'status': 'launched'}
+            finished = {**pending, 'status': 'launched', 'retry_at': time.time() + min(15 * 2 ** min(attempts - 1, 5), 300)}
         current = field_handoff.read(run)
         if current.get('revision') == value['revision'] and current.get('archive_resume') == pending:
             write_json(run / field_handoff.FILE, {**current, 'archive_resume': finished}, durable=True)
+
+    def _recover_lifecycle(self, meta, run):
+        return lifecycle.recover(self, meta, run)
 
     def recover_field_handoffs(self, *, retry_failed=True):
         """Collect receipts and resume eligible checkpoints even without an open task page."""
@@ -1073,8 +1114,11 @@ class TaskStore:
                     continue
                 run = Path(meta['run_dir'])
                 try:
+                    if self._recover_lifecycle(meta, run):
+                        continue
                     value = field_handoff.read(run)
-                    if not value:
+                    wait = read_json(run / dispatch_inputs.WAIT_FILE)
+                    if not (value or wait):
                         continue
                     view = self._view(meta, {}, include_details=False)
                     if view['status'] in {'running', 'starting', 'paused'}:
@@ -1084,6 +1128,14 @@ class TaskStore:
                     if read_control(run / 'control.json').get('action') in ('stop', 'pause'):
                         continue
                     state = Directions(run).read('state.json', 32 * 1024 * 1024)
+                    if wait and 'resume' in view['actions'] and dispatch_inputs.ready(
+                            wait, state, Path(meta['cwd']).resolve(), [row['id'] for row in Directions(run).messages()], run=run):
+                        intent = Directions(run).read(recovery_wait.FILE)
+                        if intent.get('condition') != 'dispatch_inputs' or not lifecycle.matches(run, intent, state):
+                            lifecycle.launch(self, meta, run, {'condition': 'dispatch_inputs'}, state, 'resume')
+                        continue
+                    if not value:
+                        continue
                     checkpoint = value['binding']
                     worker = next((row for row in reversed(state.get('rounds') or [])
                                    if row.get('role') == 'worker' and row.get('index') == checkpoint['round']), {})
@@ -1099,7 +1151,10 @@ class TaskStore:
                         self._resume_field_archive(meta, run, value, retry_failed=retry_failed)
                         continue
                     if not field_handoff.ready(value):
-                        value = self._collect_field_results(meta, run, state, value)
+                        waiting = field_executors.bind(self, meta, run, value)
+                        value = self._collect_field_results(meta, run, state, value, executor_waiting=waiting)
+                        if any(f.get('executor_task') for f in value.get('failed_cases', {}).values()):
+                            field_executors.bind(self, meta, run, value)
                         self._dispatch_handoff_tasks(meta, value)
                         if not field_handoff.ready(value) and 'resume' in view['actions']:
                             self._route_browser_failure(meta, run, value,
@@ -1324,6 +1379,19 @@ class TaskStore:
                     'run_dir': str(self.runs_dir / ident), 'created_at': timestamp(), 'status': 'queued'}
             if supervision_preferences is not None:
                 meta['supervision_preferences'] = supervision_preferences
+            start_wait = ''
+
+            def check_automatic_start():
+                nonlocal start_wait
+                if auto_start:
+                    meta['auto_start_pending'] = True
+                    try:
+                        self._check_start(meta)
+                    except TaskError as exc:
+                        if not exc.retryable:
+                            raise
+                        start_wait = redact(str(exc))
+
             if parallel:
                 if verification_mode == 'planning':
                     raise TaskError('并行开发请使用实现与验收模式；只制定验收方案不创建并行工作副本')
@@ -1336,11 +1404,10 @@ class TaskStore:
                         if guided:
                             guided = select_acceptance(meta['cwd'],guided)
                             meta['acceptance_plan'] = guided
-                        if auto_start:
-                            self._check_start(meta)
-                    workspace = create_workspace(cwd,run,ident,title,data.get('task_scope',[]),
-                                                 data.get('task_dependencies',[]),[*checks,*module_check_commands],
-                                                 validate=validate_workspace)
+                        check_automatic_start()
+                    create_workspace(cwd,run,ident,title,data.get('task_scope',[]),
+                                     data.get('task_dependencies',[]),[*checks,*module_check_commands],
+                                     validate=validate_workspace)
                 except (OSError,ValueError,LockError,subprocess.SubprocessError) as exc:
                     raise TaskError('无法创建并行任务：'+str(exc),409) from exc
             from console.acceptance import coverage_warning
@@ -1361,20 +1428,36 @@ class TaskStore:
                     write_json(run / 'directions.json', {'version': 1, 'messages': directions}, durable=True)
                 if queue:
                     write_json(run / 'requirement-queue.json', {'version': 1, 'items': queue}, durable=True)
-            if auto_start and not parallel:
-                self._check_start(meta)
+            if not parallel:
+                check_automatic_start()
+            if start_wait:
+                run.mkdir(mode=0o700, exist_ok=True)
+                recovery_wait.schedule(run, 'startup', 'start', detail=start_wait)
+                meta['error'] = start_wait
             self._save(meta)
-            if auto_start:
-                self._launch(meta)
+            if auto_start and not start_wait:
+                try:
+                    self._launch(meta)
+                except TaskError as exc:
+                    if not exc.retryable:
+                        raise
+                    recovery_wait.schedule(run, 'startup', 'start', detail=redact(str(exc)))
             return self.detail(ident)
 
     def _check_start(self, meta: dict) -> None:
         if meta['id'] in self._children or self._launcher_alive(meta):
-            raise TaskError('任务进程仍在运行或等待回收，请稍后重试', 409)
+            raise TaskError('任务进程仍在运行或等待回收，请稍后重试', 409, retryable=True)
+        request = Directions(Path(meta['run_dir'])).read(field_handoff.EXECUTOR_REQUEST)
+        resource = (request.get('item') or {}).get('executor_resource')
+        if resource and not field_executors.request_current(self, meta['id'], request):
+            raise TaskError('该执行任务绑定的交接已变更，请使用当前获准的执行任务。', 409)
+        if resource and field_executors.resource_busy(self, resource, except_id=meta['id']):
+            raise TaskError('执行器的独占资源正在使用，等待释放后重试。', 409, retryable=True)
         available = self.agents.providers(discover_providers())
         for role in ('provider', 'reviewer'):
             if meta.get(role) and meta[role] != '—' and not available.get(meta[role]):
-                raise TaskError(f'未找到 {meta[role]} 可执行文件，请先安装并完成登录', 409)
+                raise TaskError(f'未找到 {meta[role]} 可执行文件，请先安装并完成登录',
+                                409, retryable=bool(meta.get('referee')))
         if not Path(meta['cwd']).is_dir():
             raise TaskError('项目目录已不存在', 409)
         if meta.get('acceptance_plan'):
@@ -1387,7 +1470,8 @@ class TaskStore:
             result = acceptance_preflight(plan) if meta.get('verification_mode') != 'planning' else {'ready':True,'checks':[],'executed':False}
             meta['acceptance_preflight'] = result
             if not result['ready']:
-                raise TaskError('验收环境不可用（未执行业务检查）：'+ '; '.join(error for item in result['checks'] for error in item['errors']),409)
+                raise TaskError('验收环境不可用（未执行业务检查）：'+ '; '.join(
+                    error for item in result['checks'] for error in item['errors']), 409, retryable=True)
         if not (Path(meta['run_dir']) / 'state.json').exists():
             from auto_moniter.isolation import ReviewIsolation, WorkerIsolation
             from auto_moniter.providers import resolve_provider
@@ -1409,7 +1493,7 @@ class TaskStore:
                 continue
             view = self._view(other, {})
             if view['status'] in {'running', 'starting', 'paused'} and workspaces_overlap(Path(view['cwd']), Path(meta['cwd'])):
-                raise TaskError('该项目已有任务执行中，请先停止或等待完成', 409)
+                raise TaskError('该项目已有任务执行中，请先停止或等待完成', 409, retryable=True)
 
     def _resume_args(self, meta: dict, state: dict | None = None) -> list[str]:
         run = Path(meta['run_dir'])
@@ -1488,10 +1572,13 @@ class TaskStore:
         env = os.environ.copy()
         env['AUTO_MONITER_AGENT_SETTINGS']=str(self.agents.path)
         env[browser_execution.ENV] = str(self.data_dir / browser_execution.CONFIG)
+        env[field_executors.ENV] = str(self.data_dir)
         package_root = str(Path(__file__).resolve().parent.parent)
         env['PYTHONPATH'] = package_root + os.pathsep + env.get('PYTHONPATH', '')
         env['PYTHONUNBUFFERED'] = '1'
         previous_control = read_json(run / 'control.json') if resume else {}
+        if not resume and meta.get('auto_start_pending') and not (run / recovery_wait.FILE).exists():
+            recovery_wait.starting(run, {'action': 'start', 'condition': 'startup', 'detail': ''}, {})
         child = None
         try:
             if resume:
@@ -1513,6 +1600,8 @@ class TaskStore:
             meta.update(status='starting', started_at=timestamp(), launcher=process_identity(child.pid))
             meta.pop('error', None)
             meta.pop('exit_summary', None)
+            if not resume:
+                meta.pop('auto_start_pending', None)
             self._save(meta)
             threading.Thread(target=self._wait, args=(meta['id'], child, meta['requirement']), daemon=True).start()
         except Exception as exc:
@@ -1534,12 +1623,17 @@ class TaskStore:
                 except OSError as control_error:
                     errors.append('原控制请求未能恢复：' + str(control_error))
             message = str(exc) + (('；' + '；'.join(errors)) if errors else '')
-            meta.update(status='failed', started_at=timestamp(), error=message)
+            retry = (child is None and isinstance(exc, OSError)
+                     and exc.errno in {errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE})
+            if retry and not resume:
+                meta.update(status='queued', error=message)
+            else:
+                meta.update(status='failed', started_at=timestamp(), error=message)
             try:
                 self._save(meta)
             except OSError as save_error:
                 message += '；失败记录未能保存：' + str(save_error)
-            raise TaskError(f'启动失败：{message}', 500) from exc
+            raise TaskError(f'启动失败：{message}', 503 if retry else 500, retryable=retry) from exc
 
     def _wait(self, ident: str, child: subprocess.Popen, requirement: str) -> None:
         error = ''
@@ -1768,7 +1862,7 @@ class TaskStore:
                                          and saved_state.get('full_function_plan')
                                          and saved_state.get('referee', {}).get('enabled')
                                          and field_handoff.archive_item(handoff))
-                    if (handoff and not field_handoff.ready(handoff) and not handoff.get('fallback')
+                    if (handoff and not field_handoff.ready(handoff) and not field_handoff.pending_fallback(handoff)
                             and not automatic_archive
                             and [row['id'] for row in Directions(run).messages()] == handoff['binding']['directions']):
                         raise TaskError('现场回执尚未齐备，请在任务详情中补交。', 409)
@@ -1830,7 +1924,8 @@ class TaskStore:
                         arguments.extend(flag + binding for binding in (bindings or ['']))
                     if (_parse_duration(parsed.max_runtime) and float(usage.get('elapsed_s', 0)) >= _parse_duration(parsed.max_runtime)
                             or parsed.max_agent_calls and int(usage.get('agent_calls', 0)) >= parsed.max_agent_calls):
-                        raise TaskError('累计预算已耗尽，请在恢复窗口明确追加预算', 409)
+                        if not recovery_wait.controller_cleanup(run, saved_state):
+                            raise TaskError('累计预算已耗尽，请在恢复窗口明确追加预算', 409)
                     meta = {**meta, 'resume_argv': arguments}
                     # Only save the new launch configuration once Popen succeeds.
                 self._launch(meta, resume=action == 'resume')

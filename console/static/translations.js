@@ -304,6 +304,11 @@ export default {
   "填写测试后端": "Set the test backend",
   "测试后端地址": "Test backend URL",
   "暂不填写": "Not now",
+  "填写现场浏览器验证码": "Enter the browser verification code",
+  "填写六位动态验证码": "Enter the six-digit verification code",
+  "现场登录验证码": "Browser sign-in verification code",
+  "验证码": "Verification code",
+  "提交并继续": "Submit and continue",
   "连接并继续": "Connect and continue",
   "项目没有设置远程测试后端。填写地址后，系统会自动启动预览并检查连接。": "The project has no remote test backend configured. Enter its URL to start the preview and check the connection.",
   "项目配置的测试后端暂时无法连接。请填写可用的后端地址。": "The configured test backend is unreachable. Enter an available backend URL.",
@@ -1561,5 +1566,8 @@ export default {
   "等待本轮结论": "Waiting for this round’s conclusion",
   "需要修改": "Changes requested",
   "已中断": "Interrupted",
-  "待处理": "Needs attention"
+  "待处理": "Needs attention",
+  "自动恢复遇到阻塞。": "Automatic recovery is blocked.",
+  "等待自动重试，最早 {0}。": "Waiting for an automatic retry, no earlier than {0}.",
+  "等待监督器再次尝试。": "Waiting for Watcher to retry."
 };

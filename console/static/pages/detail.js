@@ -1,7 +1,7 @@
 import {i18n,i18nHTML,locale} from '../i18n.js';
 import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration} from '/ui.js';
 import {api,watch,toast,refresh} from '/core.js';
-import {failureHTML,gitHistoryHTML,renderWorkflow,selectWorkflowStage,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
+import {failureHTML,automaticRecoveryHTML,gitHistoryHTML,renderWorkflow,selectWorkflowStage,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
 import {dispatchPlanHTML} from '/dispatch-plan.js';
 import {mountSupervision} from '/supervision.js';
@@ -65,7 +65,7 @@ function renderBrowserCaptcha(t, reopen=false){
  image.hidden=otp;
  if(otp)image.removeAttribute('src');
  else image.src=`/api/tasks/${encodeURIComponent(id)}/browser-captcha/${encodeURIComponent(challenge.nonce)}`;
- $('#browser-captcha-title').textContent=otp?'填写六位动态验证码':'填写现场浏览器验证码';
+ $('#browser-captcha-title').textContent=i18n(otp?'填写六位动态验证码':'填写现场浏览器验证码');
  const form=$('#browser-captcha-form');
  form.reset();
  const code=form.elements.code;
@@ -140,7 +140,7 @@ function render(t){
  const alerts=[t.control_message,t.resume_unavailable,t.direction_error,t.health.report_warning,t.launch_error].filter(Boolean);
  if(t.health.health==='heartbeat_stale')alerts.push(i18n('监督器心跳已超时，请核对 watcher 工作记录。'));
  if(t.status==='interrupted')alerts.push(i18n('任务执行已中断，可查看工作记录后从检查点恢复。'));
- if($('#detail-alerts'))$('#detail-alerts').innerHTML=failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
+ if($('#detail-alerts'))$('#detail-alerts').innerHTML=automaticRecoveryHTML(t)+failureHTML(t)+alerts.map(a=>`<p class="detail-alert">${escape(a)}</p>`).join('');
  renderFieldHandoff(t);
  renderBrowserCaptcha(t);
 }

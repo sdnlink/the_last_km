@@ -141,6 +141,33 @@ class RefereeTests(unittest.TestCase):
         self.assertFalse(field_handoff.ready(handoff))
         self.assertEqual(handoff['archive_resume']['status'], 'launched')
 
+    def test_field_failure_is_acknowledged_after_the_referee_decision(self):
+        from auto_moniter import field_handoff
+        from auto_moniter.storage import write_json
+        from console.tasks import TaskStore
+
+        worker, responses = self.archive_scenario()
+        responses[1]['verdict']['field_handoffs'][0].update(kind='browser', case_id='login-routes')
+        reviewer = ScriptedProvider('reviewer', responses[:2])
+        self.assertEqual(self.monitor(worker, reviewer, max_rounds=1).run().status, 'action_required')
+        value = field_handoff.read(self.run_dir)
+        value['failed_cases'] = {'1': {'case_id': 'login-routes', 'reason': '浏览器退出。', 'role': 'reviewer'}}
+        write_json(self.run_dir / field_handoff.FILE, value)
+        store = object.__new__(TaskStore)
+        worker, reviewer = FunctionWorker('worker', []), ScriptedProvider('reviewer', [decision('wait')])
+        with patch.object(store, 'action') as launch:
+            store._route_browser_failure({'id': 'task'}, self.run_dir, value, referee_enabled=True)
+            launched = field_handoff.read(self.run_dir)
+            self.assertFalse(launched.get('fallback_history'))
+            report = self.monitor(worker, reviewer, max_rounds=1, resume=True).run()
+            self.assertEqual(report.status, 'action_required', report.summary)
+            self.assertEqual(len(reviewer.calls), 1)
+            self.assertFalse(worker.calls)
+            handled = field_handoff.read(self.run_dir)
+            self.assertEqual(handled['fallback']['status'], 'handled')
+            store._route_browser_failure({'id': 'task'}, self.run_dir, handled, referee_enabled=True)
+            launch.assert_called_once_with('task', 'resume')
+
     def test_review_interruption_reuses_worker_candidate_and_requires_fresh_review(self):
         worker = self.worker()
         reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),
@@ -192,9 +219,10 @@ class RefereeTests(unittest.TestCase):
              'writes': {'b.py': 'def parse_input(): return 42\n'}},
             {**result('SECOND', 'incomplete', file='b.py'), 'exit_code': 1},
             result('VERIFY_SECOND', 'done', file='b.py', status='done')])
+        from tests.test_review_first import approve_requirement_coverage
         reviewer = ScriptedProvider('reviewer', [planning(first, [first, second]),
             result('FIRST', 'accepted', file='a.py'), decision('replan'), planning(verification),
-            result('VERIFY_SECOND', 'accepted', file='b.py', status='done')])
+            approve_requirement_coverage(), result('VERIFY_SECOND', 'accepted', file='b.py', status='done')])
         monitor = self.monitor(worker, reviewer)
         report = monitor.run()
         self.assertEqual(report.status, 'done', report.summary)
@@ -207,7 +235,7 @@ class RefereeTests(unittest.TestCase):
     def test_identical_recovery_action_is_not_repeated_on_the_same_incident(self):
         worker = self.worker()
         turns = [planning(final_task()), *([review_failure(), review_failure(), decision('retry_reviewer')] * 2)]
-        reviewer = ScriptedProvider('reviewer', turns)
+        reviewer = ScriptedProvider('reviewer', [*turns, decision('retry_reviewer')])
         report = self.monitor(worker, reviewer).run()
         self.assertEqual(report.status, 'action_required', report.summary)
         self.assertEqual(len(worker.calls), 1)

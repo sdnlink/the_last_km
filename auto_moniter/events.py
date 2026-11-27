@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from auto_moniter.redaction import redactor
 
+CONCLUSION_EVENTS = {
+    'requirements_reviewed', 'requirement_coverage_reviewed', 'approved_local_commit', 'acceptance_checks_concluded',
+    'referee_decision', 'referee_rejected', 'run_finished',
+    'round_concluded',
+}
+
 
 def record(run_dir: Path, kind: str, **details) -> None:
     path = run_dir / "events.jsonl"
@@ -15,3 +21,6 @@ def record(run_dir: Path, kind: str, **details) -> None:
         path.replace(run_dir / "events.previous.jsonl")
     with path.open("a", encoding="utf-8") as handle:
         handle.write(entry)
+    if kind in CONCLUSION_EVENTS:
+        with (run_dir / "milestones.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(entry)

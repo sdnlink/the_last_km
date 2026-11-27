@@ -1,7 +1,7 @@
 import {i18n,i18nHTML,locale} from '../i18n.js';
 import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration} from '/ui.js';
 import {api,watch,toast,refresh} from '/core.js';
-import {failureHTML,gitHistoryHTML,renderWorkflow,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
+import {failureHTML,gitHistoryHTML,renderWorkflow,selectWorkflowStage,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
 import {dispatchPlanHTML} from '/dispatch-plan.js';
 import {mountSupervision} from '/supervision.js';
@@ -325,7 +325,8 @@ export function mount(){
  }
  onPaginationChange((key,reason)=>{if(key==='dispatch-plan'){void loadDispatch();}else if(key==='logs'){if(reason==='page')$('#log-follow').checked=false;loadLogs().catch(e=>toast(e.message,true));}else if(task)render(task);});
  $('#dispatch-filters')?.addEventListener('click',event=>{const button=event.target.closest('[data-dispatch-filter]');if(!button)return;dispatchFilter=button.dataset.dispatchFilter;resetPage('dispatch-plan');dispatchData=null;void loadDispatch();});
- document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;resetPage('workflow');if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});
+ $('#workflow-stages')?.addEventListener('click',e=>{const button=e.target.closest('[data-workflow-stage]');if(button&&task){selectWorkflowStage(button.dataset.workflowStage);renderWorkflow(task,{role});$('[data-workflow-stage="'+button.dataset.workflowStage+'"]')?.focus();}});
+ document.addEventListener('click',e=>{const el=e.target.closest('[data-role-filter],[data-role-focus]');if(!el)return;role=el.dataset.roleFilter||el.dataset.roleFocus;selectWorkflowStage(null);if(task)renderWorkflow(task,{role});if(el.dataset.roleFocus)$('#workflow-stages').scrollIntoView({behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});
  $('#log-select')?.addEventListener('change',e=>{log=e.target.value;resetPage('logs');logTotal=0;loadLogs().catch(e=>toast(e.message,true));});
  $('#log-follow')?.addEventListener('change',()=>loadLogs().catch(e=>toast(e.message,true)));
  watch(async()=>{

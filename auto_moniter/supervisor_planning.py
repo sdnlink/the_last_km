@@ -486,7 +486,8 @@ class RequirementPlanning:
             'checks_sha256': requirement_context.checks_digest(checks),
             'modules_sha256': requirement_coverage.digest(modules),
         }), durable=True)
-        self._event('requirement_coverage_reviewed', status=result['status'], receipt=receipt)
+        self._event('requirement_coverage_reviewed', status=result['status'], receipt=receipt,
+                    round=index, summary=result.get('summary', ''))
         return result, receipt
 
     def _coverage_sources(self, directions):
@@ -1013,7 +1014,8 @@ class RequirementPlanning:
             approved_path = self.run_dir / 'reviewed-requirement.json'
             if brief['status'] == 'ready' or not approved_path.exists():
                 write_json(approved_path, safe(brief), durable=True)
-            self._event('requirements_reviewed',status=brief['status'])
+            self._event('requirements_reviewed', status=brief['status'], cycle=brief['cycle'],
+                        summary=brief.get('summary', ''))
             return brief['status']=='ready'
         except ValueError as exc:
             self.requirements_review={'status':'failed','summary':redact(str(exc)),
@@ -1021,6 +1023,8 @@ class RequirementPlanning:
                                       **({'failure_kind': 'model_transport'} if isinstance(exc, _PlanningTransportFailure) else {}),
                                       **({'output_file':output_file} if output_file else {}),
                                       **({'workspace_changes':workspace_changes} if workspace_changes else {})}
+            self._event('requirements_reviewed', status='failed', cycle=self.requirements_review['cycle'],
+                        summary=self.requirements_review['summary'])
             if (follow_up and not self._stop_requested and not self._project_review_changed
                     and not self._requirement_input_changed):
                 self._stop = True

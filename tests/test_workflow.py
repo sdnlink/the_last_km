@@ -132,3 +132,32 @@ class WorkDetailsTests(unittest.TestCase):
         work = work_details({'provider_config': {'no_review': True}}, health, {}, 'running', {}, {}, 'codex', 'codex')
         self.assertEqual(work['roles']['reviewer']['status'], 'disabled')
         self.assertIn('未启用独立审核', work['roles']['reviewer']['wait_reason'])
+
+
+class StageHistoryTests(unittest.TestCase):
+    def test_history_keeps_earlier_conclusions_after_event_rotation(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from auto_moniter.events import record
+        from console.milestones import stage_history
+
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            record(run, 'requirements_reviewed', status='ready', cycle=1, summary='首批范围已明确')
+            record(run, 'round_concluded', role='worker', round=1, status='done', summary='已实现首页')
+            record(run, 'approved_local_commit', round=1, commit='a' * 40)
+            record(run, 'run_finished', status='action_required', summary='等待浏览器验证')
+            (run / 'events.jsonl').unlink()
+            record(run, 'check_finished', command='sensitive-command', exit=0)
+            receipt = {'passed': True, 'checks': [{'status': 'passed', 'command': 'another-command'}]}
+            state = {'rounds': [{'index': 2, 'watcher_result': {'candidate_checks': receipt}}]}
+            conclusions = [{'role': 'reviewer', 'index': 2, 'summary': '复核通过', 'status': 'done'}]
+            history = stage_history(run, state, conclusions, {})
+            self.assertEqual(history['refining_requirements'][0]['summary'], '首批范围已明确')
+            self.assertEqual(history['working'][0]['summary'], '已实现首页')
+            self.assertEqual(history['validating'][0]['checks']['passed'], 1)
+            self.assertEqual(history['reviewing'][0]['summary'], '复核通过')
+            self.assertEqual(history['publishing'][0]['commit'], 'a' * 40)
+            self.assertEqual(history['closing_agents'][0]['summary'], '等待浏览器验证')
+            self.assertNotIn('command', str(history))

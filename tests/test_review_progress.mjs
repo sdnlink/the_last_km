@@ -1,17 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {activityTextHTML,failureHTML,requirementReviewHTML,renderWorkflow} from '../console/static/task-view.js';
-
-test('preview labels and complete output links distinguish pending and completed turns',()=>{
- const pending=activityTextHTML({id:'task'},{text:'<summary>',truncated:true,text_length:7290});
- assert.match(pending,/已截断/);assert.match(pending,/7290/);assert.match(pending,/本轮结束后/);
- assert.doesNotMatch(pending,/<summary>|<a /);
- const completed=activityTextHTML({id:'task'},{text:'preview',preview_only:true,text_file:'000-reviewer-text.md'});
- assert.match(completed,/进度预览/);
- assert.match(completed,/href="\/api\/tasks\/task\/logs\?file=000-reviewer-text.md&amp;full=1"/);
- assert.match(completed,/target="_blank" rel="noopener"/);
- assert.doesNotMatch(activityTextHTML({id:'task'},{text:'complete'}),/截断|进度预览|<a /);
-});
+import {failureHTML,requirementReviewHTML,renderWorkflow,selectWorkflowStage} from '../console/static/task-view.js';
 
 test('workspace change explanation preserves unaccepted review and escaped file details',()=>{
  const html=failureHTML({id:'task',failure:{title:'审查期间工作区发生变化',
@@ -31,15 +20,42 @@ test('requirements include summary, scope, criteria, assumptions, constraints an
    acceptance_criteria:['Criterion'],constraints:['Keep scope'],assumptions:['Existing evidence'],blockers:['<Confirm version>']});
   for(const field of ['Summary','Original scope','验收条件','Criterion','约束','Keep scope','假设','Existing evidence','阻塞条件','&lt;Confirm version&gt;'])assert.ok(html.includes(field),field);
   assert.equal(requirementReviewHTML({}),'');
+
+ }finally{
+  for(const [key,value] of Object.entries(original)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
+ }
+});
+
+
+test('step history includes earlier rounds and shows only conclusions',()=>{
+ const original={document:globalThis.document,window:globalThis.window,requestAnimationFrame:globalThis.requestAnimationFrame};
+ globalThis.document={querySelector:()=>null,querySelectorAll:()=>[]};
+ globalThis.window={innerHeight:800};globalThis.requestAnimationFrame=()=>{};
+ try{
   const nodes=Object.fromEntries(['#workflow-stages','#detail-live'].map(id=>[id,{innerHTML:'',dataset:{},querySelectorAll:()=>[]} ]));
   globalThis.document.querySelector=selector=>nodes[selector]||null;
-  renderWorkflow({id:'task',workflow:'review-first',status:'action_required',health:{phase:'finished'},work:{workflow:[{role:'reviewer',round:0,kind:'message',text:'partial',truncated:true,text_file:'000-reviewer-text.md'}]}},{showRoles:false});
-  assert.match(nodes['#detail-live'].innerHTML,/进度说明已截断/);
-  assert.match(nodes['#detail-live'].innerHTML,/查看本轮完整输出/);
+  const task={id:'task',workflow:'review-first',status:'running',health:{phase:'reviewing'},activity:{round:8,plan:[{step:'private command'}]},work:{
+   workflow:[{role:'reviewer',round:8,kind:'command',text:'git diff private command'}],
+   stages:{working:[{role:'worker',summary:'旧轮的实现结论',round:1}],reviewing:[{role:'reviewer',summary:'当前审查结论',round:8}]},
+  }};
+  const render=()=>renderWorkflow(task,{showRoles:false,role:'reviewer',currentOnly:true});
+  render();
+  assert.match(nodes['#detail-live'].innerHTML,/当前审查结论/);
+  assert.doesNotMatch(nodes['#detail-live'].innerHTML,/private command|旧轮的实现结论/);
   const stages=nodes['#workflow-stages'].innerHTML;
-  assert.ok(stages.indexOf('watcher 运行派单检查')<stages.indexOf('reviewer 审查'));
-  assert.ok(stages.indexOf('reviewer 审查')<stages.indexOf('watcher 提交已审核代码'));
+  assert.equal((stages.match(/<button/g)||[]).length,6);
+  assert.ok(stages.indexOf('进行检查')<stages.indexOf('独立审查'));
+  assert.ok(stages.indexOf('独立审查')<stages.indexOf('保存提交'));
+  selectWorkflowStage('working');
+  render();
+  assert.match(nodes['#detail-live'].innerHTML,/实现需求 · 任务全程/);
+  assert.match(nodes['#detail-live'].innerHTML,/旧轮的实现结论/);
+  assert.doesNotMatch(nodes['#detail-live'].innerHTML,/当前审查结论|private command/);
+  selectWorkflowStage('working');
+  render();
+  assert.match(nodes['#detail-live'].innerHTML,/当前审查结论/);
  }finally{
+  selectWorkflowStage(null);
   for(const [key,value] of Object.entries(original)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
  }
 });

@@ -214,6 +214,10 @@ class RunCheckpoint:
             protected_rounds = set(blocked_reviews.values())
         removed = [record for record in records if record.index < first and record.index not in protected_rounds]
         for record in removed:
+            if record.role in {'worker', 'reviewer'} and record.verdict.summary:
+                self._event('round_concluded', round=record.index, role=record.role, status=record.verdict.status,
+                            summary=record.verdict.summary, task_id=record.verdict.task_id,
+                            watcher_status=record.watcher_result.get('status', ''))
             self._pruned_failures[record.role] = self._pruned_failures.get(record.role, 0) + 1 if record.failure else 0
             self._pruned_worker_rounds += record.role == "worker"
         self._pruned_records += len(removed)

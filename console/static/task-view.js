@@ -1,6 +1,6 @@
 import {i18n,i18nHTML} from './i18n.js';
-import {$,$$,escape,duration,active,timeLabel,dateTimeLabel,stableHTML,roleName,rolePresentation,stateLabel,taskMotion,activityState,taskNarrative} from './ui.js';
-import {paginate,pagedList} from './pagination.js';
+import {$,$$,escape,duration,active,dateTimeLabel,stableHTML,roleName,rolePresentation,stateLabel,taskMotion,taskNarrative} from './ui.js';
+import {paginate,pagedList,resetPage} from './pagination.js';
 function fullLogURL(id,file){
  return `/api/tasks/${encodeURIComponent(id)}/logs?file=${encodeURIComponent(file)}&full=1`;
 }
@@ -9,18 +9,6 @@ function failureReasonHTML(task){
  const files=new Set(task.id?reason_files:[]);
  return raw_summary.split(/([A-Za-z0-9_.-]+)/).map(text=>files.has(text)?
    `<a href="${escape(fullLogURL(task.id,text))}" target="_blank" rel="noopener">${escape(text)}</a>`:escape(text)).join('');
-}
-function activityLabelHTML(t,item,label,options){
-  const state=activityState(t,item,options);
-  const text=item.status==='completed'?(state==='error'?i18n('执行失败'):options?.plan?i18n('已完成'):i18n('已结束')):
-    item.status==='failed'?i18n('执行失败'):['running','in_progress'].includes(item.status)?
-      (state==='running'?i18n('正在执行'):state==='paused'?i18n('已暂停'):i18n('历史记录')):'';
-  return stateLabel(state,label+(text?' · '+text:''));
-}
-function activityTextHTML(t,e){
- const preview=e.truncated?i18n`进度说明已截断${e.text_length?i18n`（共 ${escape(e.text_length)} 字符）`:''}。`:e.preview_only?i18n('当前为进度预览。'):'';
- const link=e.text_file?i18nHTML`<a href="${escape(fullLogURL(t.id,e.text_file))}" target="_blank" rel="noopener">查看本轮完整输出</a>`:'';
- return `<pre>${escape(e.display_text ?? e.text)}${e.output?`\n\n${escape(e.output)}`:''}</pre>${preview||link?`<p class="control-hint">${preview}${link||i18n('完整输出将在本轮结束后保存到执行日志。')}</p>`:''}`;
 }
 function requirementReviewHTML(brief){
  if(!brief?.status)return '';
@@ -80,9 +68,9 @@ function roleActivity(t,name,r,presentation){
       const titles={working:i18n('跟进执行与检查点'),reviewing:i18n('等待独立审核结论'),refining_requirements:i18n('协调需求审核'),validating:i18n('运行验收检查'),publishing:i18n('保存审核通过的代码')};
       return {title:titles[phase]||i18n('监督任务运行'),work:taskNarrative(t).next};
     }
-    const operation=t.activity?.role===name&&t.activity?.is_running?t.activity.operation:null;
-    const tool=operation?.status==='running'?({command:i18n('正在执行命令'),file:i18n('正在处理文件'),tool:i18n('正在调用工具')})[operation.kind]:null;
-    return {title:tool||(name==='reviewer'?t.health?.phase==='refining_requirements'?i18n('正在梳理需求'):i18n('正在核对代码与证据'):i18n('正在实现与验证')),work:r.current_work||operation?.text||i18n('等待新的公开进展')};
+    const planning=name==='reviewer'&&t.health?.phase==='refining_requirements';
+    const title=planning?i18n('正在梳理需求'):name==='reviewer'?i18n('正在核对代码与证据'):i18n('正在实现与验证');
+    return {title,work:r.last_conclusion?.summary||title};
   }
   if(presentation.state==='waiting')return {title:presentation.label,work:r.wait_reason||i18n('收到下一项调度后继续。')};
   if(presentation.state==='paused')return {title:i18n('进度已保留'),work:i18n('任务恢复后继续，当前展示最近工作。')};
@@ -121,34 +109,59 @@ function roleDetailsHTML(t) {
       <div class="role-card-name"><strong>${roleName(name)}</strong><small>${name} · ${titles[name]}</small></div>
       <div class="role-activity-scene">${roleSceneHTML(name)}<div class="role-scene-caption">${stateLabel(motion,activity.title)}</div></div>
       <span class="role-state">${stateLabel(motion,current?i18n('正在工作'):presentation.label)}</span>
-    </header><div class="role-work"><span class="role-work-label">${current?i18n('此刻正在做'):motion==='waiting'?i18n('为何等待'):i18n('当前说明')}</span><p class="role-current">${escape(activity.work)}</p><div class="role-work-flow" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div><dl class="role-overview">${overview.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl><footer class="role-card-footer"><details class="role-runtime" data-key="role-runtime-${name}"><summary>${i18n('运行详情')}</summary><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl>${last?i18nHTML`<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p>${watcherHTML(last)}${checkpointHTML(t.id,last)}</div>`:''}</details><button class="detail-button" data-role-focus="${name}">${i18n('工作记录')} ↗</button></footer></article>`;
+    </header><div class="role-work"><span class="role-work-label">${current&&last&&name!=='watcher'?i18n('最近结论'):current?i18n('此刻正在做'):motion==='waiting'?i18n('为何等待'):i18n('当前说明')}</span><p class="role-current">${escape(activity.work)}</p><div class="role-work-flow" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div><dl class="role-overview">${overview.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl><footer class="role-card-footer"><details class="role-runtime" data-key="role-runtime-${name}"><summary>${i18n('运行详情')}</summary><dl>${facts.map(([k,v])=>`<div><dt>${k}</dt><dd>${escape(v)}</dd></div>`).join('')}</dl>${last?i18nHTML`<div class="role-last"><span>最近结论</span><p>${escape(last.summary)}</p>${watcherHTML(last)}${checkpointHTML(t.id,last)}</div>`:''}</details><button class="detail-button" data-role-focus="${name}">${i18n('工作记录')} ↗</button></footer></article>`;
   }).join("");
+}
+const stageTitles={
+  refining_requirements:'梳理需求', working:'实现需求', validating:'进行检查',
+  reviewing:'独立审查', publishing:'保存提交', closing_agents:'整理记录', refereeing:'裁判诊断',
+};
+const stageStatus={
+  ready:'已就绪', needs_input:'需要补充信息', failed:'执行失败', pass:'已通过', passed:'已通过', approved:'已通过',
+  revise:'需要修改', rejected:'未通过', done:'已完成', continue:'继续处理', blocked:'验收受阻',
+  action_required:'待处理', interrupted:'已中断', stopped:'已停止', budget_exceeded:'预算已用尽',
+};
+let selectedStage=null;
+function selectWorkflowStage(stage){
+  selectedStage=stage===selectedStage?null:stage;
+  resetPage('workflow');
+}
+function milestoneHTML(item){
+  const {checks,commit}=item;
+  const metadata=[roleName(item.role)];
+  if(item.cycle)metadata.push(i18n`需求第 ${item.cycle} 批`);
+  if(item.round)metadata.push(i18n`第 ${item.round} 轮`);
+  if(item.task_id)metadata.push(item.task_id);
+  if(item.status)metadata.push(Object.hasOwn(stageStatus,item.status)?i18n(stageStatus[item.status]):item.status);
+  if(item.at)metadata.push(dateTimeLabel(item.at));
+  const summary=checks?i18n`通过 ${checks.passed} 项，共 ${checks.total} 项`+(checks.source_changed?i18n('。检查期间源码发生变化。'):''):item.summary;
+  return `<li><div class="work-event-meta">${metadata.map(value=>`<span>${escape(value)}</span>`).join('')}</div><p>${escape(summary)}${commit?` <code title="${escape(commit)}">${escape(commit.slice(0,12))}</code>`:''}</p></li>`;
 }
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
   if (showRoles && $("#role-details")) stableHTML($("#role-details"), roleDetailsHTML(t));
   const phase = t.health.phase;
-  const stages = t.workflow==='review-first'
-    ? [["reviewer",i18n("reviewer 完善需求"),"refining_requirements"],["worker",i18n("worker 实现"),"working"],["checks",i18n("审查前运行固定检查"),"validating"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 提交已审核代码"),"publishing"],["watcher",i18n("归档交付"),"closing_agents"]]
-    : [["worker",i18n("worker 实现"),"working"],["reviewer",i18n("reviewer 审查"),"reviewing"],["watcher",i18n("watcher 验收与本地提交"),phase==='publishing'?'publishing':'validating'],["watcher",i18n("归档交付"),"closing_agents"]];
-  if(phase==='refereeing')stages.splice(-1,0,['referee',roleName('referee'),'refereeing']);
-  const stageTitles={refining_requirements:i18n('梳理需求'),working:i18n('实现需求'),validating:i18n('运行检查'),reviewing:i18n('独立审查'),refereeing:i18n('裁判诊断'),publishing:i18n('保存提交'),closing_agents:i18n('整理记录')};
-  stableHTML($("#workflow-stages"), stages.map(([role,label,stage],i) => {
-    const skipped = stage === "reviewing" && t.work?.roles?.reviewer?.status === "disabled";
-    const complete = t.status === "done" && !skipped;
-    const current = active(t) && phase === stage && !skipped;
-    const state=skipped?'idle':complete?'complete':current?taskMotion(t):t.status==='paused'?'paused':['running','starting'].includes(t.status)?'waiting':'idle';
-    const text=skipped?i18n('未启用'):complete?i18n('已完成'):current?(state==='running'?i18n('正在执行'):state==='paused'?i18n('已暂停'):state==='attention'?i18n('连接待确认'):i18n('等待当前操作结束')):t.status==='paused'?i18n('等待恢复'):state==='waiting'?i18n('等待调度'):i18n('当前未执行');
-    return `<div class="workflow-stage ${complete ? "complete" : current ? "current" : ""}" data-role="${phaseRoles[stage]||role}" data-motion="${state}"${current?' aria-current="step"':''}><span>${skipped ? "—" : complete ? "✓" : i+1}</span><div><strong title="${escape(label)}">${stageTitles[stage]}</strong><small>${stateLabel(state,text)}</small></div></div>`;
-  }).join(""));
-  const currentRound = t.activity?.round;
-  const currentStart = Date.parse(t.activity?.started_at) || 0;
-  const events = (t.work?.workflow || []).filter(e => !currentOnly || (e.round ? String(e.round) === String(currentRound) : (Date.parse(e.at) || 0) >= currentStart)).filter(e => role === "all" || (role === "watcher" ? e.kind === "phase" : e.role === role && e.kind !== "phase")).slice().reverse();
-  const labels = {message:i18n("进度说明"),command:i18n("执行命令"),file:i18n("文件变更"),tool:i18n("工具操作"),result:i18n("工具结果"),plan:i18n("执行计划"),output:i18n("执行输出"),phase:i18n("监督事件"),error:i18n("执行异常"),direction:i18n("用户要求")};
-  const plan = role === "all" || role === t.activity?.role ? t.activity?.plan || [] : [];
-  const page=paginate('workflow',events,{rowHeight:130});
-  const html = `${plan.length ? `<ol class="live-plan">${plan.map(p=>`<li class="${escape(p.status)}">${activityLabelHTML(t,p,p.step,{plan:true})}</li>`).join("")}</ol>` : ""}<ol class="work-events" data-page-list="workflow">${page.items.map(e=>`<li><div class="work-event-meta"><time>${escape(timeLabel(e.at))}</time><span>${activityLabelHTML(t,e,`${roleName(e.kind==='phase'?'watcher':e.role||'worker')} · ${labels[e.kind]||i18n("工作活动")}`)}</span>${e.round ? i18nHTML`<span>第 ${escape(e.round)} 轮</span>` : ""}</div><details data-key="${escape(`${e.at}-${e.role}-${e.kind}-${e.text?.slice(0,60)}`)}" ${["message","phase"].includes(e.kind) ? "open" : ""}><summary>${escape((e.display_text ?? e.text ?? "").split("\n")[0].slice(0,200))}</summary>${activityTextHTML(t,e)}</details></li>`).join("") || i18nHTML('<li class="live-empty">该角色暂无工作流记录；新活动将在这里自动更新。</li>')}</ol>${page.controls}`;
-  stableHTML($("#detail-live"),html);
-  $$("[data-role-filter]").forEach(el=>el.classList.toggle("active",el.dataset.roleFilter === role));
+  const history=t.work?.stages||{};
+  const stages=['refining_requirements','working','validating','reviewing','publishing','closing_agents'];
+  if(t.workflow && t.workflow!=='review-first')stages.splice(2,2,'reviewing','validating');
+  if(phase==='refereeing'||history.refereeing?.length)stages.splice(-1,0,'refereeing');
+  stableHTML($("#workflow-stages"), stages.map((stage,i) => {
+    const skipped=stage==='reviewing'&&t.work?.roles?.reviewer?.status==='disabled';
+    const current=active(t)&&phase===stage&&!skipped;
+    const count=history[stage]?.length||0;
+    const complete=t.status==='done'&&count>0&&!skipped;
+    const state=skipped?'idle':complete?'complete':current?taskMotion(t):t.status==='paused'?'paused':'idle';
+    const label=skipped?i18n('未启用'):current?(state==='running'?i18n('正在执行'):state==='paused'?i18n('已暂停'):i18n('连接待确认')):count?i18n`${count} 条结论`:i18n('暂无结论');
+    return `<button type="button" class="workflow-stage ${complete?'complete':current?'current':''}" data-workflow-stage="${stage}" data-role="${phaseRoles[stage]}" data-motion="${state}"${current?' aria-current="step"':''} aria-pressed="${stage===selectedStage}" aria-controls="detail-live"><span>${skipped?'—':complete?'✓':i+1}</span><span class="workflow-stage-label"><strong>${i18n(stageTitles[stage])}</strong><small>${stateLabel(state,label)}</small></span></button>`;
+  }).join(''));
+  const currentRound=Number(t.activity?.round);
+  const group=selectedStage?history[selectedStage]||[]:stages.flatMap(stage=>history[stage]||[])
+    .filter(item=>(role==='all'||item.role===role)&&(!currentOnly||(item.round!=null&&Number(item.round)===currentRound)));
+  const items=group.slice().reverse();
+  if(!selectedStage)items.sort((a,b)=>Number(b.round||0)-Number(a.round||0));
+  const page=paginate('workflow',items,{rowHeight:100});
+  const heading=selectedStage?i18n(stageTitles[selectedStage])+' · '+i18n('任务全程'):i18n('关键结论');
+  stableHTML($("#detail-live"),`<h3 class="workflow-conclusions-title">${heading}</h3><ol class="work-events workflow-conclusions" data-page-list="workflow">${page.items.map(milestoneHTML).join('')||`<li class="live-empty">${i18n('暂无关键结论。')}</li>`}</ol>${page.controls}`);
+  $$('[data-role-filter]').forEach(el=>el.classList.toggle('active',!selectedStage&&el.dataset.roleFilter===role));
 }
 function conclusionHTML(t, c) {
   return `<article class="conclusion-item" data-conclusion-role="${escape(c.role)}"><div class="conclusion-heading"><span class="conclusion-role ${escape(c.role)}">${c.role === "reviewer" ? i18n("reviewer · 审查结论") : i18n("worker · 执行结论")}</span><span>${c.index == null ? i18n("最近结论") : i18n`第 ${escape(c.index)} 轮`}</span><span class="subtle-badge">${escape(c.status === "done" ? i18n("完成") : c.status === "continue" ? i18n("继续处理") : c.status)}</span></div><p class="conclusion-summary">${escape(c.summary)}</p>${watcherHTML(c)}${c.reported_summary ? i18nHTML`<details><summary>reviewer 原始表述</summary><p>${escape(c.reported_summary)}</p></details>` : ""}${[[i18n("已完成"),c.done],[i18n("待解决"),c.gaps],[i18n("下一步"),c.next_actions],[i18n("阻塞"),c.blockers]].filter(([,values])=>values?.length).map(([label,values])=>`<div class="conclusion-field"><strong>${label}</strong><ul>${values.map(v=>`<li>${escape(v)}</li>`).join("")}</ul></div>`).join("")}${c.evidence?.length ? i18nHTML`<details data-key="evidence-${escape(c.role)}-${escape(c.index)}"><summary>验证依据 · ${c.evidence.length} 项</summary><ul>${c.evidence.map(e=>`<li>${escape(e)}</li>`).join("")}</ul></details>` : ""}${checkpointHTML(t.id,c)}</article>`;
@@ -184,4 +197,4 @@ function renderConclusions(t, {groupByRound=false} = {}) {
   stableHTML(root,html+page.controls);
 }
 
-export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions,activityTextHTML,requirementReviewHTML,fullLogURL};
+export {failureHTML,gitHistoryHTML,roleDetailsHTML,renderWorkflow,renderConclusions,selectWorkflowStage,requirementReviewHTML,fullLogURL};

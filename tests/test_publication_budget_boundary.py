@@ -302,7 +302,7 @@ class PublicationBudgetBoundaryTests(unittest.TestCase):
 
                 patches = [
                     patch('auto_moniter.supervisor.run_command', side_effect=counting),
-                    patch('auto_moniter.supervisor.workspace_fingerprint', side_effect=fingerprint),
+                    patch('auto_moniter.supervisor_publication.workspace_fingerprint', side_effect=fingerprint),
                     patch.object(monitor, '_commit_approved_locked', side_effect=enter_then_commit),
                 ]
                 if boundary == 'prepare-stop':

@@ -880,12 +880,18 @@ class AcceptanceChecks:
         return path
 
     def _write_acceptance_snapshot(self, index, tree, final, check_results, failures, incomplete, source_changed):
+        complete = bool(check_results) and not failures and not incomplete and not source_changed and all(
+            item.get('status') == 'passed' for item in check_results)
         write_json(self.run_dir/'acceptance-results.json', {
             'round':index,'tree':tree,'scope':'requirement' if final else 'module',
             'checks':check_results,
-            'complete':bool(check_results) and not failures and not incomplete and not source_changed and all(item.get('status') == 'passed' for item in check_results),
+            'complete':complete,
             'source_changed':source_changed,
             'note':'This is a check snapshot, not final delivery approval. Unexecuted behavior remains unverified.'}, durable=True)
+        if not incomplete and check_results:
+            self._event('acceptance_checks_concluded', round=index, status='passed' if complete else 'failed',
+                        total=len(check_results), passed=sum(item.get('status') == 'passed' for item in check_results),
+                        source_changed=source_changed)
 
     def _scope_replan_candidate(self, records):
         """Route a verified out-of-scope submission to planning."""

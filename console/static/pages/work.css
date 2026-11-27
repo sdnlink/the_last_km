@@ -305,19 +305,19 @@
 
 .workflow-stage { display:flex; gap:10px; align-items:center; padding:13px 10px; border:1px solid #e3eaf0; border-radius:8px; color:#7d909e; min-width:0; }
 
-.workflow-stage > span { display:grid; place-items:center; width:26px; height:26px; background:#edf2f6; border-radius:50%; font-size:12px; flex-shrink:0; }
+.workflow-stage > span:first-child { display:grid; place-items:center; width:26px; height:26px; background:#edf2f6; border-radius:50%; font-size:12px; flex-shrink:0; }
 
 .workflow-stage strong { font-size:12px; font-weight:500; }
 
 .workflow-stage small { display:block; font-size:10px; margin-top:5px; }
 
-.workflow-stage[data-role] > span { background:var(--role-soft); color:var(--role-color); }
+.workflow-stage[data-role] > span:first-child { background:var(--role-soft); color:var(--role-color); }
 
 .workflow-stage.current[data-motion="running"] { background:var(--role-soft); color:var(--role-color); border-color:var(--role-color); box-shadow:inset 3px 0 var(--role-color); }
-.workflow-stage.current[data-motion="running"] > span { background:var(--role-color); color:#fff; }
+.workflow-stage.current[data-motion="running"] > span:first-child { background:var(--role-color); color:#fff; }
 .workflow-stage.current[data-motion="running"] strong { font-weight:700; }
 .workflow-stage.current[data-motion="running"] .component-state { color:inherit; }
-.workflow-stage.complete > span { background:#d7eee8; color:#15877c; }
+.workflow-stage.complete > span:first-child { background:#d7eee8; color:#15877c; }
 
 .workflow-stage.complete { color:#4c9185; }
 
@@ -504,3 +504,10 @@
 @media (prefers-reduced-motion:reduce) {
   .role-card *, .role-card *::before, .role-card *::after { animation:none !important; }
 }
+
+button.workflow-stage { background:var(--surface,#fff); text-align:left; cursor:pointer; }
+button.workflow-stage:hover, button.workflow-stage[aria-pressed="true"] { border-color:var(--role-color,var(--accent)); }
+button.workflow-stage[aria-pressed="true"] { box-shadow:inset 0 -3px var(--role-color,var(--accent)); }
+.workflow-stage > .workflow-stage-label { display:block; min-width:0; }
+.workflow-conclusions-title { margin:0 0 10px; font-size:14px; }
+.workflow-conclusions li p { margin:5px 0 0; white-space:pre-line; overflow-wrap:anywhere; }

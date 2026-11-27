@@ -84,11 +84,12 @@ test('state labels escape untrusted values and preserve text alternatives for mo
 
 test('role cards distinguish current review work from its earlier waiting explanation',()=>{
  const t={...task('running','reviewing'),work:{roles:{
-  reviewer:{status:'running',current_work:'Reviewing the changed recovery branch',wait_reason:'Old waiting explanation',provider:'codex'},
+  reviewer:{status:'running',current_work:'Intermediate review commentary',last_conclusion:{summary:'The recovery branch passed review'},wait_reason:'Old waiting explanation',provider:'codex'},
   worker:{status:'waiting',wait_reason:'Waiting for review'},watcher:{status:'monitoring',usage:{agent_calls:4,max_agent_calls:20}},
  }}};
  const html=roleDetailsHTML(t);
- assert.match(html,/Reviewing the changed recovery branch/);
+ assert.match(html,/The recovery branch passed review/);
+ assert.doesNotMatch(html,/Intermediate review commentary/);
  assert.doesNotMatch(html,/Old waiting explanation/);
  assert.match(html,/scene-scan/);assert.match(html,/scene-sweep/);assert.match(html,/scene-cursor/);
  assert.match(html,/<details class="role-runtime" data-key="role-runtime-reviewer">/);
@@ -102,13 +103,12 @@ test('role cards distinguish current review work from its earlier waiting explan
  assert.equal(rolePresentation({...t,health:{phase:'retry_wait'}},'reviewer',{status:'running'}).state,'waiting');
 });
 
-test('role explanations and current operations are localized and escape tool text',()=>{
+test('role explanations are localized and hide current commands',()=>{
  const previous=globalThis.document;
  globalThis.document={documentElement:{lang:'en'}};
  try{
   const html=roleDetailsHTML({...task(),activity:{role:'worker',is_running:true,operation:{kind:'command',status:'running',text:'<script>bad</script>'}},work:{roles:{worker:{status:'running'},reviewer:{status:'waiting'},watcher:{status:'monitoring'}}}});
-  assert.match(html,/Running a command/);
-  assert.match(html,/&lt;script&gt;bad&lt;\/script&gt;/);
+  assert.doesNotMatch(html,/Running a command|bad/);
   assert.doesNotMatch(html,/[\u3400-\u9fff]/);
  }finally{globalThis.document=previous;}
 });

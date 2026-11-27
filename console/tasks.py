@@ -430,6 +430,9 @@ class TaskStore:
         if failure:
             work['roles']['watcher']['current_work'] = failure['title'] + '：' + failure['reason']
         acceptance_results = read_json(run/'acceptance-results.json') if include_details else {}
+        if include_details:
+            from console.milestones import stage_history
+            work['stages'] = stage_history(run, state, work['conclusions'], acceptance_results)
         delivery_diagnosis = state.get('delivery_diagnosis') or {}
         if (include_details and not delivery_diagnosis and status=='budget_exceeded'
                 and failure and failure['code'] in {'runtime_budget','runtime_handoff'}):
@@ -556,7 +559,7 @@ class TaskStore:
 
     def progress(self, ident: str) -> dict:
         view = self.detail(ident)
-        keys = ('id', 'title', 'cwd', 'status', 'health', 'activity', 'work', 'actions', 'control',
+        keys = ('id', 'title', 'cwd', 'status', 'workflow', 'health', 'activity', 'work', 'actions', 'control',
                 'control_message', 'can_direct', 'provider', 'reviewer', 'resume_unavailable', 'failure')
         result = {key: view.get(key) for key in keys}
         work = view.get('work') or {}

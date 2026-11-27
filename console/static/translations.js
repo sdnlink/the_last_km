@@ -1561,5 +1561,5 @@ export default {
   "等待本轮结论": "Waiting for this round’s conclusion",
   "需要修改": "Changes requested",
   "已中断": "Interrupted",
-  "待处理": "Needs attention",
+  "待处理": "Needs attention"
 };

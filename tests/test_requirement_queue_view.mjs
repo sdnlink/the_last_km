@@ -3,15 +3,20 @@ import {afterEach,test} from 'node:test';
 import {config} from '../console/static/core.js';
 import {positionOptions,requirementList,requirementQueueMarkup} from '../console/static/requirement-queue.js';
 
-test('queue page shows the current request and full waiting requirements in execution order',()=>{
+test('queue page shows complete waiting requests newest first with their execution positions',()=>{
  const data={status:'running',original_requirement:'Original',active:{id:'active',text:'CURRENT'},waiting:[
-  {id:'A',position:1,text:'First requirement\nfull detail'},
-  {id:'B',position:2,text:'Second requirement with <script>not HTML</script>'}],completed:[{id:'done',text:'Delivered requirement'}]};
+  {id:'A',position:1,text:'First requirement\nfull detail',at:'2026-11-27T10:00:00.123456Z'},
+  {id:'B',position:2,text:'Second requirement with <script>not HTML</script>',at:'2026-11-27T18:00:00.123457+08:00'}],
+  completed:[{id:'old',text:'Earlier delivery',at:'2026-11-27T15:00:00+08:00'},
+   {id:'recent',text:'Delivered requirement',at:'2026-11-27T08:00:00Z'}]};
  const html=requirementQueueMarkup(data);
  assert.match(html,/CURRENT/);assert.match(html,/等待处理 · 2 条/);assert.match(html,/full detail/);
- assert.ok(html.indexOf('First requirement')<html.indexOf('Second requirement'));
+ assert.match(html,/<strong>第 2 位<\/strong>.*Second requirement/);
+ assert.ok(html.indexOf('Second requirement')<html.indexOf('First requirement'));
+ assert.ok(html.indexOf('Delivered requirement')<html.indexOf('Earlier delivery'));
  assert.match(html,/Delivered requirement/);assert.doesNotMatch(html,/<script>/);
- assert.match(positionOptions(data.waiting),/第 2 位/);
+ assert.ok(positionOptions(data.waiting).indexOf('第 1 位')<positionOptions(data.waiting).indexOf('第 2 位'));
+ assert.deepEqual(data.waiting.map(item=>item.id),['A','B']);
  assert.doesNotMatch(requirementList(data.waiting),/data-remove-requirement/);
  assert.match(requirementList(data.waiting,{editable:true}),/data-remove-requirement="A"/);
 });
@@ -21,12 +26,16 @@ test('empty and delivered queue states are explicit',()=>{
 });
 test('the queue shows planning status and linked acceptance supplements',()=>{
  const html=requirementQueueMarkup({status:'running',original_requirement:'Original',waiting:[],completed:[],
-  amendments:[{text:'<Pending>',planned:false},{text:'Reviewed',planned:true}],
-  check_supplements:[{cycle:1,task_id:'V2-Verify',criterion_ids:['req:1:2'],tree:'123456789abcde',count:1}]});
+  amendments:[{text:'<Pending>',planned:false,at:'2026-11-27T10:00:00Z'},
+   {text:'Reviewed',planned:true,at:'2026-11-27T11:00:00Z'}],
+  check_supplements:[{cycle:1,task_id:'V2-Verify',criterion_ids:['req:1:2'],tree:'123456789abcde',count:1,at:'2026-11-27T10:00:00Z'},
+   {cycle:1,task_id:'V3-Verify',criterion_ids:['req:1:3'],tree:'abcdef01234567',count:1,at:'2026-11-27T11:00:00Z'}]});
  assert.match(positionOptions([]),/value="current"/);
  assert.match(html,/等待 Reviewer 规划.*&lt;Pending&gt;/);
  assert.match(html,/已纳入评审计划.*Reviewed/);
  assert.match(html,/V2-Verify.*req:1:2.*123456789abc/);
+ assert.ok(html.indexOf('Reviewed')<html.indexOf('&lt;Pending&gt;'));
+ assert.ok(html.indexOf('V3-Verify')<html.indexOf('V2-Verify'));
 });
 
 const globals=['document','fetch','localStorage','setTimeout','clearTimeout'];
@@ -65,6 +74,17 @@ async function harness(){
  const module=await import(`../console/static/requirement-queue.js?lifecycle=${++serial}`);
  return {nodes,routes,storage,requests,module};
 }
+test('the queue dialog also shows newest requests first without changing insertion options',async()=>{
+ const h=await harness(),value=queue('A');
+ value.waiting[0].at='2026-11-27T10:00:00Z';
+ value.waiting.push({id:'A2',text:'Newest A',position:2,at:'2026-11-27T11:00:00Z'});
+ h.routes.set('GET /api/tasks/A/requirement-queue',response(value));
+ await h.module.openRequirementQueue('A');
+ const waiting=h.nodes['requirement-queue-waiting'].innerHTML;
+ const options=h.nodes['requirement-queue-position'].innerHTML;
+ assert.ok(waiting.indexOf('Newest A')<waiting.indexOf('Waiting A'));
+ assert.ok(options.indexOf('Waiting A')<options.indexOf('Newest A'));
+});
 test('late queue reads do not overwrite a newly opened task',async()=>{
  const h=await harness(),old=deferred();h.routes.set('GET /api/tasks/A/requirement-queue',old.promise);
  const opening=h.module.openRequirementQueue('A');await new Promise(setImmediate);

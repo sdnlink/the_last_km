@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from './i18n.js';
-import {$,$$,escape,duration,active,dateTimeLabel,stableHTML,roleName,rolePresentation,stateLabel,taskMotion,taskNarrative} from './ui.js';
+import {$,$$,escape,duration,active,dateTimeLabel,newestFirst,stableHTML,roleName,rolePresentation,stateLabel,taskMotion,taskNarrative} from './ui.js';
 import {paginate,pagedList,resetPage} from './pagination.js';
 function fullLogURL(id,file){
  return `/api/tasks/${encodeURIComponent(id)}/logs?file=${encodeURIComponent(file)}&full=1`;
@@ -21,7 +21,7 @@ function failureHTML(task){
  const changes=f.workspace_changes;
  const changedHTML=changes?i18nHTML`<details open data-key="requirement-workspace-changes"><summary>审查期间变化文件 · ${escape(changes.count)} 项</summary><ul>${(changes.files||[]).map(item=>`<li>${escape(({added:i18n('新增'),removed:i18n('删除'),modified:i18n('修改')})[item.change]||item.change)} · ${escape(item.file)}</li>`).join('')}</ul>${changes.report_file?i18nHTML`<a href="${escape(fullLogURL(task.id,changes.report_file))}" target="_blank" rel="noopener">查看完整变化记录</a>`:''}</details>`:'';
  const reviewHTML=f.review_output_file?i18nHTML`<p><a href="${escape(fullLogURL(task.id,f.review_output_file))}" target="_blank" rel="noopener">查看 reviewer 完整原始结果（未获 watcher 接受）</a></p>`:'';
- return i18nHTML`<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · '+i18n`第 ${escape(f.round)} 轮`:''} · ${escape(f.role||'watcher')}${f.exit_code!=null?i18n(' · 监督进程退出码 ')+escape(f.exit_code):''}</p>${f.expected_commit?i18nHTML`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?i18nHTML`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?i18nHTML`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||i18n('运行记录'))}</summary><pre>${failureReasonHTML(task)}</pre></details>`:''}${f.recent_failures?.length?i18nHTML`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.map(r=>i18nHTML`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
+ return i18nHTML`<section class="detail-alert task-failure" role="status"><h3>${escape(f.title)}</h3><p>${escape(f.reason)}</p><p>停止阶段：${escape(f.phase)}${f.round!=null?' · '+i18n`第 ${escape(f.round)} 轮`:''} · ${escape(f.role||'watcher')}${f.exit_code!=null?i18n(' · 监督进程退出码 ')+escape(f.exit_code):''}</p>${f.expected_commit?i18nHTML`<p>任务绑定版本：<code>${escape(f.expected_commit)}</code></p>`:''}${f.actions?.length?i18nHTML`<strong>处理建议</strong><ul>${f.actions.map(a=>`<li>${escape(a)}</li>`).join('')}</ul>`:''}${changedHTML}${reviewHTML}${f.raw_summary?i18nHTML`<details open data-key="failure-raw"><summary>原始停止原因 · ${escape(f.source||i18n('运行记录'))}</summary><pre>${failureReasonHTML(task)}</pre></details>`:''}${f.recent_failures?.length?i18nHTML`<details data-key="failure-history"><summary>此前中断记录（不等同于本次最终原因）</summary><ul>${f.recent_failures.slice().reverse().map(r=>i18nHTML`<li>第 ${escape(r.round)} 轮 ${escape(r.role)}：${escape(r.reason)}</li>`).join('')}</ul></details>`:''}<p>worker/reviewer 的历史结论不能替代 watcher 的最终交付确认。完整记录见执行日志。</p></section>`;
 }
 function automaticRecoveryHTML(task){
  const recovery=task.automatic_recovery;
@@ -48,7 +48,7 @@ function watcherHTML(c) {
 }
 function gitHistoryHTML(task) {
   const history = task.git_history || {};
-  const inputs=paginate('business-inputs',(history.business_updates||[]).slice().reverse(),{rowHeight:72});
+  const inputs=paginate('business-inputs',newestFirst((history.business_updates||[]).slice().reverse()),{rowHeight:72});
   const updates=inputs.total?i18nHTML`<section class="business-inputs"><h3>已自动衔接业务新提交 · ${escape(history.business_update_count||inputs.total)} 次</h3><p>原需求和未完成审核问题保留，变更后的代码重新开发、审核和验收。</p><ol data-page-list="business-inputs" start="${inputs.start+1}">${inputs.items.map(change=>`<li><code>${escape(change.before?.commit?.slice(0,12)||i18n('初始分支'))}</code> → <code>${escape(change.after?.commit?.slice(0,12))}</code><p>${escape(dateTimeLabel(change.at))}</p></li>`).join('')}</ol>${inputs.controls}</section>`:'';
   if(history.approval_only&&!history.head)return updates+i18nHTML('<div class="git-history-empty">尚无审核通过的本地提交。当前改动仅有待审树快照，reviewer 与 watcher 验收通过后才提交业务代码及审计记录；失败反馈保存在任务运行记录。</div>');
   if (!history.enabled)

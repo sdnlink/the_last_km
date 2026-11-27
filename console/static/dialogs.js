@@ -1,5 +1,5 @@
 import {browserTimeZone,i18n,i18nHTML,locale} from './i18n.js';
-import {$,escape,icon,timeLabel,dateTimeLabel,stableHTML} from './ui.js';
+import {$,escape,icon,timeLabel,dateTimeLabel,newestFirst,stableHTML} from './ui.js';
 import {paginate,resetPage,onPaginationChange} from './pagination.js';
 import {api,config,fragment,toast,runAction,refresh} from './core.js';
 const loaded=new Map();
@@ -321,7 +321,7 @@ function renderDirectionHistory(task) {
       : receipt.responded_at || receipt.status === "responded"
         ? i18n`第 ${receipt.responded_round || receipt.round} 轮已返回结果${receipt.status === "sent" ? i18n`；第 ${receipt.round} 轮处理中` : ""}`
         : i18n`已发送至第 ${receipt.round} 轮，等待结果`;
-  const page=paginate('directions',(task.directions||[]).slice().reverse(),{rowHeight:140});
+  const page=paginate('directions',newestFirst((task.directions||[]).slice().reverse()),{rowHeight:140});
   const html =
     page.items
       .map(
@@ -556,6 +556,7 @@ function bind(name){
    const outcome=t.direction_submission,message=outcome?.message||i18n('补充要求已保存，可查看执行器与审查器回执');
    if(currentDirectionSession(sequence,id)){
     if($('#direction-text').value===text){$('#direction-text').value='';$('#direction-pause').checked=false;}
+    if(text.trim())resetPage('directions');
     refreshDirection(t);
     if(outcome?.error){$('#direction-error').hidden=false;$('#direction-error').textContent=message+' '+outcome.error;}
    }

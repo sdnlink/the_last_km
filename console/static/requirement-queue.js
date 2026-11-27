@@ -1,5 +1,5 @@
 import {i18n,i18nHTML} from './i18n.js';
-import {$,escape,stableHTML} from './ui.js';
+import {$,escape,dateTimeLabel,newestFirst,stableHTML} from './ui.js';
 import {api,fragment,toast,refresh} from './core.js';
 
 let loaded,sequence=0,readSequence=0,target=null,timer,data=null;
@@ -16,14 +16,17 @@ export function positionOptions(waiting) {
     i18nHTML`<option value="${escape(item.id)}">第 ${item.position} 位 · 在「${escape(item.text.slice(0,45))}」之前</option>`).join('');
 }
 export function requirementList(items,{editable=false}={}) {
-  return items.map(item=>`<article><div>${item.position?i18nHTML`<strong>第 ${item.position} 位</strong>`:i18nHTML('<strong>已验收</strong>')}${editable?i18nHTML`<button type="button" class="button secondary small-button" data-remove-requirement="${escape(item.id)}">移除</button>`:''}</div><p>${escape(item.text)}</p></article>`).join('')||i18nHTML('<p class="muted">暂无需求</p>');
+  return newestFirst(items).map(item=>`<article><div>${item.position?i18nHTML`<strong>第 ${item.position} 位</strong>`:i18nHTML('<strong>已验收</strong>')}${itemTime(item)}${editable?i18nHTML`<button type="button" class="button secondary small-button" data-remove-requirement="${escape(item.id)}">移除</button>`:''}</div><p>${escape(item.text)}</p></article>`).join('')||i18nHTML('<p class="muted">暂无需求</p>');
+}
+function itemTime(item) {
+  return item.at?`<time datetime="${escape(item.at)}">${escape(dateTimeLabel(item.at))}</time>`:'';
 }
 function amendmentsMarkup(items=[]) {
-  return items.length?i18nHTML`<details open><summary>需求补充记录 · ${items.length} 条</summary><div class="requirement-queue-list">${items.map(item=>
-    i18nHTML`<article><strong>${item.planned?i18n('已纳入评审计划'):i18n('等待 Reviewer 规划')}</strong><p>${escape(item.text)}</p></article>`).join('')}</div></details>`:'';
+  return items.length?i18nHTML`<details open><summary>需求补充记录 · ${items.length} 条</summary><div class="requirement-queue-list">${newestFirst(items).map(item=>
+    i18nHTML`<article><div><strong>${item.planned?i18n('已纳入评审计划'):i18n('等待 Reviewer 规划')}</strong>${itemTime(item)}</div><p>${escape(item.text)}</p></article>`).join('')}</div></details>`:'';
 }
 function supplementsMarkup(items=[]) {
-  return items.length?i18nHTML`<details><summary>补充验收检查 · ${items.length} 次</summary><ul>${items.map(item=>
+  return items.length?i18nHTML`<details><summary>补充验收检查 · ${items.length} 次</summary><ul>${newestFirst(items).map(item=>
     i18nHTML`<li>第 ${item.cycle} 个需求 · ${escape(item.task_id||i18n('整体验收'))} · ${item.count} 条命令${item.criterion_ids.length?' · '+escape(item.criterion_ids.join('、')):''} · <code title="${escape(item.tree)}">${escape(item.tree.slice(0,12))}</code></li>`).join('')}</ul></details>`:'';
 }
 export function requirementQueueMarkup(value) {
@@ -31,14 +34,14 @@ export function requirementQueueMarkup(value) {
   return i18nHTML`<h3>当前需求</h3><div class="requirement-text">${value.status==='done'?i18n('所有需求已验收，当前没有正在处理的需求。'):escape(current||i18n('暂无'))}</div>`
     + amendmentsMarkup(value.amendments)
     + supplementsMarkup(value.check_supplements)
-    + i18nHTML`<h3>等待处理 · ${value.waiting.length} 条</h3><p>按以下顺序执行，当前需求未完成时不会提前领取。</p><div class="requirement-queue-list">${requirementList(value.waiting)}</div>`
+    + i18nHTML`<h3>等待处理 · ${value.waiting.length} 条</h3><p>最新追加的需求显示在前。当前需求验收后，按标注的队列位置依次处理。</p><div class="requirement-queue-list">${requirementList(value.waiting)}</div>`
     + i18nHTML`<details><summary>已验收后续需求 · ${value.completed.length} 条</summary><div class="requirement-queue-list">${requirementList(value.completed)}</div></details>`
     + (value.delivery==='restart_required'?i18nHTML('<p class="detail-alert">当前监督器需停止并恢复后，才能领取需求队列。</p>'):'');
 }
 function render(value) {
   data=value;
   $('#requirement-queue-title').textContent=value.title;
-  const warning=value.delivery==='restart_required'?i18n('当前监督器需先停止并恢复，才会领取排队需求。'):i18n('当前需求通过审核与验收后，按以下顺序逐条处理。');
+  const warning=value.delivery==='restart_required'?i18n('当前监督器需先停止并恢复，才会领取排队需求。'):i18n('最新追加的需求显示在前。当前需求验收后，按标注的队列位置依次处理。');
   $('#requirement-queue-notice').textContent=value.can_append?warning:i18n('此任务已结束或不支持需求队列，可查看已保存记录。');
   const currentText=value.active?.text||value.original_requirement;
   stableHTML($('#requirement-queue-current'),`<details class="queued-current"><summary>${value.active?i18n('当前后续需求'):i18n('原始需求')} · ${value.status==='done'?i18n('已验收'):i18n('保留当前处理')}</summary><p>${escape(currentText||'')}</p></details>`+amendmentsMarkup(value.amendments));

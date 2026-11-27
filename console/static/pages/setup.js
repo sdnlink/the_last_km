@@ -1,6 +1,6 @@
 import {mountSupervision} from '/supervision.js';
 import {i18n,i18nHTML} from '../i18n.js';
-import {$,$$,escape,stableHTML,dateTimeLabel,stateLabel,motionState} from '/ui.js';
+import {$,$$,escape,stableHTML,dateTimeLabel,newestFirst,stateLabel,motionState} from '/ui.js';
 import {api,config,watch,toast} from '/core.js';
 import {pagedList,onPaginationChange} from '/pagination.js';
 
@@ -55,7 +55,8 @@ function renderJobs(rows,snapshot=false){
  if(snapshot)jobs.clear();
  for(const row of rows)jobs.set(row.id,row);
  $('#setup-jobs-panel').hidden=jobs.size===0;
- const recent=[...jobs.values()].reverse(),active=recent.filter(j=>['queued','running'].includes(j.status)),finished=recent.filter(j=>!['queued','running'].includes(j.status));
+ const recent=newestFirst([...jobs.values()].reverse(),job=>job.started_at);
+ const active=recent.filter(j=>['queued','running'].includes(j.status)),finished=recent.filter(j=>!['queued','running'].includes(j.status));
  $('#setup-jobs-title').textContent=active.length?i18n('当前安装'):i18n('最近安装');
  $('#setup-jobs-summary').textContent=active.length?i18n`${active.length} 项正在处理 · 可以继续配置其他 Agent，输出按需展开。`:i18n`${finished.length} 项已结束 · 展开记录查看结果与日志。`;
  const history=finished.length?i18nHTML`<details class="setup-job-history" data-key="installation-history"><summary>最近安装记录 <span>${finished.length} 项 · ${finished.filter(j=>j.status==='failed').length} 项未完成</span></summary>${pagedList('setup-jobs',finished,jobHTML,{tag:'div',className:'setup-job-list',rowHeight:100})}</details>`:'';

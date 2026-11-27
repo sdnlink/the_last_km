@@ -52,6 +52,10 @@ class DispatchPlanTests(unittest.TestCase):
         self.assertEqual(waiting['items'][0]['task']['id'],'F17')
         self.assertEqual(page(state,999,10,'active')['page'],1)
         self.assertEqual(page(state,1,10,'accepted')['total'],5)
+        accepted = page(state, 1, 2, 'accepted')
+        self.assertEqual([row['task']['id'] for row in accepted['items']], ['F5', 'F4'])
+        self.assertEqual([row['position'] for row in accepted['items']], [5, 4])
+        self.assertEqual(page(state, 2, 2, 'accepted')['items'][0]['task']['id'], 'F3')
         for arguments in [(0,10,'all'),(1,0,'all'),(1,101,'all'),(1,10,'unknown')]:
             with self.subTest(arguments=arguments),self.assertRaises(ValueError):
                 page(state,*arguments)

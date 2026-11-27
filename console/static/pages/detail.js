@@ -1,5 +1,5 @@
 import {i18n,i18nHTML,locale} from '../i18n.js';
-import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration} from '/ui.js';
+import {$,$$,escape,badge,taskButtons,stableHTML,taskNarrativeHTML,stateLabel,duration,newestFirst} from '/ui.js';
 import {api,watch,toast,refresh} from '/core.js';
 import {failureHTML,automaticRecoveryHTML,gitHistoryHTML,renderWorkflow,selectWorkflowStage,renderConclusions,requirementReviewHTML,fullLogURL} from '/task-view.js';
 import {pagedList,resetPage,onPaginationChange,getPager,pageView,controlsHTML} from '/pagination.js';
@@ -217,7 +217,7 @@ function renderRequirements(t){
      escape(target.file)+' · '+escape(target.symbol)+'</li>').join('')+'</ul>':'')+
    (task.criterion_ids?i18nHTML('<p>关联验收条目：')+escape(task.criterion_ids.join(i18n('、')))+i18n('；待执行检查：')+escape(task.check_ids.join(i18n('、')))+'</p>':''):
    i18nHTML('<p>等待 reviewer 下发或任务已结束。</p>'))+
-  (functions.length?pagedList('accepted-functions',functions,item=>'<li><span>'+escape(item.task.id)+
+  (functions.length?pagedList('accepted-functions',functions.slice().reverse(),item=>'<li><span>'+escape(item.task.id)+
     (item.task.kind==='integration'?i18n(' · 集成任务（')+escape(item.task.targets.length)+i18n(' 个函数）'):
      item.task.kind==='verification'?i18n(' · 纯验收'):'')+'</span><span>'+
     escape((item.task.criterion_ids||[]).join(i18n('、')))+'</span><span>'+
@@ -227,7 +227,7 @@ function renderRequirements(t){
  const brief=t.requirements_review;
  const revision=t.requirement_revision;
  const revisionHTML=revision?.version?'<h3>'+i18n('当前需求版本')+'</h3><p>V'+escape(revision.version)+' · '+escape(revision.sha256.slice(0,12))+'</p><p>'+i18n('后续明确的用户变更覆盖此前冲突的要求；其他要求和验收检查继续保留。')+'</p>'+
-  pagedList('requirement-revisions',revision.amendments||[],r=>'<li><span>V'+escape(r.version)+'</span><span>'+escape((t.directions||[]).find(d=>d.id===r.direction_id)?.text||r.direction_id)+'</span></li>'):'';
+  pagedList('requirement-revisions',newestFirst((revision.amendments||[]).slice().reverse()),r=>'<li><span>V'+escape(r.version)+'</span><span>'+escape((t.directions||[]).find(d=>d.id===r.direction_id)?.text||r.direction_id)+'</span></li>'):'';
  const parallelHTML=t.parallel_project?i18nHTML`<h3>同工程并行任务</h3><p>原工程：${escape(t.project_cwd)}</p><p>独立工作副本：${escape(t.cwd)}</p><p>交付分支：${escape(t.task_branch)}</p><p>负责范围：${escape((t.task_scope||[]).join(i18n('、'))||i18n('按任务需求确定'))}</p><p>前置任务：${escape((t.task_dependencies||[]).join(i18n('、'))||i18n('无'))}</p><p>共享输入变化由 watcher 检测并交 reviewer 复核；任务分支保留独立交付记录，不覆盖原工作区。</p>`:'';
  const briefHTML=revisionHTML+parallelHTML+requirementReviewHTML(brief);
  const plan=t.acceptance_plan,results=t.acceptance_results;

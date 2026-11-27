@@ -230,6 +230,17 @@ function dateTimeLabel(value, timeZone) {
   return date.toLocaleString(locale());
 }
 
+export function newestFirst(items, timestamp = item => item.at) {
+  const time = item => {
+    const value = timestamp(item);
+    const milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds)) return -Infinity;
+    const fraction = /\.\d{3}(\d+)/.exec(value)?.[1];
+    return milliseconds + (fraction ? Number('0.' + fraction) : 0);
+  };
+  return items.slice().sort((a, b) => time(b) - time(a));
+}
+
 function stableHTML(el, html) {
   if (el.dataset.html === html) return;
   // Polling updates heartbeat text without restarting the role illustrations.

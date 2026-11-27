@@ -38,6 +38,8 @@ def page(state, number=1, size=10, status='all'):
     counts.update(Counter(row['status'] for row in rows))
     counts['all'] = len(rows)
     filtered = rows if status == 'all' else [row for row in rows if row['status'] == status]
+    if status == 'accepted':
+        filtered.reverse()
     total = len(filtered)
     pages = max(1, (total + size - 1) // size)
     number = min(number, pages)

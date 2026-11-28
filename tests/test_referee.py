@@ -12,6 +12,7 @@ from auto_moniter import referee
 from auto_moniter.storage import write_json
 from auto_moniter.local_tests import command as local_test_command
 from auto_moniter.supervisor import RunConfig, Supervisor
+from auto_moniter.workspace import workspace_fingerprint
 from tests.test_function_assignment_ids import final_task
 from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
 from tests.test_review_first import approve_requirement_coverage
@@ -299,6 +300,40 @@ class RefereeTests(unittest.TestCase):
         self.assertTrue(receipt['passed'])
         self.assertFalse(monitor._can_continue_started_assignment(original, {**revised, 'symbol': 'other'}))
         self.assertFalse(monitor._can_continue_started_assignment(original, {**revised, 'check_ids': ['check:2']}))
+
+    def test_coverage_uses_corrected_execution_references_instead_of_restoring_the_old_clause(self):
+        old_clause = '在指定候选上用 check:1 核对读回 42。'
+        unchanged = '重开后仍能读回原值。'
+        original = {**verification_task('VERIFY'), 'delivery_scope': 'function',
+                    'verification': [old_clause, unchanged]}
+        final = verification_task('FINAL', depends=['VERIFY'])
+        revised = {**original, 'check_ids': ['check:1', 'check:2'],
+                   'verification': ['check:1 仍检查工作区。', '在指定候选上用 check:2 核对读回 42。']}
+        requested = result('VERIFY', 'changes_required')
+        requested['verdict'].update(blockers=['正式回执待补'],
+            supplemental_checks=[{'path': 'test_unregistered.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}])
+        worker = FunctionWorker('worker', [result('VERIFY', 'done')])
+        reviewer = ScriptedProvider('reviewer', [
+            planning(original, [original, final]), requested, decision('replan'),
+            planning(revised, [revised, final]), approve_requirement_coverage(), result('VERIFY', 'accepted')])
+        check = 'test -f app.py'
+        monitor = self.monitor(worker, reviewer, checks=[CHECK, check], max_rounds=1)
+        monitor.audit.record(['缺少候选的正式回执'], 1, ['main'])
+        tree = workspace_fingerprint(self.root, ignore_dir=self.run_dir)
+        monitor._check_changes = [{'at': '2026-11-28', 'added': [check], 'target': {
+            'task_id': 'VERIFY', 'criterion_ids': original['criterion_ids'], 'tree': tree, 'cycle': 1}}]
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        accepted = monitor.function_tasks.accepted[-1]['task']
+        self.assertEqual(accepted['verification'], [unchanged, *revised['verification']])
+        self.assertEqual(accepted['check_ids'], revised['check_ids'])
+        prompt = reviewer.calls[4]['prompt']
+        plan = json.JSONDecoder().raw_decode(prompt.split('待复核方案：\n', 1)[1])[0]
+        self.assertEqual(plan['function_plan'][0], plan['next_task'])
+        self.assertNotIn(old_clause, plan['next_task']['verification'])
+        self.assertIn(old_clause, prompt.split('下列原核验条款只用于对照。', 1)[1])
+        self.assertIn(old_clause, monitor._reconcile_verification_checks(original, revised, 'f' * 64))
 
     def archive_scenario(self):
         waiting = {**verification_task('VERIFY'), 'delivery_scope': 'function'}

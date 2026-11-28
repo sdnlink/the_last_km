@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import re
 
 from auto_moniter.workspace import file_snapshot, snapshot_fingerprint, workspace_fingerprint
 from auto_moniter.modules import ModuleLedger
@@ -296,7 +297,7 @@ class RequirementPlanning:
                     previous = dispatch.current
                     same_head = isinstance(backlog, list) and backlog and backlog[0] == assignment
                     assignment = {**revised, 'objective': previous['objective'],
-                                  'verification': list(dict.fromkeys([*previous['verification'], *revised['verification']]))}
+                                  'verification': self._reconcile_verification_checks(previous, revised, tree)}
                     if same_head:
                         backlog = [assignment, *backlog[1:]]
             dispatch.current = None
@@ -361,6 +362,30 @@ class RequirementPlanning:
             if problems:
                 raise ValueError(problems[0])
         return staged, dispatch, complete
+
+    @staticmethod
+    def _verification_check_references(text):
+        return set(re.findall(r'(?<![A-Za-z0-9_:-])(?:check|regression|auto):[1-9][0-9]*(?![A-Za-z0-9_])', text))
+
+    def _reconcile_verification_checks(self, previous, revised, tree):
+        prior = previous['verification']
+        proposed = revised['verification']
+        target = {'task_id': previous['id'], 'criterion_ids': previous['criterion_ids'],
+                  'tree': tree, 'cycle': len(self.requirement_cycles) + 1}
+        additions = {command for change in self._check_changes if change.get('target') == target
+                     for command in change['added']}
+        fixed_ids = {f'check:{index}' for index, command in enumerate(self.config.checks, 1)
+                     if command in additions}
+        new_ids = fixed_ids & (set(revised['check_ids']) - set(previous['check_ids']))
+        named = self._verification_check_references('\n'.join(proposed))
+        if previous.get('kind') == 'verification' and new_ids and new_ids <= named:
+            original_ids = set(previous['check_ids'])
+            # Only clauses that describe the numbered execution path can be
+            # replaced. The independent coverage review also receives them.
+            prior = [clause for clause in prior
+                     if not ((references := self._verification_check_references(clause))
+                             and references <= original_ids and references <= named)]
+        return list(dict.fromkeys([*prior, *proposed]))
 
     @staticmethod
     def _can_continue_started_assignment(previous, revised):
@@ -508,6 +533,14 @@ class RequirementPlanning:
             sources, plan, modules=modules, checks=checks, accepted=self.function_tasks.accepted,
             scoped_dispatch=scoped_dispatch)
         task = plan.get('next_task')
+        previous = self.function_tasks.current
+        if previous and task and previous['id'] == task['id'] and previous.get('kind') == 'verification':
+            revised = set(task['verification'])
+            replaced = [clause for clause in previous['verification'] if clause not in revised]
+            if replaced:
+                prompt += ('\n\n下列原核验条款只用于对照。逐项核对原操作和预期结果是否仍由待复核方案覆盖。'
+                           '已登记的执行路径和检查编号以本次待复核方案及 Watcher 的实际命令为准。\n'
+                           + json.dumps(replaced, ensure_ascii=False))
         if scoped_dispatch and task:
             missing = self._missing_dispatch_inputs(task)
             prompt += ('\n\nWatcher 派前核对结果：' + json.dumps({

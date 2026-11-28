@@ -35,7 +35,7 @@ from auto_moniter.isolation import ReviewIsolation, WorkerIsolation
 from auto_moniter.preflight import validate
 from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditLedger, AuditCapacityError
-from auto_moniter import function_gate, function_tasks
+from auto_moniter import function_gate, function_tasks, verification_baseline
 from auto_moniter.directions import Directions
 from auto_moniter.git_history import GitHistory, GitHistoryError
 from auto_moniter.publication import StagedChangesConflict, check_unborn_staging
@@ -663,6 +663,14 @@ class Supervisor(
                         if self.function_tasks.current.get('review_test'):
                             function_gate.materialize_review_test(self.config.cwd, self.function_tasks.current, baseline)
                             before_files = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+                    except verification_baseline.CandidateChanged as exc:
+                        reason = str(exc)
+                        self._event('function_dispatch_preflight_rejected', task_id=self.function_tasks.current['id'],
+                                    reason=reason)
+                        if self._consult_referee('planning', reason, records) == 'replan':
+                            continue
+                        return self._finish('stopped' if self._stop_requested else 'action_required',
+                                            self._stop_reason or reason, records, last_worker)
                     except (OSError, ValueError) as exc:
                         return self._finish('action_required', '派单的工作范围无法初始化。' + str(exc), records, last_worker)
                 worker_start_tree = (snapshot_fingerprint(self.config.cwd, before_files) if track_files else
@@ -1260,11 +1268,17 @@ class Supervisor(
             if self.config.function_dispatch:
                 if self._verification_only() and review.task_status == 'changes_required':
                     if review.next_task is None:
+                        if self._continue_verification_planning(record, review_record, records):
+                            continue
                         if review.supplemental_checks:
                             try:
                                 self._queue_supplemental_checks(record, review)
                             except ValueError as exc:
                                 review.blockers.append(str(exc))
+                                if self._continue_verification_planning(record, review_record, records, reason=str(exc)):
+                                    continue
+                                if self._stop:
+                                    break
                             else:
                                 review_record.watcher_result.update(status='blocked', reasons=['Supplemental checks queued'])
                                 self._write_state(records, 'running', 0, '', review_tree)

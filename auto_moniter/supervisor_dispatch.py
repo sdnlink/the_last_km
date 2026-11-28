@@ -647,6 +647,23 @@ class FunctionDispatch:
                 return None, None
         return worker, None
 
+    def _continue_verification_planning(self, worker, review, records, *, reason=''):
+        """Keep local review and scheduling work out of the external wait path."""
+        amended = self._unplanned_directions()
+        if not amended and not reason:
+            return False
+        reasons = list(review.verdict.blockers)
+        if amended:
+            reasons.append('收到补充需求，须按最新要求复核派单并重新绑定检查。')
+        review.watcher_result.update(status='blocked', reasons=reasons)
+        self._write_state(records, 'running', 0, '', worker.tree)
+        if amended:
+            self._event('verification_replanning', task_id=worker.verdict.task_id, round=worker.index)
+            return True
+        self._event('supplemental_checks_rejected', task_id=worker.verdict.task_id,
+                    round=worker.index, reason=reason)
+        return self._consult_referee('planning', reason, records, candidate=worker) == 'replan'
+
     def _advance_local_assignment(self, records, *, missing_inputs=False, field_waiting=False):
         if (self.requirements_review.get('limited_dispatch') or not self._complete_function_plan_ready()
                 or self._unplanned_directions()):

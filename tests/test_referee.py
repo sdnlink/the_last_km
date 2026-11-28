@@ -10,6 +10,7 @@ from auto_moniter import referee
 from auto_moniter.supervisor import RunConfig, Supervisor
 from tests.test_function_assignment_ids import final_task
 from tests.test_function_dispatch import CHECK, FunctionWorker, plan, result, task, verification_task
+from tests.test_review_first import approve_requirement_coverage
 from tests.test_supervisor import ScriptedProvider
 
 
@@ -65,6 +66,65 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
         self.assertFalse((self.run_dir / 'referee-decisions.json').exists())
+
+    def test_stale_read_only_candidate_returns_to_planning_before_running_checks(self):
+        original = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
+        final = verification_task('FINAL', depends=['VERIFY'])
+        blocked = result('VERIFY', 'changes_required')
+        blocked['verdict']['blockers'] = ['需要现场测量']
+        monitor = self.monitor(FunctionWorker('worker', [result('VERIFY', 'done')]),
+            ScriptedProvider('reviewer', [planning(original, [original, final]), blocked]))
+        self.assertEqual(monitor.run().status, 'action_required')
+        baseline = self.run_dir / 'verification-baseline-1-0-VERIFY.json'
+        original_binding = baseline.read_bytes()
+        original_log = (self.run_dir / '001-check-01.log').read_bytes()
+        (self.root / 'app.py').write_text('def parse_input(): return 42\n')
+
+        stale = {**original, 'id': 'VERIFY-OLDER'}
+        older_binding = self.run_dir / 'verification-baseline-1-0-VERIFY-OLDER.json'
+        older_binding.write_bytes(original_binding)
+        revised = {**original, 'id': 'VERIFY-CURRENT'}
+        final = {**final, 'depends_on': [revised['id']]}
+        worker = FunctionWorker('worker', [result(revised['id'], 'done')])
+        reviewer = ScriptedProvider('reviewer', [decision('replan'),
+            planning(stale, [stale, {**final, 'depends_on': [stale['id']]}]),
+            planning(revised, [revised, final]), approve_requirement_coverage(),
+            result(revised['id'], 'accepted')])
+        monitor = self.monitor(worker, reviewer, max_rounds=2, resume=True)
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertTrue(worker.calls[0]['read_only'])
+        self.assertEqual(monitor.function_tasks.accepted[-1]['task']['id'], revised['id'])
+        self.assertEqual(baseline.read_bytes(), original_binding)
+        self.assertEqual(older_binding.read_bytes(), original_binding)
+        self.assertEqual((self.run_dir / '001-check-01.log').read_bytes(), original_log)
+        rebound = json.loads((self.run_dir / 'verification-baseline-1-0-VERIFY-CURRENT.json').read_text())
+        self.assertNotEqual(rebound['tree'], json.loads(original_binding)['tree'])
+        self.assertTrue((self.run_dir / '002-check-01.log').is_file())
+        self.assertEqual(self.journal()[-1]['decision']['action'], 'replan')
+        self.assertIn('只读派单 VERIFY-OLDER 的工作区与其原始候选不一致', reviewer.calls[2]['prompt'])
+
+    def test_referee_replans_when_supplemental_test_lacks_approval(self):
+        (self.root / 'test_export.py').write_text('raise AssertionError("Unapproved test ran")\n')
+        first = verification_task('VERIFY')
+        revised = {**first, 'id': 'VERIFY-RECHECK'}
+        requested = result(first['id'], 'changes_required')
+        requested['verdict'].update(
+            blockers=['需要专项回执'],
+            supplemental_checks=[{'path': 'test_export.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}])
+        worker = FunctionWorker('worker', [result(item['id'], 'done', status='done') for item in (first, revised)])
+        reviewer = ScriptedProvider('reviewer', [planning(first), requested, decision('replan'),
+            planning(revised), approve_requirement_coverage(), result(revised['id'], 'accepted', status='done')])
+        monitor = self.monitor(worker, reviewer)
+        monitor.audit.record(['Need verified export evidence'], 1, ['main'])
+        report = monitor.run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(len(worker.calls), 2)
+        self.assertEqual(monitor.function_tasks.accepted[-1]['task']['id'], revised['id'])
+        self.assertEqual(self.journal()[-1]['decision']['action'], 'replan')
+        self.assertIn('这个测试尚未获准由 Watcher 补跑', reviewer.calls[2]['prompt'])
+        self.assertFalse((self.run_dir / '001-check-02.log').exists())
 
     def archive_scenario(self):
         waiting = {**verification_task('VERIFY'), 'delivery_scope': 'function'}

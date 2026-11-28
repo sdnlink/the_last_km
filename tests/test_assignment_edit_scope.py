@@ -106,7 +106,8 @@ class AssignmentEditScopeTests(unittest.TestCase):
         monitor._planning_rejection={'scope_repair':True}
         for changes in [{'symbol':'unrelated'}, {'check_ids':['auto:1']}, {'criterion_ids':['main:1']}]:
             with self.subTest(changes=changes),self.assertRaisesRegex(ValueError,'preserve the current assignment'):
-                monitor._stage_requirement_plan({**current,'edit_files':EDITS,**changes},[],None,BRIEF,next_function=True)
+                monitor._stage_requirement_plan({**current,'edit_files':EDITS,**changes},[],None,BRIEF,
+                                                tree='',next_function=True)
 
 
 if __name__=='__main__':unittest.main()

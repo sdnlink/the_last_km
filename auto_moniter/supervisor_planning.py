@@ -255,7 +255,7 @@ class RequirementPlanning:
                 and set(self.modules.items) == {item['id'] for item in handoff.get('modules', [])}
                 and not any(item['round'] > handoff['round'] for item in self.function_tasks.accepted))
 
-    def _stage_requirement_plan(self, assignment, modules, backlog, brief, *, next_function=False):
+    def _stage_requirement_plan(self, assignment, modules, backlog, brief, *, tree, next_function=False):
         """Validate on cloned ledgers: no accepted state changes or worker dispatch."""
         from auto_moniter.modules import definitions
         if next_function:
@@ -329,6 +329,10 @@ class RequirementPlanning:
                 raise ValueError('Parallel assignment targets must stay inside the declared task scope')
         if self._function_gate:
             self._validate_function_plan(dispatch, staged.items, brief)
+            if dispatch.current.get('kind') == 'verification' and not self._assignment_repository_conflict(dispatch.current):
+                from auto_moniter import verification_baseline
+                verification_baseline.validate_candidate(self.run_dir, self.config.cwd, dispatch.current, tree,
+                    cycle=len(self.requirement_cycles) + 1, after_round=self._verification_attempt_boundary())
             if (self._referee_replan or preflight_repair or not self.function_tasks.current
                     or self._unstarted_assignment_test_conflicts()):
                 self._validate_new_assignment_tests(dispatch.current)
@@ -561,7 +565,7 @@ class RequirementPlanning:
                 {key: plan[key] for key in requirements_review.SCHEMA['required']}))
             brief['cycle'] = len(self.requirement_cycles) + 1
             staged = self._stage_requirement_plan(plan['next_task'], plan['modules'], plan.get('function_plan'),
-                brief, next_function=next_function) if self.config.function_dispatch else None
+                brief, tree=tree, next_function=next_function) if self.config.function_dispatch else None
             _, _, binding = self._coverage_inputs(plan, staged, sources, checks, tree)
         except (KeyError, ValueError):
             return None
@@ -664,7 +668,7 @@ class RequirementPlanning:
                                 brief['acceptance_criteria'] = list(previous)
                         staged_plan = self._stage_requirement_plan(
                             assignment, plan.get('modules'), plan.get('function_plan'), brief,
-                            next_function=next_function)
+                            tree=tree, next_function=next_function)
                     except ValueError as error:
                         if workspace_fingerprint(self.config.cwd,ignore_dir=self.run_dir) == tree:
                             requirement_context.save(self.run_dir,self.config.cwd,self.config.requirement,
@@ -1016,7 +1020,7 @@ class RequirementPlanning:
                                     reason='Planning response rewrote approved criteria; original IDs and text retained')
                 if brief['status']=='ready':
                     staged, dispatch, complete = self._stage_requirement_plan(
-                        assignment, modules, backlog, brief, next_function=next_function)
+                        assignment, modules, backlog, brief, tree=before, next_function=next_function)
                     self.function_tasks = dispatch
                     self.function_plan = complete
                     self._planning_rejection = None

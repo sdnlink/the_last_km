@@ -1188,6 +1188,38 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(receipt['context']['supplemental_checks'][0]['audit_id'], 'AUD-1')
             self.assertIn('001-check-02.log', reviewer.calls[-1]['prompt'])
 
+    def test_verification_replans_when_amendment_arrives_during_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'app.py').write_text('def parse_input(): return 42\n')
+            requested = result('VERIFY', 'changes_required')
+            requested['verdict'].update(
+                blockers=['需要当前候选的专项回执'],
+                supplemental_checks=[{'path': 'test_export.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}])
+            first = verification_task()
+            worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')] * 2)
+            approved = result('VERIFY', 'accepted', status='done')
+            reviewer = ScriptedProvider('reviewer', [plan(first), requested,
+                plan(first), approve_requirement_coverage(), approved])
+            monitor = Supervisor(RunConfig('Verify export', root, worker, reviewer=reviewer,
+                workflow='review-first', function_dispatch=True, git_history='off', run_dir=root/'run',
+                checks=[CHECK], max_rounds=2, retry_delay_s=0), log=lambda _:None)
+            invoke = monitor._invoke
+
+            def amend_during_review(*args, **kwargs):
+                turn = invoke(*args, **kwargs)
+                if kwargs['role'] == 'reviewer' and kwargs['index'] == 1:
+                    monitor.directions.append('Include the persisted export result in verification.')
+                return turn
+
+            with patch.object(monitor, '_invoke', side_effect=amend_during_review):
+                report = monitor.run()
+            self.assertEqual(report.status, 'done', report.summary)
+            self.assertEqual(len(worker.calls), 2)
+            events = (root/'run/events.jsonl').read_text()
+            self.assertIn('verification_replanning', events)
+            self.assertNotIn('verification_waiting', events)
+
     def test_field_wait_runs_independent_checks_then_resumes_original_review(self):
         from auto_moniter import field_handoff
 

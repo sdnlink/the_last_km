@@ -9,17 +9,33 @@ from auto_moniter.storage import write_json
 from auto_moniter.workspace import snapshot_fingerprint
 
 
+class CandidateChanged(ValueError):
+    """A read-only assignment ID is already bound to another candidate."""
+
+
+def _read_binding(run, root, task, tree, *, cycle, after_round):
+    name = f"verification-baseline-{cycle}-{after_round}-{task['id']}.json"
+    path = run / name
+    saved = Directions(run).read(name, 4096)
+    expected = {'version': 1, 'cwd': str(root), 'tree': tree}
+    if (saved or path.exists() or path.is_symlink()) and saved != expected:
+        if (set(saved) != set(expected) or saved.get('version') != 1 or saved.get('cwd') != str(root)
+                or not isinstance(saved.get('tree'), str) or len(saved['tree']) != 64):
+            raise ValueError('只读派单 ' + task['id'] + ' 的范围基线无效，请核对原始记录。')
+        raise CandidateChanged('只读派单 ' + task['id'] + ' 的工作区与其原始候选不一致。'
+                               '保留旧候选的回执，由 Reviewer 为当前候选安排新编号并重新运行原检查。')
+    return path, saved, expected
+
+
+def validate_candidate(run, root, task, tree, *, cycle, after_round):
+    _read_binding(run, root, task, tree, cycle=cycle, after_round=after_round)
+
+
 def prepare(run, root, task, snapshot, *, cycle, after_round, started, records):
     """Rebuild the in-memory snapshot only when it matches the saved boundary."""
-    name = f"verification-baseline-{cycle}-{after_round}-{task['id']}.json"
-    directions = Directions(run)
-    saved = directions.read(name, 4096)
     tree = snapshot_fingerprint(root, snapshot)
-    expected = {'version': 1, 'cwd': str(root), 'tree': tree}
+    path, saved, expected = _read_binding(run, root, task, tree, cycle=cycle, after_round=after_round)
     recovered = False
-    if (saved or (run / name).exists()) and saved != expected:
-        raise ValueError('只读派单 ' + task['id'] + ' 的工作区与其原始候选不一致。'
-                         '请恢复原候选，或由 Reviewer 为当前候选重新安排验收。')
     if not saved and started:
         if not (_matches_legacy_baseline(run, root, task, tree)
                 or _matches_dispatch_history(run, task, tree, cycle, after_round, records)):
@@ -28,7 +44,7 @@ def prepare(run, root, task, snapshot, *, cycle, after_round, started, records):
         recovered = True
     if not saved:
         function_gate.verify_read_only_target(root, task)
-        write_json(run / name, expected, durable=True)
+        write_json(path, expected, durable=True)
     return {'id': task['id'], 'files': snapshot}, recovered
 
 

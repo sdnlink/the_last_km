@@ -12,6 +12,7 @@ from unittest.mock import patch
 from auto_moniter import browser_execution, candidate_checks, field_handoff
 from auto_moniter.storage import write_json
 from auto_moniter.workspace import workspace_fingerprint
+from console import browser_captcha
 from console.tasks import TaskError, TaskStore
 
 
@@ -165,24 +166,91 @@ class BrowserExecutionTests(unittest.TestCase):
         self.assertEqual(browser_execution.for_handoff(config, changed, 'login-routes'), config)
         self.assertEqual(config['handoff_revision'], 'old')
 
-    def test_console_serves_only_the_current_unexpired_captcha_image(self):
+    def test_console_routes_captcha_to_the_bound_active_or_deferred_browser(self):
         from base64 import b64encode
 
         with tempfile.TemporaryDirectory() as directory:
-            run = Path(directory)
-            write_json(run / 'state.json', {'status': 'action_required'})
+            root = Path(directory)
+            run, workspace = root / 'run', root / 'project'
+            run.mkdir()
+            workspace.mkdir()
+            current = {'id': 'LOGIN', 'kind': 'verification'}
+            deferred = {'id': 'RETURNS', 'kind': 'verification'}
+            tree = workspace_fingerprint(workspace, ignore_dir=run)
+            rounds = []
+            for index, task in enumerate([current, deferred], 8):
+                receipt = candidate_checks.create(run, {'commands': [], 'task': task}, {}, True)
+                rounds.extend([
+                    {'role': 'worker', 'index': index, 'tree': tree, 'watcher_result': {'candidate_checks': receipt}},
+                    {'role': 'reviewer', 'index': index, 'task_status': 'changes_required',
+                     'blockers': ['浏览器验证'], 'watcher_result': {'status': 'blocked'}},
+                ])
+            state = {'cwd': str(workspace), 'rounds': rounds, 'function_plan': {'tasks': [current, deferred]},
+                     'function_tasks': {'current': current}}
+            write_json(run / 'state.json', state)
             png = b'\x89PNG\r\n\x1a\n'
-            challenge = {'kind': 'image', 'expires': time.time() + 30, 'image': b64encode(png).decode()}
+            item = {'id': '1', 'kind': 'browser', 'title': '核对返回入口', 'case_id': 'login-routes'}
+            active = {'binding': field_handoff.binding(state), 'revision': 'a' * 32, 'items': [item],
+                      'browser_inputs': {'active': {'id': '1', 'kind': 'image', 'nonce': 'active',
+                                                    'expires': time.time() + 30, 'image': b64encode(png).decode()}}}
+            write_json(run / field_handoff.FILE, active)
+            checkpoint = {**state, 'function_tasks': {'current': deferred}}
+            prior = {'binding': field_handoff.binding(checkpoint), 'revision': 'b' * 32, 'items': [item]}
+            filename = 'field-handoff-' + prior['revision'] + '.json'
+            write_json(run / filename, prior)
+            config = {'url': 'https://example.test/login', 'expected_version': '1',
+                      'interactive_captcha': True, 'task_id': deferred['id'], 'candidate_tree': tree}
+            job, _ = browser_execution._job(run, prior, item, config)
+            job.mkdir(parents=True)
+            challenge = {'kind': 'image', 'nonce': 'deferred', 'expires': time.time() + 30,
+                         'image': b64encode(png).decode()}
+            write_json(job / 'captcha.json', challenge)
+            meta = {'id': 'task', 'cwd': str(workspace), 'run_dir': str(run)}
             store = object.__new__(TaskStore)
+            store.data_dir = root
             store._lock = RLock()
-            with (patch.object(store, '_get', return_value={'run_dir': str(run)}),
-                  patch.object(store, '_field_handoff_view', return_value={'browser_inputs': {'current': challenge}})):
-                self.assertEqual(store.browser_captcha_image('task', 'current'), png)
+            with (patch.object(store, '_get', return_value=meta),
+                  patch.object(store, '_view', return_value={'status': 'action_required'}) as view,
+                  patch.object(browser_execution, 'cases', return_value={'login-routes': config}),
+                  (job / 'execution.lock').open('a') as executor):
+                fcntl.flock(executor, fcntl.LOCK_EX)
+                store._collect_field_results(meta, run, checkpoint, prior, filename=filename)
+                self.assertEqual(store.browser_captcha_image('task', 'active'), png)
+                view.return_value = {'status': 'running'}
+                self.assertEqual(store.browser_captcha_image('task', 'deferred', revision=prior['revision']), png)
+                displayed = browser_captcha.presentation(run, state, 'running')
+                self.assertEqual([row['revision'] for row in displayed], [prior['revision']])
+                self.assertNotIn('image', displayed[0]['browser_inputs']['deferred'])
+                for nonce, revision in (('active', None), ('deferred', active['revision']), ('unknown', None)):
+                    with self.assertRaises(TaskError) as error:
+                        store.browser_captcha_image('task', nonce, revision=revision)
+                    self.assertEqual(error.exception.status, 404)
+                request = {'action': 'browser_captcha', 'id': '1', 'nonce': 'deferred', 'code': 'A123',
+                           'binding': prior['binding'], 'revision': prior['revision']}
                 with self.assertRaises(TaskError):
-                    store.browser_captcha_image('task', 'old')
-                challenge['expires'] = time.time() - 1
+                    store.field_handoff('task', {**request, 'binding': active['binding']})
+                self.assertEqual(store.field_handoff('task', request), {'submitted': True})
+                self.assertEqual(json.loads((job / 'captcha-answer.json').read_text())['nonce'], 'deferred')
+                self.assertEqual(field_handoff.read(run), active)
+                saved = field_handoff.read(run, filename)
+                saved['browser_inputs']['deferred']['expires'] = 0
+                saved['failed_cases'] = {'1': {'retry_captcha': True}}
+                write_json(run / filename, saved)
                 with self.assertRaises(TaskError):
-                    store.browser_captcha_image('task', 'current')
+                    store.browser_captcha_image('task', 'deferred')
+                retry = {**request, 'action': 'retry_browser_captcha'}
+                with patch.object(browser_execution, 'poll', return_value={'status': 'running'}) as execute:
+                    self.assertEqual(store.field_handoff('task', retry), {'status': 'running'})
+                    execute.assert_called_once_with(run, saved, saved['items'][0], config, retry_captcha=True)
+                write_json(run / 'control.json', {'action': 'pause'})
+                self.assertEqual(browser_captcha.presentation(run, state, 'running'), [])
+                with self.assertRaises(TaskError):
+                    store.field_handoff('task', retry)
+                (run / 'control.json').unlink()
+                (workspace / 'app.py').write_text('pass\n')
+                self.assertEqual(browser_captcha.presentation(run, state, 'running'), [])
+                with self.assertRaises(TaskError):
+                    store.field_handoff('task', retry)
 
     def test_captcha_is_sent_only_to_the_live_bound_browser(self):
         with tempfile.TemporaryDirectory() as temp:

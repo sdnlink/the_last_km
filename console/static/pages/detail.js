@@ -11,6 +11,7 @@ let task,role='all',log='',logSequence=0,logTotal=0;
 let dispatchData=null,dispatchFilter='all',dispatchSequence=0;
 let previewPrompted=false,previewChanging=false;
 let shownCaptcha='', captchaSubmitting=false;
+const seenCaptchas=new Set();
 const previewAPI=()=>`/api/tasks/${encodeURIComponent(id)}/local-preview`;
 
 function showPreviewPrompt(preview){
@@ -47,24 +48,33 @@ async function changePreview(payload){
   renderPreview(result);
  }finally{previewChanging=false;}
 }
-function renderBrowserCaptcha(t, reopen=false){
+function captchaChoices(t){
+ const now=Date.now()/1000;
+ return (t?.browser_captcha_handoffs||[]).flatMap(handoff=>Object.values(handoff.browser_inputs)
+  .filter(challenge=>(challenge.kind==='otp'||challenge.kind==='image')&&challenge.expires>now)
+  .map(challenge=>({handoff,challenge,key:handoff.revision+':'+challenge.nonce})));
+}
+function renderBrowserCaptcha(t, requested=''){
  const dialog=$('#browser-captcha-dialog');
  if(captchaSubmitting)return;
- const challenge=Object.values(t.field_handoff?.browser_inputs||{}).find(value=>
-  (value.kind==='otp'||value.kind==='image')&&value.expires>Date.now()/1000);
- if(!challenge||t.status!=='action_required'){
+ const choices=captchaChoices(t);
+ for(const key of seenCaptchas)if(!choices.some(choice=>choice.key===key))seenCaptchas.delete(key);
+ if(dialog.open&&(!requested||requested===shownCaptcha)&&choices.some(choice=>choice.key===shownCaptcha))return;
+ const selected=choices.find(choice=>requested?choice.key===requested:!seenCaptchas.has(choice.key));
+ if(!selected){
   if(dialog.open)dialog.close();
   return;
  }
- if(dialog.open&&shownCaptcha===challenge.nonce)return;
- if(!reopen&&shownCaptcha===challenge.nonce)return;
  if(!dialog.open&&$('dialog[open]'))return;
- shownCaptcha=challenge.nonce;
- $('#browser-captcha-role').textContent=challenge.role;
+ const {handoff,challenge,key}=selected;
+ shownCaptcha=key;
+ seenCaptchas.add(key);
+ const title=handoff.items.find(item=>item.id===challenge.id)?.title;
+ $('#browser-captcha-role').textContent=[title,challenge.role].filter(Boolean).join(' · ');
  const otp=challenge.kind==='otp',image=$('#browser-captcha-image');
  image.hidden=otp;
  if(otp)image.removeAttribute('src');
- else image.src=`/api/tasks/${encodeURIComponent(id)}/browser-captcha/${encodeURIComponent(challenge.nonce)}`;
+ else image.src=`/api/tasks/${encodeURIComponent(id)}/browser-captcha/${encodeURIComponent(challenge.nonce)}?revision=${encodeURIComponent(handoff.revision)}`;
  $('#browser-captcha-title').textContent=i18n(otp?'填写六位动态验证码':'填写现场浏览器验证码');
  const form=$('#browser-captcha-form');
  form.reset();
@@ -78,21 +88,27 @@ function renderBrowserCaptcha(t, reopen=false){
 function renderFieldHandoff(t){
  const panel=$('#detail-field-handoff');
  if(!panel)return;
- const handoff=t.field_handoff;
- const pending=(handoff?.items||[]).filter(item=>!item.receipt);
- const inputs=Object.values(handoff?.browser_inputs||{}).filter(input=>input.expires>Date.now()/1000);
+ const handoff=t.status==='action_required'?t.field_handoff:null;
+ const controls=t.browser_captcha_handoffs||[], choices=captchaChoices(t);
  const error=handoff?.resume?.error;
- const rows=pending.map(item=>{
-  const needsCaptcha=inputs.some(input=>input.id===item.id);
-  const retry=handoff.failed_cases?.[item.id]?.retry_captcha;
-  const status=needsCaptcha?'等待填写验证码':
+ const row=(item,revision,status)=>{
+  const choice=choices.find(value=>value.handoff.revision===revision&&value.challenge.id===item.id);
+  const retry=controls.find(value=>value.revision===revision)?.items.find(value=>value.id===item.id)?.retry_captcha;
+  const text=choice?'等待填写验证码':status||'验证码已超时';
+  return `<li>${escape(item.title)} · ${escape(text)}
+   ${choice?`<button type="button" class="button secondary" data-browser-captcha="${escape(choice.key)}">填写验证码</button>`:''}
+   ${retry?`<button type="button" class="button secondary" data-browser-retry="${escape(item.id)}" data-handoff-revision="${escape(revision)}">重新获取验证码</button>`:''}</li>`;
+ };
+ const rows=(handoff?.items||[]).filter(item=>!item.receipt).map(item=>{
+  const status=
     item.allow_manual&&!item.case_id&&!item.executor_task?'等待登记可执行此项验证的执行器':
     handoff.executor_status?.[item.id]||(item.executor_task?'等待执行器完成':'等待自动验证');
-  return `<li>${escape(item.title)} · ${escape(status)}
-   ${needsCaptcha?'<button type="button" class="button secondary" data-browser-captcha>填写验证码</button>':''}
-   ${retry?`<button type="button" class="button secondary" data-browser-retry="${escape(item.id)}">重新获取验证码</button>`:''}</li>`;
+  return row(item,handoff.revision,status);
  });
- const html=(rows.length||error)&&t.status==='action_required'
+ for(const deferred of controls.filter(value=>value.deferred)){
+  for(const item of deferred.items)rows.push(row(item,deferred.revision));
+ }
+ const html=(rows.length||error)
   ?`<section class="detail-alert"><h3>验证进度</h3>${error?`<p>自动续审暂未启动。 ${escape(error)}</p>`:''}${rows.length?`<ul>${rows.join('')}</ul>`:''}</section>`
   :'';
  stableHTML(panel,html);
@@ -261,10 +277,12 @@ export function mount(){
   error.hidden=false;
  });
  $('#detail-field-handoff')?.addEventListener('click',async event=>{
-  if(event.target.closest('[data-browser-captcha]')&&task)renderBrowserCaptcha(task,true);
+  const open=event.target.closest('[data-browser-captcha]');
+  if(open&&task){renderBrowserCaptcha(task,open.dataset.browserCaptcha);return;}
   const button=event.target.closest('[data-browser-retry]');
-  const handoff=task?.field_handoff;
-  if(!button||!handoff)return;
+  if(!button)return;
+  const handoff=task?.browser_captcha_handoffs?.find(value=>value.revision===button.dataset.handoffRevision);
+  if(!handoff)return;
   button.disabled=true;
   try{
    await api(`/api/tasks/${encodeURIComponent(id)}/field-handoff`,{
@@ -276,8 +294,9 @@ export function mount(){
  });
  $('#browser-captcha-form')?.addEventListener('submit',async event=>{
   event.preventDefault();
-  const handoff=task?.field_handoff,challenge=handoff?.browser_inputs?.[shownCaptcha];
-  if(!challenge||captchaSubmitting)return;
+  const selected=captchaChoices(task).find(choice=>choice.key===shownCaptcha);
+  if(!selected||captchaSubmitting)return;
+  const {handoff,challenge}=selected;
   const form=event.currentTarget,error=$('#browser-captcha-error');
   captchaSubmitting=true;
   try{

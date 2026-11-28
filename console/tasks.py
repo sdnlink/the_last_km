@@ -26,7 +26,7 @@ from auto_moniter.locking import workspaces_overlap
 from auto_moniter.workspace import LockError
 from auto_moniter.check_history import configurations
 from console.settings import settings, DEFAULTS
-from console import lifecycle
+from console import browser_captcha, lifecycle
 from console.deletion import run_key, inactive_run, purge_run_logs, validate_log_location
 from console.acceptance import scan as scan_acceptance, select as select_acceptance, preflight as acceptance_preflight
 from console.acceptance import validate_commands
@@ -499,6 +499,7 @@ class TaskStore:
                      'quality_state': state.get('quality_state', {}) if include_details else {},
                      'requirement_coverage': read_json(run / 'requirement-coverage.json') if include_details else {},
                      'field_handoff': self._field_handoff_view(run, state) if include_details else {},
+                     'browser_captcha_handoffs': browser_captcha.presentation(run, state, status) if include_details else [],
                      'automatic_recovery': lifecycle.presentation(run, status, control) if include_details else {},
                      'local_preview': self._local_preview_view(meta) if include_details else {},
                      'activity': progress,
@@ -695,21 +696,27 @@ class TaskStore:
         except (OSError, ValueError, KeyError):
             return {}
 
-    def browser_captcha_image(self, ident, nonce):
+    def browser_captcha_image(self, ident, nonce, *, revision=None):
         from base64 import b64decode
 
         with self._lock:
-            run = Path(self._get(ident)['run_dir'])
+            meta = self._get(ident)
+            run = Path(meta['run_dir'])
+            status = self._view(meta, {}, include_details=False)['status']
             state = Directions(run).read('state.json', 32 * 1024 * 1024)
-            handoff = self._field_handoff_view(run, state)
-            challenge = handoff.get('browser_inputs', {}).get(nonce, {})
-            if (state.get('status') != 'action_required' or challenge.get('kind') != 'image'
-                    or challenge.get('expires', 0) <= time.time()):
-                raise TaskError('验证码已失效，请等待新的验证码。', 404)
-            image = b64decode(challenge.get('image', ''), validate=True)
-            if not image.startswith(b'\x89PNG\r\n\x1a\n'):
-                raise TaskError('验证码图片格式无效。', 404)
-            return image
+            for _, value, _ in browser_captcha.handoffs(run, state, status):
+                if revision is not None and revision != value['revision']:
+                    continue
+                challenge = browser_captcha.challenges(value).get(nonce, {})
+                if challenge.get('kind') == 'image':
+                    try:
+                        image = b64decode(challenge.get('image', ''), validate=True)
+                    except ValueError as exc:
+                        raise TaskError('验证码图片格式无效。', 404) from exc
+                    if not image.startswith(b'\x89PNG\r\n\x1a\n'):
+                        raise TaskError('验证码图片格式无效。', 404)
+                    return image
+            raise TaskError('验证码已失效，请等待新的验证码。', 404)
 
     def _local_preview_view(self, meta) -> dict:
         if not meta.get('managed') or not debug_preview.available(Path(meta['cwd'])):
@@ -744,6 +751,12 @@ class TaskStore:
             meta = self._get(ident)
             run = Path(meta['run_dir'])
             view = self._view(meta, {}, include_details=False)
+            if data.get('action') in ('browser_captcha', 'retry_browser_captcha'):
+                try:
+                    return browser_captcha.handle(run, view['status'], data,
+                        config_path=self.data_dir / browser_execution.CONFIG, workspace=Path(meta['cwd']))
+                except (OSError, ValueError, LockError) as exc:
+                    raise TaskError(str(exc), 409) from exc
             if view['status'] != 'action_required':
                 raise TaskError('只有等待处理的任务可以登记或提交现场回执。', 409)
             state = Directions(run).read('state.json', 32 * 1024 * 1024)
@@ -777,25 +790,6 @@ class TaskStore:
                     return field_handoff.claim(run, state, data)
                 if data.get('action') == 'release':
                     return field_handoff.release(run, state, data)
-                if data.get('action') in ('browser_captcha', 'retry_browser_captcha'):
-                    value, item = field_handoff._select(run, state, data)
-                    cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))
-                    case_id = item.get('case_id')
-                    config = browser_execution.for_handoff(cases.get(case_id), value, case_id)
-                    if (not config or not config.get('interactive_captcha') or item.get('receipt')
-                            or item.get('claim') or item.get('executor_task')
-                            or not browser_execution.matches_item(config, value, item)):
-                        raise ValueError('浏览器会话已失效，请刷新任务。')
-                    if data['action'] == 'retry_browser_captcha':
-                        if read_control(run / 'control.json').get('action') in ('stop', 'pause'):
-                            raise ValueError('任务已暂停或停止，请先恢复任务。')
-                        field_handoff._require_dependencies(value, item)
-                        result = browser_execution.poll(run, value, item, config, retry_captcha=True)
-                        if result['status'] == 'failed':
-                            raise ValueError(result['reason'])
-                        return {'status': result['status']}
-                    browser_execution.submit_captcha(run, value, item, config, data.get('nonce'), data.get('code'))
-                    return {'submitted': True}
                 if data.get('action') == 'bind_browser_case':
                     case_id = data.get('case_id')
                     cases = browser_execution.cases(self.data_dir / browser_execution.CONFIG, Path(meta['cwd']))

@@ -73,6 +73,7 @@ def _record_from_state(item: dict) -> RoundRecord:
         watcher_result=dict(item.get('watcher_result') or {}),
         reported_status=str(item.get('reported_status') or ''),
         delivery=dict(item.get('delivery') or {}),
+        concluded_at=str(item.get('concluded_at') or ''),
     )
 
 
@@ -217,6 +218,7 @@ class RunCheckpoint:
             if record.role in {'worker', 'reviewer'} and record.verdict.summary:
                 self._event('round_concluded', round=record.index, role=record.role, status=record.verdict.status,
                             summary=record.verdict.summary, task_id=record.verdict.task_id,
+                            concluded_at=record.concluded_at,
                             watcher_status=record.watcher_result.get('status', ''))
             self._pruned_failures[record.role] = self._pruned_failures.get(record.role, 0) + 1 if record.failure else 0
             self._pruned_worker_rounds += record.role == "worker"

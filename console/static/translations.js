@@ -1551,6 +1551,7 @@ export default {
   "package.json 格式无效": "Invalid package.json format",
   "无法读取本地 Git 提交元数据": "Could not read local Git commit metadata",
   "裁判诊断": "Referee diagnosis",
+  "时间未记录": "Time not recorded",
   "原任务的轮次记录无效": "The original task's round record is invalid",
   "进行检查": "Run checks",
   "关键结论": "Key conclusions",

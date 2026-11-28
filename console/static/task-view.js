@@ -136,6 +136,11 @@ function selectWorkflowStage(stage){
   selectedStage=stage===selectedStage?null:stage;
   resetPage('workflow');
 }
+function workflowTime(at) {
+  return at && Number.isFinite(Date.parse(at))
+    ? `<time datetime="${escape(at)}">${escape(dateTimeLabel(at))}</time>`
+    : `<span>${i18n('时间未记录')}</span>`;
+}
 function milestoneHTML(item){
   const {checks,commit}=item;
   const metadata=[roleName(item.role)];
@@ -143,31 +148,30 @@ function milestoneHTML(item){
   if(item.round)metadata.push(i18n`第 ${item.round} 轮`);
   if(item.task_id)metadata.push(item.task_id);
   if(item.status)metadata.push(Object.hasOwn(stageStatus,item.status)?i18n(stageStatus[item.status]):item.status);
-  if(item.at)metadata.push(dateTimeLabel(item.at));
   const summary=checks?i18n`通过 ${checks.passed} 项，共 ${checks.total} 项`+(checks.source_changed?i18n('。检查期间源码发生变化。'):''):item.summary;
-  return `<li><div class="work-event-meta">${metadata.map(value=>`<span>${escape(value)}</span>`).join('')}</div><p>${escape(summary)}${commit?` <code title="${escape(commit)}">${escape(commit.slice(0,12))}</code>`:''}</p></li>`;
+  return `<li><div class="work-event-meta">${workflowTime(item.at)}${metadata.map(value=>`<span>${escape(value)}</span>`).join('')}</div><p>${escape(summary)}${commit?` <code title="${escape(commit)}">${escape(commit.slice(0,12))}</code>`:''}</p></li>`;
 }
 function renderWorkflow(t, {role = "all", currentOnly = false, showRoles = true} = {}) {
   if (showRoles && $("#role-details")) stableHTML($("#role-details"), roleDetailsHTML(t));
   const phase = t.health.phase;
   const history=t.work?.stages||{};
-  const stages=['refining_requirements','working','validating','reviewing','publishing','closing_agents'];
+  const stages=['refining_requirements','working','validating','reviewing','publishing','refereeing','closing_agents'];
   if(t.workflow && t.workflow!=='review-first')stages.splice(2,2,'reviewing','validating');
-  if(phase==='refereeing'||history.refereeing?.length)stages.splice(-1,0,'refereeing');
   stableHTML($("#workflow-stages"), stages.map((stage,i) => {
     const skipped=stage==='reviewing'&&t.work?.roles?.reviewer?.status==='disabled';
     const current=active(t)&&phase===stage&&!skipped;
     const count=history[stage]?.length||0;
+    const latest=count?newestFirst(history[stage])[0].at:null;
     const complete=t.status==='done'&&count>0&&!skipped;
     const state=skipped?'idle':complete?'complete':current?taskMotion(t):t.status==='paused'?'paused':'idle';
     const label=skipped?i18n('未启用'):current?(state==='running'?i18n('正在执行'):state==='paused'?i18n('已暂停'):i18n('连接待确认')):count?i18n`${count} 条结论`:i18n('暂无结论');
-    return `<button type="button" class="workflow-stage ${complete?'complete':current?'current':''}" data-workflow-stage="${stage}" data-role="${phaseRoles[stage]}" data-motion="${state}"${current?' aria-current="step"':''} aria-pressed="${stage===selectedStage}" aria-controls="detail-live"><span>${skipped?'—':complete?'✓':i+1}</span><span class="workflow-stage-label"><strong>${i18n(stageTitles[stage])}</strong><small>${stateLabel(state,label)}</small></span></button>`;
+    const time=count?`<small class="workflow-stage-time">${workflowTime(latest)}</small>`:'';
+    return `<button type="button" class="workflow-stage ${complete?'complete':current?'current':''}" data-workflow-stage="${stage}" data-role="${phaseRoles[stage]}" data-motion="${state}"${current?' aria-current="step"':''} aria-pressed="${stage===selectedStage}" aria-controls="detail-live"><span>${skipped?'—':complete?'✓':i+1}</span><span class="workflow-stage-label"><strong>${i18n(stageTitles[stage])}</strong><small>${stateLabel(state,label)}</small>${time}</span></button>`;
   }).join(''));
   const currentRound=Number(t.activity?.round);
   const group=selectedStage?history[selectedStage]||[]:stages.flatMap(stage=>history[stage]||[])
     .filter(item=>(role==='all'||item.role===role)&&(!currentOnly||(item.round!=null&&Number(item.round)===currentRound)));
-  const items=group.slice().reverse();
-  if(!selectedStage)items.sort((a,b)=>Number(b.round||0)-Number(a.round||0));
+  const items=newestFirst(group);
   const page=paginate('workflow',items,{rowHeight:100});
   const heading=selectedStage?i18n(stageTitles[selectedStage])+' · '+i18n('任务全程'):i18n('关键结论');
   stableHTML($("#detail-live"),`<h3 class="workflow-conclusions-title">${heading}</h3><ol class="work-events workflow-conclusions" data-page-list="workflow">${page.items.map(milestoneHTML).join('')||`<li class="live-empty">${i18n('暂无关键结论。')}</li>`}</ol>${page.controls}`);

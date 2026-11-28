@@ -3,10 +3,11 @@
 import json
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_moniter.events import CONCLUSION_EVENTS
-from console.activity import json_lines
+from console.activity import json_lines, parse_time
 from console.diagnostics import present_summary
 
 EVENT_STAGES = {
@@ -23,7 +24,8 @@ EVENT_STAGES = {
 
 def _events(run: Path):
     for name in ('events.previous.jsonl', 'events.jsonl'):
-        yield from (row for row in json_lines(run / name) if row.get('event') in CONCLUSION_EVENTS)
+        yield from (row for row in json_lines(run / name)
+                    if row.get('event') in CONCLUSION_EVENTS or row.get('event') == 'reviewer_usage')
     path = run / 'milestones.jsonl'
     try:
         if not path.is_symlink():
@@ -52,6 +54,19 @@ def _coverage_summary(run, receipt):
     return ''
 
 
+def _round_log_time(run, output_path, role, index):
+    name = Path(output_path or '').name
+    if not str(index).isdecimal() or not re.fullmatch(r'\d+-' + role + r'(?:-[a-z0-9-]+)?\.log', name):
+        return ''
+    path = run / name
+    try:
+        if not path.is_symlink() and path.is_file():
+            return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        pass
+    return ''
+
+
 def stage_history(run, state, conclusions, acceptance):
     stages = defaultdict(list)
 
@@ -59,8 +74,16 @@ def stage_history(run, state, conclusions, acceptance):
         stages[stage].append({'role': role, 'summary': present_summary(summary), 'round': round, 'cycle': cycle,
                               'status': status, 'at': at, 'commit': commit, 'checks': checks, 'task_id': task_id})
 
-    events = sorted({(row.get('at'), row['event']): row for row in _events(run)}.values(),
-                    key=lambda row: row.get('at') or '')
+    rows = {(row.get('at'), row['event'], row.get('role'), row.get('round')): row for row in _events(run)}
+    events = [row for row in rows.values() if row['event'] in CONCLUSION_EVENTS]
+    reviewer_times = defaultdict(list)
+    for row in rows.values():
+        if row['event'] == 'reviewer_usage' and parse_time(row.get('at')):
+            reviewer_times[str(row.get('round'))].append(row['at'])
+
+    def review_time(index):
+        times = reviewer_times.get(str(index), [])
+        return times[0] if len(times) == 1 else ''
     recorded_checks = {(row.get('round'), row.get('passed'), row.get('total'), row.get('status'))
                        for row in events if row['event'] == 'acceptance_checks_concluded'}
     saved_commits = {row.get('commit') for row in events if row['event'] == 'approved_local_commit'}
@@ -76,6 +99,9 @@ def stage_history(run, state, conclusions, acceptance):
     records = state.get('rounds')
     if not isinstance(records, list):
         records = state.get('records') or []
+    log_sources = defaultdict(list)
+    for record in records:
+        log_sources[(record.get('role'), record.get('index'))].append(record.get('output_path'))
     check_rounds = set()
     recorded_rounds = {(item['role'], str(item.get('index'))) for item in conclusions}
 
@@ -95,8 +121,15 @@ def stage_history(run, state, conclusions, acceptance):
     for item in conclusions:
         if item.get('summary'):
             stage = 'working' if item['role'] == 'worker' else 'reviewing'
+            role, index = item['role'], item.get('index')
+            at = item.get('concluded_at') or ''
+            paths = log_sources.get((role, index), [])
+            if not at and len(paths) == 1:
+                at = _round_log_time(run, paths[0], role, index)
+                if not at and role == 'reviewer':
+                    at = review_time(index)
             add(stage, item['role'], item['summary'], round=item.get('index'),
-                status=item.get('status'), task_id=item.get('task_id'))
+                status=item.get('status'), task_id=item.get('task_id'), at=at)
         checkpoint = item.get('git_checkpoint') or {}
         business = checkpoint.get('business_commit') or {}
         commit = business.get('commit')
@@ -137,15 +170,19 @@ def stage_history(run, state, conclusions, acceptance):
         summary = row.get('summary') or row.get('reason')
         if not summary and name == 'requirement_coverage_reviewed':
             summary = _coverage_summary(run, row.get('receipt'))
+        at = row.get('at')
+        if name == 'round_concluded':
+            # An older row's event time reflects pruning, after the conclusion.
+            at = row.get('concluded_at') or (review_time(row.get('round')) if role == 'reviewer' else '')
         add(stage, role, summary or fallback, round=row.get('round'),
             cycle=row.get('cycle'), status=row.get('status') or ('rejected' if name == 'referee_rejected' else ''),
-            at=row.get('at'), commit=row.get('commit'), checks=checks, task_id=row.get('task_id'))
+            at=at, commit=row.get('commit'), checks=checks, task_id=row.get('task_id'))
     if not stages['closing_agents'] and state.get('summary') and state.get('stop_reason'):
-        add('closing_agents', 'watcher', state['summary'], status=state.get('status'))
+        add('closing_agents', 'watcher', state['summary'], status=state.get('status'), at=state.get('updated_at'))
     decision = (state.get('referee') or {}).get('decision') or {}
     if not stages['refereeing'] and decision.get('summary'):
         add('refereeing', 'referee', decision['summary'])
-    # Retained and pruned rounds may come from different sources after a resume.
-    for stage in ('working', 'reviewing', 'validating', 'publishing'):
-        stages[stage].sort(key=lambda item: int(item['round']) if str(item['round']).isdecimal() else -1)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    for items in stages.values():
+        items.sort(key=lambda item: parse_time(item['at']) or oldest, reverse=True)
     return dict(stages)

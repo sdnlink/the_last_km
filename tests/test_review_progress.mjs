@@ -36,20 +36,36 @@ test('step history includes earlier rounds and shows only conclusions',()=>{
   globalThis.document.querySelector=selector=>nodes[selector]||null;
   const task={id:'task',workflow:'review-first',status:'running',health:{phase:'reviewing'},activity:{round:8,plan:[{step:'private command'}]},work:{
    workflow:[{role:'reviewer',round:8,kind:'command',text:'git diff private command'}],
-   stages:{working:[{role:'worker',summary:'旧轮的实现结论',round:1}],reviewing:[{role:'reviewer',summary:'当前审查结论',round:8}]},
+   stages:{
+    working:[
+     {role:'worker',summary:'旧轮的实现结论',round:20,at:'2026-11-27T09:00:00+08:00'},
+     {role:'worker',summary:'更新的实现结论',round:1,at:'2026-11-28T00:00:00Z'},
+    ],
+    reviewing:[{role:'reviewer',summary:'当前审查结论',round:8,at:'2026-11-28T00:10:20Z'}],
+   },
   }};
   const render=()=>renderWorkflow(task,{showRoles:false,role:'reviewer',currentOnly:true});
   render();
   assert.match(nodes['#detail-live'].innerHTML,/当前审查结论/);
   assert.doesNotMatch(nodes['#detail-live'].innerHTML,/private command|旧轮的实现结论/);
   const stages=nodes['#workflow-stages'].innerHTML;
-  assert.equal((stages.match(/<button/g)||[]).length,6);
+  assert.equal((stages.match(/<button/g)||[]).length,7);
   assert.ok(stages.indexOf('进行检查')<stages.indexOf('独立审查'));
   assert.ok(stages.indexOf('独立审查')<stages.indexOf('保存提交'));
+  assert.ok(stages.indexOf('保存提交')<stages.indexOf('裁判诊断'));
+  assert.ok(stages.indexOf('裁判诊断')<stages.indexOf('整理记录'));
+  assert.match(stages, /<time datetime="2026-11-28T00:10:20Z">/);
+  renderWorkflow(task,{showRoles:false});
+  let timeline=nodes['#detail-live'].innerHTML;
+  assert.ok(timeline.indexOf('当前审查结论')<timeline.indexOf('更新的实现结论'));
+  assert.ok(timeline.indexOf('更新的实现结论')<timeline.indexOf('旧轮的实现结论'));
   selectWorkflowStage('working');
   render();
   assert.match(nodes['#detail-live'].innerHTML,/实现需求 · 任务全程/);
-  assert.match(nodes['#detail-live'].innerHTML,/旧轮的实现结论/);
+  timeline=nodes['#detail-live'].innerHTML;
+  assert.match(timeline,/旧轮的实现结论/);
+  assert.ok(timeline.indexOf('更新的实现结论')<timeline.indexOf('旧轮的实现结论'));
+  assert.match(timeline,/<time datetime="2026-11-28T00:00:00Z">/);
   assert.doesNotMatch(nodes['#detail-live'].innerHTML,/当前审查结论|private command/);
   selectWorkflowStage('working');
   render();

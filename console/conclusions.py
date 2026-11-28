@@ -6,7 +6,7 @@ from console.diagnostics import present_summary
 def present_conclusion(item: dict) -> dict:
     keys = ('index', 'role', 'status', 'summary', 'done', 'gaps', 'next_actions', 'evidence',
             'blockers', 'exit_code', 'elapsed_s', 'git_checkpoint', 'issue_resolutions', 'watcher_result',
-            'task_id', 'task_status')
+            'task_id', 'task_status', 'concluded_at')
     result = {key: item.get(key) for key in keys}
     if isinstance(result['summary'], str):
         result['summary'] = present_summary(result['summary'])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -92,6 +93,7 @@ class RoundRecord:
     watcher_result: dict = field(default_factory=dict)
     reported_status: str = ""
     delivery: dict = field(default_factory=dict)
+    concluded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass
@@ -131,6 +133,7 @@ class RunReport:
                     "exit_code": record.exit_code,
                     "timed_out": record.timed_out,
                     "elapsed_s": round(record.elapsed_s, 3),
+                    **({"concluded_at": record.concluded_at} if record.concluded_at else {}),
                     "session_id": record.session_id,
                     "output_path": record.output_path,
                     "tree": record.tree,

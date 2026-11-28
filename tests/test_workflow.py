@@ -135,6 +135,33 @@ class WorkDetailsTests(unittest.TestCase):
 
 
 class StageHistoryTests(unittest.TestCase):
+    def test_history_orders_conclusions_by_completion_time_across_resumes(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from console.milestones import stage_history
+
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            rows = [
+                {'event': 'round_concluded', 'role': 'worker', 'round': '20', 'summary': '较早完成的实现',
+                 'at': '2026-11-30T12:00:00Z', 'concluded_at': '2026-11-28T09:00:00+08:00'},
+                {'event': 'round_concluded', 'role': 'worker', 'round': '21', 'summary': '无原始完成时间',
+                 'at': '2026-12-01T12:00:00Z'},
+                {'event': 'acceptance_checks_concluded', 'round': '22', 'status': 'passed',
+                 'passed': '1', 'total': '1', 'at': '2026-11-28T08:30:00+08:00'},
+                {'event': 'acceptance_checks_concluded', 'round': '2', 'status': 'passed',
+                 'passed': '1', 'total': '1', 'at': '2026-11-28T01:00:00Z'},
+            ]
+            (run / 'milestones.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            conclusions = [{'role': 'worker', 'index': 2, 'summary': '恢复后完成的实现',
+                            'concluded_at': '2026-11-28T01:30:00Z'}]
+            history = stage_history(run, {}, conclusions, {})
+            self.assertEqual([str(item['round']) for item in history['working']], ['2', '20', '21'])
+            self.assertEqual([item['round'] for item in history['validating']], ['2', '22'])
+            self.assertEqual(history['working'][-1]['at'], '')
+
     def test_history_keeps_earlier_conclusions_after_event_rotation(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory
@@ -145,7 +172,8 @@ class StageHistoryTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             run = Path(tmp)
             record(run, 'requirements_reviewed', status='ready', cycle=1, summary='首批范围已明确')
-            record(run, 'round_concluded', role='worker', round=1, status='done', summary='已实现首页')
+            record(run, 'round_concluded', role='worker', round=1, status='done', summary='已实现首页',
+                   concluded_at='2026-11-28T01:00:00Z')
             record(run, 'approved_local_commit', round=1, commit='a' * 40)
             record(run, 'run_finished', status='action_required', summary='等待浏览器验证')
             (run / 'events.jsonl').unlink()
@@ -156,6 +184,7 @@ class StageHistoryTests(unittest.TestCase):
             history = stage_history(run, state, conclusions, {})
             self.assertEqual(history['refining_requirements'][0]['summary'], '首批范围已明确')
             self.assertEqual(history['working'][0]['summary'], '已实现首页')
+            self.assertEqual(history['working'][0]['at'], '2026-11-28T01:00:00Z')
             self.assertEqual(history['validating'][0]['checks']['passed'], 1)
             self.assertEqual(history['reviewing'][0]['summary'], '复核通过')
             self.assertEqual(history['publishing'][0]['commit'], 'a' * 40)

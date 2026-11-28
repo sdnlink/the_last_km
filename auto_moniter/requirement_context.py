@@ -148,6 +148,7 @@ def load(run, cwd, requirement, cycle, snapshot, checks, directions, *, previous
                    'changed_files':changed[:100] if changed is not None else None,
                    'changed_file_count':len(changed) if changed is not None else None,
                    'checks_changed':saved.get('checks') != checks_digest(checks),
+                   'directions_changed':saved['direction_ids'] != [item['id'] for item in directions],
                    'new_direction_ids':[item['id'] for item in directions if item['id'] not in saved.get('direction_ids',[])],
                    'source':'saved requirement analysis'}
     except FileNotFoundError:

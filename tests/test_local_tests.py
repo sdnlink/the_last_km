@@ -1,15 +1,54 @@
 import json
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from auto_moniter.check_git_tree import inspect_checks
 from auto_moniter.local_tests import catalog, command, reuse_key
 
 
 class LocalTestTests(unittest.TestCase):
+    def test_git_tree_check_runs_both_exact_candidates_and_rejects_wrong_blob(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+
+            git('init', '-q')
+            source = root / 'app.py'
+            test = root / 'test_behavior.py'
+            test.write_text(
+                'import unittest\nfrom app import value\n'
+                'class Test(unittest.TestCase):\n'
+                ' def test_result(self): self.assertIn(value, (41, 42))\n')
+            trees = []
+            for version in (41, 42):
+                source.write_text(f'value = {version}\n')
+                git('add', 'app.py', test.name)
+                trees.append(git('write-tree'))
+            source.write_text('raise AssertionError("The dirty workspace was used")\n')
+            blob = git('hash-object', test.name)
+            argv = shlex.split(command(root, test.name))
+            argv.extend(['--git-tree', trees[0], '--git-tree', trees[1], '--test-blob', blob])
+            report, = inspect_checks(root, [shlex.join(argv)])
+            self.assertEqual(report['status'], 'ready')
+            self.assertEqual([item['git_tree'] for item in report['candidates']], trees)
+            result = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count('source_verified=true'), 2)
+            self.assertIn('dirty workspace', source.read_text())
+            argv[-1] = '0' * len(blob)
+            report, = inspect_checks(root, [shlex.join(argv)])
+            self.assertEqual(report['status'], 'blocked')
+            result = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('test_result', result.stderr)
+
     @unittest.skipUnless(shutil.which('node'), 'Node required')
     def test_node_reuse_requires_the_same_known_local_environment(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -10,14 +10,14 @@ from auto_moniter.workspace import file_snapshot, snapshot_fingerprint, workspac
 from auto_moniter.modules import ModuleLedger
 from auto_moniter.storage import write_json
 from auto_moniter.redaction import redact, safe
-from auto_moniter import candidate_checks, check_history, function_tasks
+from auto_moniter import candidate_checks, check_git_tree, check_history, function_tasks
 from auto_moniter.business_recovery import validate_change
 from auto_moniter import requirements_review, requirement_context, requirement_coverage
 from auto_moniter import function_plan
 from auto_moniter.skills import browser_guidance
 from auto_moniter import migration
 from auto_moniter import assignment_delivery
-from auto_moniter.supervisor_models import RecoveryError, _accepted
+from auto_moniter.supervisor_models import RecoveryError, _CompletedTurn, _accepted
 from auto_moniter.command_runner import _paseo_archive, _paseo_stop
 
 
@@ -274,6 +274,7 @@ class RequirementPlanning:
         staged = ModuleLedger.restore(self.modules.export())
         staged.merge(proposed)
         dispatch = function_tasks.FunctionTasks(self.function_tasks.export())
+        resumed_assignment = False
         preflight_repair = self._dispatch_preflight_repair()
         if next_function and self._independent_verification(assignment, backlog):
             dispatch.current = None
@@ -282,7 +283,16 @@ class RequirementPlanning:
         elif self._referee_replan and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
             if self._assignment_worker_started(dispatch.current) and revised['id'] == dispatch.current['id']:
-                raise ValueError('Referee replacement of a started assignment requires a fresh task ID')
+                if not self._can_continue_started_assignment(dispatch.current, revised):
+                    raise ValueError('已启动派单的目标、范围或原有检查发生变化。替换派单须使用新编号。')
+                resumed_assignment = True
+                if revised != dispatch.current:
+                    previous = dispatch.current
+                    same_head = isinstance(backlog, list) and backlog and backlog[0] == assignment
+                    assignment = {**revised, 'objective': previous['objective'],
+                                  'verification': list(dict.fromkeys([*previous['verification'], *revised['verification']]))}
+                    if same_head:
+                        backlog = [assignment, *backlog[1:]]
             dispatch.current = None
         elif next_function and dispatch.current:
             revised = function_tasks.validate(assignment, staged.items)
@@ -333,8 +343,8 @@ class RequirementPlanning:
                 from auto_moniter import verification_baseline
                 verification_baseline.validate_candidate(self.run_dir, self.config.cwd, dispatch.current, tree,
                     cycle=len(self.requirement_cycles) + 1, after_round=self._verification_attempt_boundary())
-            if (self._referee_replan or preflight_repair or not self.function_tasks.current
-                    or self._unstarted_assignment_test_conflicts()):
+            if not resumed_assignment and (self._referee_replan or preflight_repair or not self.function_tasks.current
+                                           or self._unstarted_assignment_test_conflicts()):
                 self._validate_new_assignment_tests(dispatch.current)
         elif dispatch.current.get('kind') in ('integration','verification') or dispatch.current.get('review_test'):
             raise ValueError('Integration, verification and reviewer-authored tests require the verified function gate')
@@ -345,6 +355,15 @@ class RequirementPlanning:
             if problems:
                 raise ValueError(problems[0])
         return staged, dispatch, complete
+
+    @staticmethod
+    def _can_continue_started_assignment(previous, revised):
+        if revised == previous:
+            return True
+        return (previous.get('kind') == 'verification'
+                and function_tasks.identity(revised) == function_tasks.identity(previous)
+                and set(previous['check_ids']) <= set(revised['check_ids'])
+                and set(previous['criterion_ids']) <= set(revised['criterion_ids']))
 
     def _can_revise_waiting_verification(self):
         current = self.function_tasks.current
@@ -489,6 +508,7 @@ class RequirementPlanning:
                 'task_id': task['id'],
                 'missing_check_inputs': missing,
                 'workspace_conflict': self._assignment_repository_conflict(task),
+                'git_tree_checks': check_git_tree.inspect_checks(self.config.cwd, checks),
             }, ensure_ascii=False))
         schema = self.schema_path
         self.schema_path = self.run_dir / 'requirement-coverage.schema.json'
@@ -583,6 +603,28 @@ class RequirementPlanning:
             return (review, path.name) if review['status'] == 'revise' else None
         return None
 
+    def _saved_ready_dispatch(self, continuation, previous, *, index, tree, next_function):
+        if (not self.config.resume or not self.config.function_dispatch or not next_function
+                or previous.get('status') != 'failed' or not continuation
+                or continuation['source'] != 'saved requirement analysis'
+                or any(continuation.get(key) for key in ('workspace_changed', 'checks_changed', 'directions_changed'))):
+            return None
+        plan = continuation['previous_response']
+        if plan.get('status') != 'ready':
+            return None
+        try:
+            brief = requirements_review.parse(json.dumps(
+                {key: plan[key] for key in requirements_review.SCHEMA['required']}))
+            brief['cycle'] = len(self.requirement_cycles) + 1
+            self._stage_requirement_plan(plan['next_task'], plan['modules'], plan.get('function_plan'),
+                                         brief, tree=tree, next_function=True)
+        except (KeyError, ValueError):
+            return None
+        path = self.run_dir / f'{index:03d}-reviewer.log'
+        if not path.is_file() or path.is_symlink():
+            return None
+        return _CompletedTurn(json.dumps(plan, ensure_ascii=False), '', 0, False, 0, path, [])
+
     def _coverage_revision_prompt(self, prompt, review):
         return (prompt + '\n\n独立复核发现以下需求缺项。'
                 '读取 ' + str(self.run_dir / 'requirement-review-context.json') + ' 中的 response 作为待修订方案。'
@@ -592,7 +634,7 @@ class RequirementPlanning:
                              ensure_ascii=False))
 
     def _invoke_requirement_review(self, prompt, index, *, checks, next_function=False, previous_brief=None,
-                                   directions, saved_revision=None):
+                                   directions, saved_revision=None, saved_dispatch=None):
         """Repair distinct planning errors with durable limits, without dispatching work."""
         from auto_moniter.adaptive_recovery import RecoveryJournal
         journal = RecoveryJournal(self.run_dir)
@@ -606,7 +648,8 @@ class RequirementPlanning:
         except (OSError, ValueError):
             pass  # Advisory history cannot prevent an otherwise valid review.
         base_prompt = prompt
-        coverage_required = saved_revision is not None or bool((previous_brief or {}).get('limited_dispatch'))
+        coverage_required = (saved_revision is not None or saved_dispatch is not None
+                             or bool((previous_brief or {}).get('limited_dispatch')))
         if saved_revision:
             review, receipt = saved_revision
             prompt = self._coverage_revision_prompt(base_prompt, review)
@@ -615,7 +658,15 @@ class RequirementPlanning:
             self._process_control()
             if self._stop:
                 return None
-            turn = self._invoke_planning_reviewer(prompt, index, directions=directions, tree=tree)
+            if attempt == 0 and saved_dispatch is not None:
+                if (self.directions.messages() != directions
+                        or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree):
+                    return None
+                self._direction_ids['reviewer'] = [item['id'] for item in directions]
+                self._event('requirements_saved_dispatch_revalidated', round=index)
+                turn = saved_dispatch
+            else:
+                turn = self._invoke_planning_reviewer(prompt, index, directions=directions, tree=tree)
             if turn is None:
                 return None
             if turn.exit_code or turn.timed_out or turn.interruption:
@@ -730,8 +781,10 @@ class RequirementPlanning:
                         return turn
                     sources = self._coverage_sources(directions)
                     modules = staged_plan[0].export() if staged_plan else self.modules.export()
-                    revised_environment = (self._can_revise_waiting_verification()
-                                           and assignment != self.function_tasks.current)
+                    current = self.function_tasks.current
+                    revised_environment = (self._can_revise_waiting_verification() and assignment != current
+                                           and not (self._referee_replan and self._can_continue_started_assignment(
+                                               current, staged_plan[1].current)))
                     coverage_required |= (revised_environment or self._referee_replan
                                           or next_function and self._unplanned_directions(directions))
                     coverage_required |= self._independent_verification(assignment, plan.get('function_plan'))
@@ -842,6 +895,8 @@ class RequirementPlanning:
                     previous=previous_result, output_file=f'{review_index:03d}-reviewer-text.md') or continuation
             saved_revision = self._saved_coverage_revision(continuation, checks=review_checks, tree=before,
                 sources=self._coverage_sources(directions), next_function=next_function)
+            saved_dispatch = None if saved_revision else self._saved_ready_dispatch(
+                continuation, previous_result, index=review_index, tree=before, next_function=next_function)
             if saved_revision:
                 continuation = {key: value for key, value in continuation.items() if key != 'previous_response'}
                 continuation['response_file'] = str(self.run_dir / 'requirement-review-context.json')
@@ -885,6 +940,11 @@ class RequirementPlanning:
                                + json.dumps(list(self.config.assignment_contracts.values()), ensure_ascii=False))
                 if self._function_gate:
                     prompt += self._function_planning_contract()
+                    if bindings := check_git_tree.inspect_checks(self.config.cwd, review_checks):
+                        prompt += ('\nWatcher 已核对固定检查的 Git 树和测试对象。执行时从 Git 树导出隔离副本，'
+                                   '测试在该副本内运行，执行根和结果由正式日志记录。'
+                                   'ready 表示候选绑定有效，验收结论由正式执行产生。\n'
+                                   + json.dumps(bindings, ensure_ascii=False))
                     browser = browser_guidance(self.config.requirement + '\n' + json.dumps(
                         self.function_tasks.current, ensure_ascii=False))
                     if browser:
@@ -900,7 +960,9 @@ class RequirementPlanning:
                         prompt += ('\nThe Referee has directed replanning of the remaining work. Its recovery '
                                    'decision supersedes the usual requirement to keep the unfinished assignment identity. '
                                    'Preserve its existing candidate, every accepted assignment and every pending original '
-                                   'criterion. Use a fresh ID when replacing a started task. Return the complete remaining '
+                                   'criterion. Keep the same ID when continuing the exact task. For a read-only task, '
+                                   'retain its targets, dependencies, criteria and existing checks while adding approved checks. '
+                                   'Use a fresh ID when replacing a started task. Return the complete remaining '
                                    'plan through final verification. Decision:\n' + json.dumps(self._referee_decision, ensure_ascii=False))
                         if any(item['task']['id'] == self._referee_decision.get('task_id')
                                for item in self.function_tasks.accepted):
@@ -953,7 +1015,7 @@ class RequirementPlanning:
             project_signature = self.project.signature if self.project else ''
             turn = self._invoke_requirement_review(prompt, index=review_index, checks=review_checks,
                 next_function=next_function, previous_brief=previous_brief, directions=directions,
-                saved_revision=saved_revision)
+                saved_revision=saved_revision, saved_dispatch=saved_dispatch)
             review_directions = [item for item in self.directions.messages()
                                  if item['id'] in self._direction_ids['reviewer']]
             if turn is not None:

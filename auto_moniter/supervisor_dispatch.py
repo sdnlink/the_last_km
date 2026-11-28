@@ -14,7 +14,7 @@ from auto_moniter.verdict import Verdict
 from auto_moniter.modules import ModuleLedger
 from auto_moniter.storage import write_json
 from auto_moniter.redaction import redact, safe
-from auto_moniter import candidate_checks, function_gate, function_tasks
+from auto_moniter import candidate_checks, check_git_tree, function_gate, function_tasks
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context, requirement_coverage
 from auto_moniter import function_plan
@@ -476,6 +476,14 @@ class FunctionDispatch:
                                         *(name for item in ledger.accepted if foreign or 'external_delivery' not in item
                                           for name in item['task'].get('test_files', [])),
                                     ])))
+        if not foreign:
+            commands = None
+            if task['delivery_scope'] == 'function' and task.get('kind') != 'verification':
+                commands = {command for index, command in enumerate(self.config.checks, 1)
+                            if f'check:{index}' in task['check_ids']}
+            for report in check_git_tree.inspect_checks(self.config.cwd, self.config.checks, commands):
+                if report['status'] == 'blocked':
+                    raise ValueError(f"固定检查 {report['check_id']} 的候选树无法绑定。{report['reason']}")
         if task['delivery_scope'] != 'function':
             missing = function_gate.coverage(ledger, modules, task, brief, self.config.cwd,
                                               provisional=provisional)

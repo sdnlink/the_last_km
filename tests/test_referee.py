@@ -126,6 +126,49 @@ class RefereeTests(unittest.TestCase):
         self.assertIn('这个测试尚未获准由 Watcher 补跑', reviewer.calls[2]['prompt'])
         self.assertFalse((self.run_dir / '001-check-02.log').exists())
 
+    def test_referee_can_keep_started_verification_and_add_an_approved_check(self):
+        original = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
+        final = verification_task('FINAL', depends=['VERIFY'])
+        requested = result('VERIFY', 'changes_required')
+        requested['verdict'].update(
+            blockers=['需要专项回执'],
+            supplemental_checks=[{'path': 'test_export.py', 'criterion_id': 'main:1', 'audit_id': 'AUD-1'}])
+        revised = {**original, 'check_ids': ['check:1', 'check:2'],
+                   'objective': 'Reworded description',
+                   'verification': ['Verify the recorded output after reopening']}
+        coverage = {'status': 'revise', 'summary': '终验仍缺外部证据',
+                    'findings': [{'source_id': 'original', 'quote': 'original requirement', 'gap': '终验证据待补'}],
+                    'independent_next_task': 'VERIFY',
+                    'affected_tasks': [{'task_ids': ['FINAL'], 'evidence_needed': '终验证据', 'owner': 'Watcher'}]}
+        worker = FunctionWorker('worker', [result('VERIFY', 'done')] * 2)
+        reviewer = ScriptedProvider('reviewer', [planning(original, [original, final]), requested,
+            decision('replan'), planning(revised, [revised, final]),
+            {'verdict': {}, 'text': json.dumps(coverage)}, result('VERIFY', 'accepted')])
+        monitor = self.monitor(worker, reviewer, checks=[CHECK, 'test -f app.py'])
+        monitor.audit.record(['Need verified export evidence'], 1, ['main'])
+        emit = monitor._event
+
+        def stop_after_acceptance(kind, **fields):
+            emit(kind, **fields)
+            if kind == 'function_accepted':
+                monitor.request_stop()
+
+        with patch.object(monitor, '_event', side_effect=stop_after_acceptance):
+            report = monitor.run()
+        self.assertEqual(report.status, 'stopped', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        accepted = monitor.function_tasks.accepted[-1]['task']
+        self.assertEqual(accepted['objective'], original['objective'])
+        self.assertEqual(accepted['verification'], original['verification'] + revised['verification'])
+        self.assertEqual(accepted['check_ids'], revised['check_ids'])
+        events = (self.run_dir / 'events.jsonl').read_text()
+        self.assertIn('coverage_independent_dispatch', events)
+        receipt = next(row for row in report.records if row.role == 'worker').watcher_result['candidate_checks']
+        self.assertEqual(receipt['context']['task'], accepted)
+        self.assertTrue(receipt['passed'])
+        self.assertFalse(monitor._can_continue_started_assignment(original, {**revised, 'symbol': 'other'}))
+        self.assertFalse(monitor._can_continue_started_assignment(original, {**revised, 'check_ids': ['check:2']}))
+
     def archive_scenario(self):
         waiting = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
         final = verification_task('FINAL', depends=['VERIFY'])

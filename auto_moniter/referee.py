@@ -5,15 +5,18 @@ from pathlib import Path
 
 from auto_moniter.redaction import safe
 from auto_moniter.storage import write_json
+from auto_moniter.check_git_tree import REQUEST_SCHEMA, requests_valid
 
 TURN_LIMIT_S = 1800
 DECISION_TIMEOUT_S = 180
-ACTIONS = {'retry_worker', 'retry_reviewer', 'replan', 'wait', 'archive_checks'}
+ACTIONS = {'retry_worker', 'retry_reviewer', 'replan', 'wait', 'archive_checks', 'run_git_tree_checks'}
 SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'action': {'type': 'string', 'enum': sorted(ACTIONS)},
     'summary': {'type': 'string'}, 'instructions': {'type': 'string'},
-    'evidence': {'type': 'array', 'items': {'type': 'string'}}},
-    'required': ['action', 'summary', 'instructions', 'evidence']}
+    'evidence': {'type': 'array', 'items': {'type': 'string'}},
+    'git_tree_checks': REQUEST_SCHEMA},
+    'required': ['action', 'summary', 'instructions', 'evidence', 'git_tree_checks']}
+REQUIRED_FIELDS = set(SCHEMA['required']) - {'git_tree_checks'}
 
 
 def fingerprint(context):
@@ -29,7 +32,7 @@ def parse(text):
     if len(text.encode('utf-8')) > 24 * 1024:
         raise ValueError('Referee decision exceeds 24 KiB')
     value = json.loads(text)
-    if (not isinstance(value, dict) or set(value) != set(SCHEMA['required'])
+    if (not isinstance(value, dict) or set(value) - {'git_tree_checks'} != REQUIRED_FIELDS
             or not isinstance(value['action'], str) or value['action'] not in ACTIONS):
         raise ValueError('Invalid referee decision action or fields')
     for key in ('summary', 'instructions'):
@@ -38,6 +41,9 @@ def parse(text):
     if (not isinstance(value['evidence'], list) or not 1 <= len(value['evidence']) <= 30
             or any(not isinstance(item, str) or not item.strip() or len(item) > 2000 for item in value['evidence'])):
         raise ValueError('Referee decision requires bounded diagnostic evidence')
+    requests = value.get('git_tree_checks', [])
+    if not requests_valid(requests) or bool(requests) != (value['action'] == 'run_git_tree_checks'):
+        raise ValueError('裁判补验决策须指定已批准检查、候选树和适用的业务基线。')
     return value
 
 
@@ -133,6 +139,11 @@ def prompt(context):
         'scope, coverage and executable gates. Never delete remaining planned behavior to manufacture completion. '
         'Use wait only for a concrete external prerequisite after independent authorized work is exhausted. '
         'Refer to the registered prerequisite or executor receipt that will wake the task. '
+        'When git_tree_check_options are supplied and the missing evidence can be produced locally, '
+        'choose run_git_tree_checks before wait or replan. Select check_id and git_tree from these options, '
+        'use an empty base for tests and select a listed business base for a diff check. '
+        'Do not request a check already run on that tree. Watcher runs the checks and Reviewer resumes '
+        'the same assignment. Use git_tree_checks=[] for all other actions. '
         'If a previously applied action is listed, choose a distinct action and explain what will change. '
         'For field_archive incidents, choose archive_checks only when the indicated observation can be answered '
         'by archiving the listed passing Watcher checks and their candidate metadata. The archive can document '

@@ -199,6 +199,7 @@ class AgentPrompts:
                           if record.role=='worker' and record.index==index),None)
         receipt = candidate.watcher_result.get('candidate_checks') if candidate else None
         task = self.function_tasks.current
+        git_tree_options = self._git_tree_check_options(candidate)
         browser = browser_guidance(json.dumps(task, ensure_ascii=False)) if receipt and task else ''
         focused = bool(task and task.get('review_test') and task['delivery_scope'] == 'function')
         audit_scope = None
@@ -236,6 +237,12 @@ class AgentPrompts:
                    'A resolved audit issue in this module may be cited to rerun its approved test on the current candidate. '
                    'After the new receipt arrives, assess its result and continue. Use supplemental_checks=[] otherwise.']
                   if task and self._verification_only() else []),
+                *(['需要在指定 Git 候选上补齐正式回执时，使用 git_tree_checks。每项填写 check_id、git_tree 和 base。'
+                   '本地测试的 base 填空字符串，差异检查从 bases 选择业务基线。'
+                   '使用 task_status=changes_required、next_task=null，并说明补验针对的原验收条件。'
+                   'Watcher 将按批准的参数执行，完成后仍由你独立复核原派单。已有同树回执时直接核对对应日志。'
+                   '没有补验请求时 git_tree_checks 填空数组。',
+                   json.dumps(git_tree_options, ensure_ascii=False)] if git_tree_options else []),
                 *([browser] if browser else []),
                 *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
                    function_tasks.verdict_contract('reviewer', self.function_tasks.current, module_ids=self.modules.items),

@@ -284,9 +284,11 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
         additions={'task_id':{'type':'string'},'task_status':{'type':'string',
                    'enum':['done','incomplete','accepted','changes_required']},'next_task':next_schema}
         if gate:
+            from auto_moniter.check_git_tree import REQUEST_SCHEMA as GIT_TREE_REQUEST_SCHEMA
             from auto_moniter.field_handoff import REQUEST_SCHEMA
             from auto_moniter.verdict import SUPPLEMENTAL_CHECKS_SCHEMA
             additions['supplemental_checks'] = copy.deepcopy(SUPPLEMENTAL_CHECKS_SCHEMA)
+            additions['git_tree_checks'] = copy.deepcopy(GIT_TREE_REQUEST_SCHEMA)
             additions['field_handoffs'] = copy.deepcopy(REQUEST_SCHEMA)
     result['properties'].update(additions)
     result['required'].extend(additions)

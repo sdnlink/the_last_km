@@ -625,6 +625,8 @@ class FunctionDispatch:
                        and row.verdict.task_id == task['id']), None)
         if not worker or worker.tree != workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir):
             return None, None
+        if worker.watcher_result.get('referee_route', {}).get('action') == 'run_git_tree_checks':
+            return None, None
         review = next((row for row in reversed(records) if row.role == 'reviewer' and row.index == worker.index), None)
         if not review or review.watcher_result.get('status') != 'blocked' or not review.verdict.blockers:
             return None, None
@@ -670,7 +672,36 @@ class FunctionDispatch:
             return True
         self._event('supplemental_checks_rejected', task_id=worker.verdict.task_id,
                     round=worker.index, reason=reason)
-        return self._consult_referee('planning', reason, records, candidate=worker) == 'replan'
+        kind = 'verification_evidence' if review.verdict.git_tree_checks else 'planning'
+        return self._consult_referee(kind, reason, records, candidate=worker) in {
+            'replan', 'retry_reviewer', 'run_git_tree_checks'}
+
+    def _route_verification_checks(self, worker, review_record, records):
+        """Resolve local work before opening a handoff for external evidence."""
+        review = review_record.verdict
+        if self._continue_verification_planning(worker, review_record, records):
+            return True, ''
+        if review.supplemental_checks or review.git_tree_checks:
+            try:
+                self._queue_supplemental_checks(worker, review)
+            except ValueError as exc:
+                reason = str(exc)
+                review.blockers.append(reason)
+                if self._continue_verification_planning(worker, review_record, records, reason=reason):
+                    return True, ''
+                return False, 'Git 候选补验请求未通过校验。' + reason if review.git_tree_checks else ''
+            review_record.watcher_result.update(status='blocked', reasons=['已安排 Watcher 补验。'])
+            self._write_state(records, 'running', 0, '', worker.tree)
+            return True, ''
+        if self._separate_verification_milestone(records):
+            return True, ''
+        if (not review.field_handoffs and self.config.referee and review.blockers
+                and self._git_tree_check_options(worker)):
+            review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
+            self._write_state(records, 'running', 0, '', worker.tree)
+            action = self._consult_referee('verification_evidence', '；'.join(review.blockers), records, candidate=worker)
+            return action in {'run_git_tree_checks', 'retry_reviewer', 'replan'}, ''
+        return False, ''
 
     def _advance_local_assignment(self, records, *, missing_inputs=False, field_waiting=False):
         if (self.requirements_review.get('limited_dispatch') or not self._complete_function_plan_ready()
@@ -874,7 +905,7 @@ class FunctionDispatch:
             (verdict.task_id != task['id'], 'task_id must equal ' + task['id']),
             (verdict.task_status not in ('done', 'incomplete'), 'task_status must be done or incomplete'),
             (verdict.next_task is not None, 'next_task must be null; only the reviewer assigns the next task'),
-            (verdict.supplemental_checks, 'Only the reviewer may request supplemental checks'),
+            (verdict.supplemental_checks or verdict.git_tree_checks, 'Only the reviewer may request supplemental checks'),
             (verdict.modules, 'modules must be []; the worker cannot redefine modules'),
             (set(verdict.module_ids) - set(delivery_modules), 'module_ids may contain only ' + ', '.join(delivery_modules)),
             (verdict.status == 'done' and (expected == 'function' or verdict.scope != expected
@@ -1022,20 +1053,23 @@ class FunctionDispatch:
         task = self.function_tasks.current
         if not task or review.task_id != task['id'] or review.task_status not in ('accepted', 'changes_required'):
             return ['Reviewer must conclude on the dispatched function ID']
+        local_checks = review.supplemental_checks or review.git_tree_checks
+        if review.supplemental_checks and review.git_tree_checks:
+            return ['每份补验结论只能选择按测试路径或按 Git 候选申请。']
         if review.field_handoffs and (task.get('kind') != 'verification'
                 or review.task_status != 'changes_required' or not review.blockers
-                or review.next_task or review.supplemental_checks):
+                or review.next_task or local_checks):
             return ['现场交接仅用于等待外部前置条件的只读派单。']
-        if review.supplemental_checks and (not self._verification_only()
+        if local_checks and (not self._verification_only()
                 or review.task_status != 'changes_required' or review.next_task is not None):
             return ['Supplemental checks require a read-only verification request without a replacement assignment.']
         if review.task_status == 'changes_required':
             verification = task.get('kind') == 'verification'
             repair = (verification and review.next_task is not None and review.next_task.get('kind') != 'verification')
             if (self._review_approved(review) or (review.next_task is not None and not repair)
-                    or not (review.gaps or review.blockers or review.supplemental_checks)):
+                    or not (review.gaps or review.blockers or local_checks)):
                 return ['Rejected function requires focused gaps and cannot dispatch another task']
-            if verification and not repair and not (review.blockers or review.supplemental_checks):
+            if verification and not repair and not (review.blockers or local_checks):
                 return ['Read-only verification cannot implement the reported fixes. Provide a bounded implementation '
                         'next_task, or identify the external prerequisite in blockers if no repair can run.']
             if repair:

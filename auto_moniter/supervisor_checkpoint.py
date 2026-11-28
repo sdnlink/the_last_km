@@ -94,6 +94,8 @@ def _verdict_from_state(value: object) -> Verdict | None:
         issue_resolutions=value.get("issue_resolutions") or [],
         task_id=value.get("task_id", ""), task_status=value.get("task_status", ""), next_task=value.get("next_task"),
         supplemental_checks=value.get('supplemental_checks') or [],
+        git_tree_checks=value.get('git_tree_checks') or [],
+        field_handoffs=value.get('field_handoffs') or [],
     )
 
 
@@ -339,12 +341,12 @@ class RunCheckpoint:
         decision = saved_referee['decision']
         if decision is not None:
             if (not isinstance(decision, dict)
-                    or set(decision) - {'decision_key'} != set(referee.SCHEMA['required']) | {'id','cycle','incident','task_id'}
+                    or set(decision) - {'decision_key', 'git_tree_checks'} != referee.REQUIRED_FIELDS | {'id','cycle','incident','task_id'}
                     or ('decision_key' in decision and not re.fullmatch(r'[a-f0-9]{64}', str(decision['decision_key'])))
                     or type(decision['id']) is not int or decision['id'] < 1
                     or type(decision['cycle']) is not int or decision['cycle'] < 1):
                 raise ValueError('Invalid saved referee decision')
-            referee.parse(json.dumps({key: decision[key] for key in referee.SCHEMA['required']}))
+            referee.parse(json.dumps({key: decision[key] for key in referee.SCHEMA['required'] if key in decision}))
         if saved_referee['replan'] and not decision:
             raise ValueError('Referee replanning lacks a saved decision')
         self._referee_decision = decision

@@ -1117,7 +1117,7 @@ class Supervisor(
                 if not stopped or not archived:
                     raise RuntimeError("Could not close Paseo reviewer; stop before starting another worker round.")
                 self._active_reviewer_id = ""
-            if record.watcher_result.get('referee_route', {}).get('action') == 'retry_reviewer':
+            if record.watcher_result.get('referee_route', {}).get('action') in {'retry_reviewer', 'run_git_tree_checks'}:
                 record.watcher_result.pop('referee_route', None)
             review = self._verdict_from_turn(review_turn, role="reviewer")
             reported_review_status = review.status
@@ -1268,23 +1268,15 @@ class Supervisor(
             if self.config.function_dispatch:
                 if self._verification_only() and review.task_status == 'changes_required':
                     if review.next_task is None:
-                        if self._continue_verification_planning(record, review_record, records):
+                        routed, failure = self._route_verification_checks(record, review_record, records)
+                        if routed:
                             continue
-                        if review.supplemental_checks:
-                            try:
-                                self._queue_supplemental_checks(record, review)
-                            except ValueError as exc:
-                                review.blockers.append(str(exc))
-                                if self._continue_verification_planning(record, review_record, records, reason=str(exc)):
-                                    continue
-                                if self._stop:
-                                    break
-                            else:
-                                review_record.watcher_result.update(status='blocked', reasons=['Supplemental checks queued'])
-                                self._write_state(records, 'running', 0, '', review_tree)
-                                continue
-                        elif self._separate_verification_milestone(records):
-                            continue
+                        if self._stop:
+                            break
+                        if failure:
+                            return self._finish('action_required', failure, records, review)
+                        if check_failure and not review.field_handoffs and self._git_tree_checks_failed(record):
+                            return self._finish_function_acceptance(review_record, records, check_failure)
                         review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
                         self._event('verification_waiting', task_id=self.function_tasks.current['id'], round=round_index)
                         self._write_state(records, 'running', stall, previous_gap_key, review_tree)

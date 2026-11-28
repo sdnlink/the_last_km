@@ -6,6 +6,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+import subprocess
 import time
 
 from auto_moniter.providers import PreparedCommand
@@ -14,7 +15,7 @@ from auto_moniter.verdict import Verdict, parse_verdict
 from auto_moniter.runlog import clipped
 from auto_moniter.storage import write_json
 from auto_moniter.redaction import redact, safe
-from auto_moniter import candidate_checks, function_tasks
+from auto_moniter import candidate_checks, check_git_tree, function_tasks
 from auto_moniter.live import LiveOutput
 from auto_moniter.git_history import GitHistoryError
 from auto_moniter.business_recovery import BusinessHeadChanged
@@ -171,15 +172,14 @@ class AcceptanceChecks:
                     log=log.name, reason=reason)
         return reason
 
-    def _candidate_check_context(self, record):
+    def _candidate_check_context(self, record, *, fixed_only=False):
         task = self.function_tasks.current if self.config.function_dispatch else None
         final = task['delivery_scope'] == 'requirement' if task else record.verdict.scope == 'requirement'
         ids = [task['module_id']] if task else record.verdict.module_ids
-        supplemental = record.watcher_result.get('supplemental_checks', [])
         commands = (self._assignment_check_commands(task) if self._function_gate and task
                     else self._acceptance_commands(final, ids))
         publication = getattr(self.git_history, 'candidate', {})
-        return {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
+        context = {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
                 **({'publication_tree': publication['business_tree']} if publication.get('round') == record.index
                    and 'publication_paths' in publication else {}),
                 'requirement_cycle':len(self.requirement_cycles)+1,
@@ -187,8 +187,7 @@ class AcceptanceChecks:
                 **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
                    if self.config.task_type == 'deployment' else {}),
                 'module_ids':sorted(ids),
-                'commands':list(dict.fromkeys([*commands, *(item['command'] for item in supplemental)])),
-                **({'supplemental_checks': supplemental} if supplemental else {}),
+                'commands':list(dict.fromkeys(commands)),
                 'configured_checks':list(self.config.checks),
                 **({'check_source_aliases': self.config.check_source_aliases} if self.config.check_source_aliases else {}),
                 **({'external_deliveries': {
@@ -200,6 +199,16 @@ class AcceptanceChecks:
                 'worker_model':self.config.model, 'requirement':self.config.requirement,
                 'acceptance':self.config.acceptance, 'quality_policy':self.config.quality_policy,
                 'direction_ids':[message['id'] for message in self.directions.messages()]}
+        if not fixed_only:
+            supplemental = record.watcher_result.get('supplemental_checks', [])
+            if supplemental:
+                binding = candidate_checks.digest(context)
+                applicable = [item for item in supplemental
+                              if 'git_tree' not in item or item.get('binding') == binding]
+                if applicable:
+                    context['supplemental_checks'] = applicable
+                    context['commands'] = list(dict.fromkeys([*commands, *(item['command'] for item in applicable)]))
+        return context
 
     def _approved_supplemental_test(self, path, name, module_id):
         from auto_moniter.workspace import _file_token
@@ -219,16 +228,92 @@ class AcceptanceChecks:
                 return True
         return False
 
-    def _queue_supplemental_checks(self, record, review):
-        from auto_moniter.local_tests import command
+    def _supplemental_check_context(self, record):
         task = self.function_tasks.current
         context = self._candidate_check_context(record)
         receipt = record.watcher_result.get('candidate_checks')
-        if (self._pending_directions() or self._business_head_changed()
+        if (not self._verification_only() or record.verdict.task_id != task['id']
+                or self._unplanned_directions() or self._pending_directions() or self._business_head_changed()
                 or workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != record.tree
                 or not candidate_checks.valid(receipt, self.run_dir, context)
                 or not receipt['passed']):
             raise ValueError('补跑前需要与当前候选一致的有效检查记录，且现有检查须先通过。')
+        return context
+
+    def _git_tree_check_options(self, record):
+        task = self.function_tasks.current
+        receipt = record.watcher_result.get('candidate_checks', {}) if record else {}
+        if (not self._verification_only() or not receipt.get('passed')
+                or record.verdict.task_id != task['id'] or receipt['context'].get('task') != task):
+            return {}
+        context = receipt['context']
+        commands = self._assignment_check_commands(task)
+        trees = {context['publication_tree']} if context.get('publication_tree') else set()
+        checks = {}
+        for key, command in self._function_check_catalog(task).items():
+            if command not in commands:
+                continue
+            args = check_git_tree.registered_runner(self.config.cwd, command)
+            if args is not None:
+                trees.update(args.git_tree)
+                checks[key] = {'test': args.path, 'already_bound': args.git_tree}
+            elif command == 'git diff --check':
+                checks[key] = {'requires_base': True}
+        bases = sorted({value['commit'] for value in (
+            getattr(self.git_history, 'business_head', {}),
+            getattr(self.git_history, 'last_business_commit', {}),
+        ) if value.get('commit')})
+        if not bases:
+            checks = {key: item for key, item in checks.items() if not item.get('requires_base')}
+        return {'git_trees': sorted(trees), 'bases': bases, 'checks': checks} if trees and checks else {}
+
+    def _git_tree_supplements(self, record, requests):
+        context = self._supplemental_check_context(record)
+        options = self._git_tree_check_options(record)
+        if not options or not requests or not check_git_tree.requests_valid(requests):
+            raise ValueError('补验须引用当前派单已批准的检查和完整 Git 树标识。')
+        catalog = self._function_check_catalog(self.function_tasks.current)
+        binding = candidate_checks.digest(self._candidate_check_context(record, fixed_only=True))
+        commands = set(context['commands'])
+        additions = []
+        for item in requests:
+            key, tree, base = item['check_id'], item['git_tree'], item['base']
+            if (key not in options['checks'] or tree not in options['git_trees']
+                    or base and base not in options['bases']):
+                raise ValueError('补验引用了当前派单未批准的检查、候选树或业务基线。')
+            try:
+                executable = check_git_tree.supplemental_command(self.config.cwd, catalog[key], item, commands)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise ValueError(f'无法核对检查 {key} 在候选树 {tree} 上的测试输入。') from exc
+            if executable is None:
+                raise ValueError(f'检查 {key} 已在候选树 {tree} 上登记，请复核对应回执。')
+            additions.append({**item, 'command': executable, 'binding': binding})
+            commands.add(executable)
+        self._validate_supplemental_limit(record, additions)
+        return additions
+
+    @staticmethod
+    def _validate_supplemental_limit(record, additions):
+        saved = record.watcher_result.get('supplemental_checks', [])
+        if not additions or len(saved) + len(additions) > 3:
+            raise ValueError('补跑没有新增检查，或已达到本轮的补跑上限。请核对现有结果。')
+
+    def _save_supplemental_checks(self, record, additions):
+        self._validate_supplemental_limit(record, additions)
+        saved = record.watcher_result.get('supplemental_checks', [])
+        record.watcher_result['supplemental_checks'] = [*saved, *additions]
+        self._event('supplemental_checks_queued', round=record.index, task_id=record.verdict.task_id,
+                    paths=[item['path'] for item in additions if 'path' in item],
+                    check_ids='、'.join(item['check_id'] for item in additions if 'git_tree' in item))
+
+    def _queue_supplemental_checks(self, record, review):
+        from auto_moniter.local_tests import command
+
+        if review.git_tree_checks:
+            self._save_supplemental_checks(record, self._git_tree_supplements(record, review.git_tree_checks))
+            return
+        context = self._supplemental_check_context(record)
+        task = self.function_tasks.current
         related = {item['id'] for item in self.audit.items if task['module_id'] in item['module_ids']}
         related.update(item['id'] for item in self.audit.pending({task['module_id']}))
         additions = []
@@ -247,12 +332,7 @@ class AcceptanceChecks:
             if executable not in commands:
                 additions.append({**item, 'command': executable})
                 commands.add(executable)
-        saved = record.watcher_result.get('supplemental_checks', [])
-        if not additions or len(saved) + len(additions) > 3:
-            raise ValueError('补跑没有新增检查，或已达到本轮的补跑上限。请核对现有结果。')
-        record.watcher_result['supplemental_checks'] = [*saved, *additions]
-        self._event('supplemental_checks_queued', round=record.index, task_id=task['id'],
-                    paths=[item['path'] for item in additions])
+        self._save_supplemental_checks(record, additions)
 
     def _repair_preflight(self, record, reviewer, last_review):
         """Reject an incomplete repair before repeating costly delivery checks.
@@ -404,6 +484,8 @@ class AcceptanceChecks:
         """Execute checks before review; a successful receipt survives a restart."""
         import copy
         context = copy.deepcopy(self._candidate_check_context(record))
+        if record.watcher_result.get('supplemental_checks'):
+            record.watcher_result['supplemental_checks'] = context.get('supplemental_checks', [])
         previous = record.watcher_result.get('candidate_checks')
         if candidate_checks.valid(previous, self.run_dir, context) and previous['passed'] and previous['complete']:
             self._passed_function_checks = dict(previous['passed_commands'])
@@ -581,6 +663,14 @@ class AcceptanceChecks:
             return receipt.get('failures') or ['Pre-review checks did not pass'], receipt.get('scope_gaps', [])
         self._function_target_hashes = dict(receipt.get('target_hashes', {}))
         return [], []
+
+    @staticmethod
+    def _git_tree_checks_failed(record):
+        receipt = record.watcher_result.get('candidate_checks', {})
+        commands = {item['command'] for item in receipt.get('context', {}).get('supplemental_checks', [])
+                    if 'git_tree' in item}
+        return any(item['command'] in commands and item['status'] != 'passed'
+                   for item in receipt.get('checks', []))
 
     def _save_candidate_approval(self, worker, reviewer):
         receipt = worker.watcher_result.get('candidate_checks')
@@ -988,7 +1078,7 @@ class AcceptanceChecks:
             return worker
         if worker.failure or worker.interruption:
             return None
-        if (route.get('action') == 'retry_reviewer' and route.get('tree') == worker.tree
+        if (route.get('action') in {'retry_reviewer', 'run_git_tree_checks'} and route.get('tree') == worker.tree
                 and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == worker.tree
                 and (not self.config.function_dispatch or self.function_tasks.current
                      and self.function_tasks.current['id'] == worker.verdict.task_id)):
@@ -1066,20 +1156,23 @@ class AcceptanceChecks:
                 or isinstance(self.git_history, ApprovedHistory)
                 and self.git_history.candidate.get('round') != worker.index):
             raise ValueError('当前派单、验收配置或保存的发布候选与原回执不一致。')
+        self.requirements_review = self._approved_brief_for_candidate_review()
+        self._deferred_replan = self._replan_binding(task, directions)
+        self._event('saved_candidate_review_requested', round=worker.index, task_id=task['id'], tree=worker.tree)
+        return worker
+
+    def _approved_brief_for_candidate_review(self):
         brief = self.requirements_review
         if brief.get('status') != 'ready':
             saved = self.run_dir / 'reviewed-requirement.json'
             brief = requirement_context.read(saved) if saved.is_file() and not saved.is_symlink() else {}
         if (brief.get('status') != 'ready' or brief.get('cycle') != len(self.requirement_cycles) + 1
                 or brief.get('original_sha256') != requirements_review.requirement_hash(self.config.requirement)):
-            brief = self._recover_approved_function_brief(task)
+            brief = self._recover_approved_function_brief(self.function_tasks.current)
         if not brief:
             raise ValueError('缺少与当前派单对应的已批准需求。')
         requirements_review.parse(json.dumps({key: brief.get(key) for key in requirements_review.SCHEMA['required']}))
-        self.requirements_review = brief
-        self._deferred_replan = self._replan_binding(task, directions)
-        self._event('saved_candidate_review_requested', round=worker.index, task_id=task['id'], tree=worker.tree)
-        return worker
+        return brief
 
     def _recover_function_submission(self, record):
         """Recover a legacy report downgrade once; the reviewer still decides acceptance."""

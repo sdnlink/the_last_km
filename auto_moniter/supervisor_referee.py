@@ -38,6 +38,8 @@ class RefereeRecovery:
             context['field_binding'] = archive['binding']
         elif candidate is not None:
             context['candidate'] = self._recovery_candidate(candidate)
+            if kind == 'verification_evidence':
+                context['verification_receipt'] = context['candidate']['checks']
         return context
 
     def _resume_referee_decision(self, records):
@@ -130,7 +132,7 @@ class RefereeRecovery:
             self._stop_reason = 'Referee recovery unavailable: ' + str(exc)
             return ''
         if ticket is None:
-            if archive:
+            if archive or kind == 'verification_evidence':
                 return ''
             self._event('referee_recovery_unchanged', incident=kind, reason=reason)
             self._stop = True
@@ -147,7 +149,12 @@ class RefereeRecovery:
                     journal.update(ticket['id'], 'failed', error=redact(str(exc))[:4000])
                     self._event('referee_rejected', decision_id=ticket['id'], reason=str(exc))
                     return ''
-            return self._apply_recovery_decision(journal, ticket, context, records, candidate)
+            try:
+                return self._apply_recovery_decision(journal, ticket, context, records, candidate)
+            except ValueError as exc:
+                journal.update(ticket['id'], 'failed', error=redact(str(exc))[:4000])
+                self._event('referee_rejected', decision_id=ticket['id'], reason=str(exc))
+                return ''
         self._check_budget(new_call=True)
         diagnosis = {**context, 'incident': reason, 'original_requirement': self.config.requirement,
             'acceptance': self.config.acceptance, 'requirements_review': self.requirements_review,
@@ -159,6 +166,10 @@ class RefereeRecovery:
         if archive:
             diagnosis['archive_request'] = archive
             diagnosis['available_checks'] = candidate_checks.review_summary(candidate.watcher_result['candidate_checks'])
+        elif kind in {'planning', 'verification_evidence'}:
+            if options := self._git_tree_check_options(candidate):
+                diagnosis['git_tree_check_options'] = options
+                diagnosis['available_checks'] = candidate_checks.review_summary(candidate.watcher_result['candidate_checks'])
         schema = self.schema_path
         path = self.run_dir / 'referee.schema.json'
         write_json(path, referee.SCHEMA)
@@ -199,8 +210,23 @@ class RefereeRecovery:
                     raise ValueError('The selected action is unavailable for this incident')
                 if kind in {'reviewer_failure', 'browser_evidence'} and action == 'retry_worker':
                     raise ValueError('Review transport failure cannot authorize repeating implementation')
-                if kind == 'planning' and action not in {'replan', 'wait'}:
+                if kind == 'planning' and action not in {'replan', 'wait', 'run_git_tree_checks'}:
                     raise ValueError('Failed planning requires replanning or a concrete external prerequisite')
+                if kind == 'verification_evidence' and action == 'retry_worker':
+                    raise ValueError('当前派单为只读补验，应安排补验、复核或调整后续计划。')
+                if action == 'run_git_tree_checks':
+                    try:
+                        if 'git_tree_check_options' not in diagnosis:
+                            raise ValueError('当前故障没有可补验的已提交候选。')
+                        self._git_tree_supplements(candidate, decision['git_tree_checks'])
+                        if kind == 'planning':
+                            self._approved_brief_for_candidate_review()
+                    except ValueError as exc:
+                        if attempt == 0:
+                            diagnosis['decision_correction'] = str(exc)
+                            self._event('referee_decision_repair', decision_id=ticket['id'], action=action)
+                            continue
+                        raise
                 if action == 'retry_reviewer' and (candidate is None or candidate.failure or candidate.interruption
                                                  or candidate.exit_code or candidate.timed_out):
                     raise ValueError('Reviewer retry requires an intact submitted worker candidate')
@@ -253,19 +279,29 @@ class RefereeRecovery:
         saved = self._referee_decision or {}
         if (saved.get('id'), saved.get('incident'), saved.get('decision_key')) == (ticket['id'], kind, ticket['key']):
             journal.update(ticket['id'], 'applied')
-            if action == 'wait':
+            if action == 'wait' and kind != 'verification_evidence':
                 self._stop = True
                 self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
                 return ''
             return action
-        if action == 'wait':
+        if action == 'run_git_tree_checks':
+            if candidate is None:
+                raise ValueError('补验所引用的原候选已失效。')
+            additions = self._git_tree_supplements(candidate, decision['git_tree_checks'])
+            if kind == 'planning':
+                self.requirements_review = self._approved_brief_for_candidate_review()
+            self._save_supplemental_checks(candidate, additions)
+            candidate.watcher_result['referee_route'] = {'action': action, 'id': ticket['id'], 'tree': tree}
+            self.reviewer_session_id = ''
+            self._recovery_note = '裁判已安排 Watcher 补验，完成后由 Reviewer 复核原派单。'
+        elif action == 'wait' and kind != 'verification_evidence':
             self._stop = True
             self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
             if context['task'] and self._function_gate:
                 missing = self._missing_dispatch_inputs(context['task'])
                 if missing:
                     self._stop_reason = self._wait_for_dispatch_inputs(context['task'], missing)
-        else:
+        elif action != 'wait':
             errors = self._close_delivered_sessions()
             if errors:
                 raise RecoveryError('Referee recovery cannot close previous agents: ' + '; '.join(errors))
@@ -281,6 +317,8 @@ class RefereeRecovery:
             self._recovery_note = 'Referee scheduling decision: ' + decision['instructions']
         self._referee_decision = {**decision, 'id': ticket['id'], 'cycle': context['cycle'],
                                   'incident': kind, 'decision_key': ticket['key'], 'task_id': (context['task'] or {}).get('id', '')}
+        if action == 'run_git_tree_checks' and self._referee_replan:
+            self._deferred_replan = self._replan_binding(context['task'], self.directions.messages())
         self._write_state(records, 'running', 0, '', tree)
         journal.update(ticket['id'], 'applied')
         self._event('referee_decision', decision_id=ticket['id'], action=action,

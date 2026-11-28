@@ -230,12 +230,18 @@ class RequirementPlanning:
                 continue
             if not self._project_review_changed or self._stop:
                 if (not result and not self._stop
-                        and self.requirements_review.get('failure_kind') != 'model_transport'
-                        and self._consult_referee(
-                            'planning', self.requirements_review.get('summary', 'Requirement planning did not finish'), records)):
-                    next_function = bool(self.requirements_review.get('acceptance_criteria') or self.function_tasks.current
-                                         or self._referee_replan)
-                    continue
+                        and self.requirements_review.get('failure_kind') != 'model_transport'):
+                    latest = next((row for row in reversed(records) if row.role == 'worker'), None)
+                    candidate = latest if not self._unplanned_directions() and self._git_tree_check_options(latest) else None
+                    action = self._consult_referee(
+                        'planning', self.requirements_review.get('summary', 'Requirement planning did not finish'),
+                        records, candidate=candidate)
+                    if action == 'run_git_tree_checks':
+                        return True
+                    if action:
+                        next_function = bool(self.requirements_review.get('acceptance_criteria') or self.function_tasks.current
+                                             or self._referee_replan)
+                        continue
                 return result
             self._event('project_review_retry', reason='Concurrent changes invalidated the review; preserving work and reviewing current inputs')
             self._check_budget()

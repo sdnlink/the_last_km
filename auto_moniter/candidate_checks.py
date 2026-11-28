@@ -119,6 +119,11 @@ def review_summary(receipt):
         {key: check[key] for key in ('status', 'exit_code', 'log', 'reused_from') if key in check}
         for check in receipt['checks']
     ]
+    bindings = {item['command']: {key: item[key] for key in ('check_id', 'git_tree', 'base')}
+                for item in context.get('supplemental_checks', []) if 'git_tree' in item}
+    for check, result in zip(receipt['checks'], summary['checks']):
+        if check.get('command') in bindings:
+            result.update(bindings[check['command']])
     return summary
 
 

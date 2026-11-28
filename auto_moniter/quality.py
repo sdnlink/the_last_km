@@ -18,7 +18,7 @@ DEFAULTS = {'protect_tests': True, 'verified_progress': True, 'no_progress_limit
 def policy(value):
     if not isinstance(value, dict) or set(value) - (DEFAULTS.keys() | {
             'integration_scopes', 'check_inputs', 'assignment_inputs', 'operator_preflights',
-            'recovery_reserve_calls', 'referee_transport_fallback'}):
+            'recovery_reserve_calls', 'referee_transport_fallback', 'reusable_check_ids'}):
         raise ValueError('Unknown or invalid quality policy field')
     result = {**DEFAULTS, **value}
     if len(json.dumps(result, ensure_ascii=False).encode()) > 128 * 1024:
@@ -34,6 +34,12 @@ def policy(value):
         raise ValueError('裁判预留调用次数须在 0 至 100 之间。')
     if type(result.get('referee_transport_fallback', False)) is not bool:
         raise ValueError('裁判备用执行器设置须为布尔值。')
+    reusable = result.get('reusable_check_ids', [])
+    if (not isinstance(reusable, list) or len(reusable) > 30
+            or any(not isinstance(key, str) or not re.fullmatch(r'(?:check|regression|auto):[1-9][0-9]{0,3}', key)
+                   for key in reusable)
+            or len(set(reusable)) != len(reusable)):
+        raise ValueError('可复用检查须填写互不重复的已批准检查编号。')
     cost = result['max_cost_usd']
     if type(cost) not in (int, float) or not 0 <= cost <= 10**9:
         raise ValueError('max_cost_usd must be finite and nonnegative')
@@ -122,7 +128,7 @@ def relative_path(value):
 
 
 def validate_check_inputs(config, checks):
-    for key in config.get('check_inputs', {}):
+    for key in {*config.get('check_inputs', {}), *(key for key in config.get('reusable_check_ids', []) if key.startswith('check:'))}:
         if int(key.split(':')[1]) > len(checks):
             raise ValueError(f'检查输入绑定引用了不存在的固定检查 {key}。')
 

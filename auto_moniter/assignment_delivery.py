@@ -11,7 +11,7 @@ from auto_moniter.workspace import workspace_fingerprint
 
 
 CONTRACT_FIELDS = ('module_id', 'kind', 'delivery_scope', 'objective', 'inputs', 'outputs',
-                   'boundaries', 'verification', 'edit_files', 'test_files', 'review_test')
+                   'boundaries', 'verification', 'edit_files', 'test_files', 'review_test', 'publication_check_ids')
 
 
 def same_contract(approved, proposed):

@@ -106,11 +106,15 @@ def create(run, context, snapshot, passed):
     return receipt
 
 
-def review_summary(receipt):
+def review_summary(receipt, manifest=None):
     """Present check results once, with log references for the full evidence."""
     context = receipt['context']
     summary = {key: receipt[key] for key in ('passed', 'complete', 'source_changed', 'digest')}
     summary.update(round=context['round'], tree=context['tree'], expected_checks=len(context['commands']))
+    if context.get('task'):
+        summary['task_id'] = context['task']['id']
+    if context.get('publication_tree'):
+        summary['publication_tree'] = context['publication_tree']
     if receipt.get('reused_from'):
         summary['reused_from'] = receipt['reused_from']
     if receipt.get('scope_gaps'):
@@ -121,9 +125,18 @@ def review_summary(receipt):
     ]
     bindings = {item['command']: {key: item[key] for key in ('check_id', 'git_tree', 'base')}
                 for item in context.get('supplemental_checks', []) if 'git_tree' in item}
-    for check, result in zip(receipt['checks'], summary['checks']):
-        if check.get('command') in bindings:
-            result.update(bindings[check['command']])
+    executed = set()
+    for position, (check, result) in enumerate(zip(receipt['checks'], summary['checks'])):
+        command = check['command']
+        if position < len(context['commands']) and redact(context['commands'][position]) == command:
+            command = context['commands'][position]
+        executed.add(command)
+        if manifest is not None:
+            result.update(manifest.get(command, {}))
+        if command in bindings:
+            result.update(bindings[command])
+    if manifest is not None:
+        summary['not_run'] = [manifest[command] for command in context['commands'] if command not in executed]
     return summary
 
 

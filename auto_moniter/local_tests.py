@@ -61,6 +61,7 @@ def reuse_key(root, check):
     """Identify a monitor-generated Node test and the local runtime it will use."""
     if '--runner node ' not in check or os.environ.get('NODE_PATH') or os.environ.get('NODE_OPTIONS'):
         return None
+
     try:
         args = shlex.split(check)
         if len(args) != 10 or args[2:9:2] != ['--project', '--path', '--runner', '--executable']:
@@ -77,5 +78,34 @@ def reuse_key(root, check):
             runtime.append((str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_ctime_ns))
         environment = hashlib.sha256(repr(sorted(os.environ.items())).encode()).digest()
         return runtime, environment
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def bound_reuse_key(root, check, inputs):
+    """Fingerprint an operator-approved, self-contained Git-tree check."""
+    from auto_moniter.check_git_tree import registered_runner
+    from auto_moniter.workspace import _file_token
+
+    args = registered_runner(root, check)
+    if not args or not args.git_tree or args.runner not in {'unittest', 'cargo', 'node'}:
+        return None
+    tools = [sys.executable, str(Path(__file__).with_name('local_test_runner.py')),
+             str(Path(__file__).with_name('check_git_tree.py')), '/bin/sh']
+    tools.extend(name for name in (args.executable, shutil.which('git'), shutil.which('cargo'), shutil.which('rustc')) if name)
+    try:
+        runtime = []
+        for name in tools:
+            resolved = Path(shutil.which(name) or name).resolve(strict=True)
+            stat = resolved.stat()
+            runtime.append((str(resolved), stat.st_dev, stat.st_ino, stat.st_size, stat.st_ctime_ns))
+        files = []
+        for name in inputs:
+            path = root / name
+            if path.resolve() != path or not path.is_file():
+                return None
+            files.append((name, _file_token(path)))
+        key = (check, runtime, files, sorted(os.environ.items()))
+        return hashlib.sha256(repr(key).encode()).hexdigest()
     except (OSError, RuntimeError, ValueError):
         return None

@@ -10,13 +10,26 @@ from auto_moniter.check_git_tree import REQUEST_SCHEMA, requests_valid
 TURN_LIMIT_S = 1800
 DECISION_TIMEOUT_S = 180
 ACTIONS = {'retry_worker', 'retry_reviewer', 'replan', 'wait', 'archive_checks', 'run_git_tree_checks'}
+WAIT_CONDITIONS = {'dispatch_inputs', 'check_environment', 'field_receipt', 'operator'}
 SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'action': {'type': 'string', 'enum': sorted(ACTIONS)},
     'summary': {'type': 'string'}, 'instructions': {'type': 'string'},
     'evidence': {'type': 'array', 'items': {'type': 'string'}},
-    'git_tree_checks': REQUEST_SCHEMA},
-    'required': ['action', 'summary', 'instructions', 'evidence', 'git_tree_checks']}
-REQUIRED_FIELDS = set(SCHEMA['required']) - {'git_tree_checks'}
+    'git_tree_checks': REQUEST_SCHEMA,
+    'wait_for': {'type': 'string', 'enum': ['', *sorted(WAIT_CONDITIONS)]}},
+    'required': ['action', 'summary', 'instructions', 'evidence', 'git_tree_checks', 'wait_for']}
+OPTIONAL_FIELDS = {'git_tree_checks', 'wait_for'}
+REQUIRED_FIELDS = set(SCHEMA['required']) - OPTIONAL_FIELDS
+HANDOFF_ROLES = {'retry_worker': 'worker', 'retry_reviewer': 'reviewer', 'run_git_tree_checks': 'reviewer'}
+
+
+def valid_handoff(value, action):
+    return (isinstance(value, dict)
+            and set(value) == {'role', 'round', 'tree', 'task_digest', 'revision', 'checks_digest'}
+            and action in HANDOFF_ROLES and value['role'] == HANDOFF_ROLES[action]
+            and type(value['round']) is int and value['round'] > 0
+            and all(isinstance(value[key], str) and len(value[key]) == 64
+                    for key in ('tree', 'task_digest', 'revision', 'checks_digest')))
 
 
 def fingerprint(context):
@@ -32,7 +45,7 @@ def parse(text):
     if len(text.encode('utf-8')) > 24 * 1024:
         raise ValueError('Referee decision exceeds 24 KiB')
     value = json.loads(text)
-    if (not isinstance(value, dict) or set(value) - {'git_tree_checks'} != REQUIRED_FIELDS
+    if (not isinstance(value, dict) or set(value) - OPTIONAL_FIELDS != REQUIRED_FIELDS
             or not isinstance(value['action'], str) or value['action'] not in ACTIONS):
         raise ValueError('Invalid referee decision action or fields')
     for key in ('summary', 'instructions'):
@@ -44,6 +57,10 @@ def parse(text):
     requests = value.get('git_tree_checks', [])
     if not requests_valid(requests) or bool(requests) != (value['action'] == 'run_git_tree_checks'):
         raise ValueError('裁判补验决策须指定已批准检查、候选树和适用的业务基线。')
+    wait = value.get('wait_for')
+    if 'wait_for' in value and (not isinstance(wait, str)
+                              or (wait not in WAIT_CONDITIONS if value['action'] == 'wait' else wait != '')):
+        raise ValueError('裁判等待须填写一种实际等待条件。')
     return value
 
 
@@ -139,6 +156,8 @@ def prompt(context):
         'scope, coverage and executable gates. Never delete remaining planned behavior to manufacture completion. '
         'Use wait only for a concrete external prerequisite after independent authorized work is exhausted. '
         'Refer to the registered prerequisite or executor receipt that will wake the task. '
+        'For wait, select wait_for from available_wait_conditions. Use operator only for a prerequisite '
+        'requiring operator action and explain exactly what must change. For other actions use wait_for="". '
         'When git_tree_check_options are supplied and the missing evidence can be produced locally, '
         'choose run_git_tree_checks before wait or replan. Select check_id and git_tree from these options, '
         'use an empty base for tests and select a listed business base for a diff check. '

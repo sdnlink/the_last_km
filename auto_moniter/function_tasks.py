@@ -89,11 +89,12 @@ def validate_identifiers(value):
 
 
 def validate(value, modules=None):
-    if not isinstance(value,dict) or set(value) - {'edit_files', 'review_test'} not in (
+    if not isinstance(value,dict) or set(value) - {'edit_files', 'review_test', 'publication_check_ids'} not in (
             FIELDS, FIELDS | GATE_FIELDS, INTEGRATION_TASK_FIELDS, VERIFICATION_TASK_FIELDS):
         raise ValueError('Function assignment requires id/module_id/file/symbol/objective/inputs/outputs/boundaries/verification/depends_on/delivery_scope')
     value = copy.deepcopy(value)
     review_test = value.pop('review_test', None)
+    publication_checks = value.pop('publication_check_ids', [])
     validate_identifiers(value)
     for key in ['objective','inputs','outputs']:
         if not isinstance(value[key],str) or not value[key].strip() or len(value[key])>2000 or '\0' in value[key]:
@@ -140,6 +141,12 @@ def validate(value, modules=None):
                     or any(not isinstance(x, str) or not x or len(x) > 512 for x in entries)
                     or len(set(entries)) != len(entries) or (not entries and key != 'test_files')):
                 raise ValueError('Invalid function assignment ' + key)
+    if (not isinstance(publication_checks, list) or len(publication_checks) > 30
+            or any(not isinstance(key, str) or key not in value.get('check_ids', []) for key in publication_checks)
+            or len(set(publication_checks)) != len(publication_checks)):
+        raise ValueError('发布树检查须选用当前派单已批准的检查编号。')
+    if publication_checks:
+        value['publication_check_ids'] = publication_checks
     if review_test is not None:
         if (not isinstance(review_test, dict) or set(review_test) != {'path', 'source'}
                 or not isinstance(review_test['path'], str) or review_test['path'] not in value.get('test_files', [])
@@ -267,6 +274,11 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
             grouped['required'] = sorted(INTEGRATION_TASK_FIELDS | {'edit_files'})
             next_schema['anyOf'].append(grouped)
         for variant in next_schema['anyOf'][1:]:
+            variant['properties']['publication_check_ids'] = {
+                'type': 'array', 'maxItems': 30, 'items': {'type': 'string'},
+                'description': 'Selected check_ids that must run on the exact Git publication tree. '
+                               'Use [] for standard workspace checks.'}
+            variant['required'].append('publication_check_ids')
             test_schema = {'type': 'object', 'additionalProperties': False,
                            'properties': {'path': {'type': 'string'}, 'source': {'type': 'string'}},
                            'required': ['path', 'source']}
@@ -286,10 +298,11 @@ def schema(base, *, planning=False, gate=False, integration=False, full_plan=Fal
         if gate:
             from auto_moniter.check_git_tree import REQUEST_SCHEMA as GIT_TREE_REQUEST_SCHEMA
             from auto_moniter.field_handoff import REQUEST_SCHEMA
-            from auto_moniter.verdict import SUPPLEMENTAL_CHECKS_SCHEMA
+            from auto_moniter.verdict import REPAIR_STEPS_SCHEMA, SUPPLEMENTAL_CHECKS_SCHEMA
             additions['supplemental_checks'] = copy.deepcopy(SUPPLEMENTAL_CHECKS_SCHEMA)
             additions['git_tree_checks'] = copy.deepcopy(GIT_TREE_REQUEST_SCHEMA)
             additions['field_handoffs'] = copy.deepcopy(REQUEST_SCHEMA)
+            additions['repair_steps'] = copy.deepcopy(REPAIR_STEPS_SCHEMA)
     result['properties'].update(additions)
     result['required'].extend(additions)
     return result
@@ -302,7 +315,7 @@ def module_schema():
     return result
 
 
-def verdict_contract(role, task, *, report_only=False, module_ids=None):
+def verdict_contract(role, task, *, report_only=False, module_ids=None, full_plan=False):
     group = task.get('kind') == 'integration'
     scope = ('the dispatched atomic change, its named primary function and exact edit_files' if task.get('edit_files')
              else 'the dispatched integration and all of its listed functions' if group else 'the dispatched function')
@@ -337,13 +350,13 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
             'they do not alone invalidate a submitted completion or require another worker report. '
             'Watcher checks and independent review are automatic acceptance steps, not unfinished worker actions; '
             'describe that handoff in summary rather than next_actions. '
-            'For task_status=incomplete, gaps and next_actions describe only this assignment.')
+            'For task_status=incomplete, gaps and next_actions describe only this assignment. Use repair_steps=[].')
     return (
         IDENTIFIER_CONTRACT + manifest + f'Review {scope} and its caller/verification evidence. Cite every target file. Return matching task_id and '
         'task_status=accepted or changes_required. Base acceptance on the candidate and current evidence. '
         'Independently assess the worker concerns and test evidence. Nonempty worker gaps/next_actions, '
         'or waiting for automatic watcher checks or review, are not by themselves implementation defects. '
-        'If the assignment is correct, accept it in this response and give the next_task; do not send the worker '
+        'If the assignment is correct, accept it in this response; do not send the worker '
         'back to reformat its report or resubmit unchanged code. For actual defects or missing verification, '
         'return changes_required with the concrete behavior or evidence still needed. '
         'Close invalid historical report-only audit findings yourself using issue_resolutions and current file evidence; '
@@ -366,8 +379,9 @@ def verdict_contract(role, task, *, report_only=False, module_ids=None):
            'For changes_required, use status=continue and next_task=null. Give this assignment\'s actionable gaps and minimal repair. ') +
         'For failed behavior, cite the criterion, entry point, input, expected and observed results, and the failing '
         'test or log. Ask for the smallest behavior correction and verify it with the same case on the next submission. '
-        'For an accepted intermediate assignment: status=continue, gaps/next_actions/blockers=[], '
-        'and propose exactly one next_task that can be implemented and verified on its own. '
-        + completion +
-        'Propose one next_task after module delivery, null after requirement delivery. '
+        'For an accepted function assignment use status=continue and gaps/next_actions/blockers=[]. '
+        + ('For any accepted assignment use next_task=null. Watcher selects the successor from the approved plan. '
+           if full_plan else 'After accepting a function or module, propose one independently verifiable next_task. '
+           'After accepting the requirement, use next_task=null. ') +
+        completion +
         'Final requirement approval still checks coverage of every original requirement and integration.')

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from auto_moniter import dispatch_inputs, recovery_wait
+from auto_moniter import dispatch_inputs, field_executors, field_handoff, recovery_wait
 from auto_moniter.control import read_control
 from auto_moniter.directions import Directions
 from auto_moniter.redaction import redact
@@ -129,3 +129,48 @@ def recover(store, meta, run):
         return False
     launch(store, meta, run, wait, state, action)
     return True
+
+
+def collect_deferred_handoffs(store, meta, run):
+    from auto_moniter.workspace import workspace_fingerprint
+
+    directions = Directions(run)
+    with directions.lock():
+        state = directions.read('state.json', 32 * 1024 * 1024)
+        if (not state.get('function_plan') or read_control(run / 'control.json').get('action') in {'stop', 'pause'}):
+            return set()
+        tree = None
+        ready = set()
+        for filename, value in field_handoff.saved_handoffs(run):
+            if tree is None:
+                tree = workspace_fingerprint(Path(state['cwd']), ignore_dir=run)
+            checkpoint = field_handoff.deferred_state(run, state, value, tree=tree)
+            if not checkpoint:
+                continue
+            if not field_handoff.ready(value):
+                waiting = field_executors.bind(store, meta, run, value, filename=filename)
+                value = store._collect_field_results(meta, run, checkpoint, value, executor_waiting=waiting, filename=filename)
+                store._dispatch_handoff_tasks(meta, value, filename=filename)
+            if field_handoff.ready(value):
+                ready.add(value['binding']['task_id'])
+        return ready
+
+
+def ready_deferred_handoff(run, state):
+    from auto_moniter.workspace import workspace_fingerprint
+
+    current = (state.get('function_tasks') or {}).get('current') or {}
+    if (current.get('kind') != 'verification' or current.get('delivery_scope') == 'requirement'
+            or (state.get('requirements_review') or {}).get('limited_dispatch')):
+        return False
+    tree = workspace_fingerprint(Path(state['cwd']), ignore_dir=run)
+    return any(field_handoff.ready(value) and field_handoff.deferred_state(run, state, value, tree=tree)
+               for _, value in field_handoff.saved_handoffs(run))
+
+
+def wake_for_deferred_handoff(store, meta, run, state, view, value, ready):
+    if (ready and 'resume' in view['actions'] and not field_handoff.ready(value)
+            and not field_handoff.pending_fallback(value) and ready_deferred_handoff(run, state)):
+        store.action(meta['id'], 'resume', {'deferred_handoff': True})
+        return True
+    return False

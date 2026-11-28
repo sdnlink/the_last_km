@@ -41,6 +41,7 @@ class Publication:
                 condition = 'check_environment'
         elif status == 'action_required' and (
                 self.requirements_review.get('failure_kind') == 'model_transport'
+                or getattr(self, '_model_transport_wait', False)
                 or self._stop_reason.startswith('裁判模型服务暂不可用')
                 or summary.startswith('Continuous model connection failures exceeded')):
             condition = 'model_transport'

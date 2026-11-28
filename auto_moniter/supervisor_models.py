@@ -143,8 +143,9 @@ class RunReport:
                     "watcher_result": record.watcher_result,
                     "reported_status": record.reported_status or record.verdict.status,
                     **({"delivery": record.delivery} if record.delivery else {}),
-                    **({key: record.verdict.to_dict()[key] for key in ("task_id", "task_status", "next_task")}
-                       if record.verdict.task_id else {}),
+                    **{key: value for key, value in record.verdict.to_dict().items()
+                       if key in {'task_id', 'task_status', 'next_task', 'supplemental_checks',
+                                  'git_tree_checks', 'field_handoffs', 'repair_steps'}},
                 }
                 for record in self.records
             ],

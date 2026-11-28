@@ -24,6 +24,45 @@ class RefereeRecovery:
         return {'round': record.index, 'task_id': record.verdict.task_id or '', 'tree': record.tree,
                 'checks': record.watcher_result.get('candidate_checks', {}).get('digest', '')}
 
+    def _referee_handoff(self, role, index, tree):
+        decision = self._referee_decision or {}
+        binding = decision.get('handoff', {})
+        if (binding.get('role') == role and binding['round'] == index and binding['tree'] == tree
+                and binding['task_digest'] == candidate_checks.digest(self.function_tasks.current)
+                and binding['revision'] == self.directions.revision(self.config.requirement)['sha256']
+                and binding['checks_digest'] == candidate_checks.digest([self.config.checks, self.config.check_source_aliases])
+                and not self._business_head_changed()):
+            return {**binding, **{key: decision[key] for key in ('id', 'task_id', 'action', 'instructions', 'evidence')}}
+        return {}
+
+    def _referee_wait_conditions(self, context, candidate):
+        available = ['operator']
+        if context['task'] and self._function_gate and self._missing_dispatch_inputs(context['task']):
+            available.append('dispatch_inputs')
+        if candidate:
+            receipt = candidate.watcher_result.get('candidate_checks', {})
+            statuses = [row['status'] for row in receipt.get('checks', [])]
+            if statuses and statuses[-1] == 'environment_unavailable' and set(statuses) <= {'passed', 'environment_unavailable'}:
+                available.append('check_environment')
+            handoff = field_handoff.read(self.run_dir)
+            if not field_handoff.ready(handoff) and field_handoff.matches_checkpoint(
+                    handoff, task=context['task'], round_index=candidate.index, tree=candidate.tree,
+                    checks_digest=receipt.get('digest'), directions=self._dispatch_directions):
+                available.append('field_receipt')
+        return available
+
+    def _apply_referee_wait(self, decision, context):
+        self._stop = True
+        self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
+        condition = decision.get('wait_for')
+        if condition == 'check_environment':
+            self._stop_reason = 'Acceptance environment unavailable; ' + decision['instructions']
+        if condition in {None, 'dispatch_inputs'} and context['task'] and self._function_gate:
+            missing = self._missing_dispatch_inputs(context['task'])
+            if missing:
+                self._stop_reason = self._wait_for_dispatch_inputs(context['task'], missing)
+                self._referee_dispatch_wait = True
+
     def _recovery_context(self, kind, reason, archive=None, candidate=None):
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         revision = self.directions.revision(self.config.requirement)['sha256']
@@ -100,8 +139,10 @@ class RefereeRecovery:
         if fallback.get('role') != 'referee' or not self.config.referee:
             return '', evidence
         route = candidate.watcher_result.get('referee_route', {})
-        if route.get('action') == 'retry_reviewer' and route.get('fallback_key') == fallback.get('key'):
-            return self._referee_decision['instructions'], evidence
+        decision = self._referee_decision or {}
+        if (route.get('action') == 'retry_reviewer' and route.get('fallback_key') == fallback.get('key')
+                and decision.get('incident') == 'browser_evidence' and decision.get('id') == route.get('id')):
+            return '' if decision.get('handoff') else decision['instructions'], evidence
         action = self._consult_referee('browser_evidence', reason, records, candidate=candidate)
         if action == 'replan' or self._stop_reason.startswith('Referee waiting for prerequisite:'):
             field_handoff.finish_fallback(self.run_dir, fallback)
@@ -109,14 +150,14 @@ class RefereeRecovery:
             raise RefereeRedirect(reason)
         if self._stop and not self._stop_reason:
             self._stop_reason = reason
-        return self._referee_decision['instructions'] if action == 'retry_reviewer' else '', evidence
+        return '', evidence
 
     def _consult_referee(self, kind, reason, records, *, candidate=None, archive=None, saved_context=None):
         """Apply one bounded scheduling decision without granting acceptance."""
         if not self.config.referee or self.config.no_review or not self.config.reviewer or self._stop:
             return ''
         self._process_control()
-        if self._stop or classify(reason)[1] == 'stop':
+        if self._stop or (kind in {'worker_failure', 'reviewer_failure'} and classify(reason)[1] == 'stop'):
             return ''
         context = saved_context or self._recovery_context(kind, reason, archive, candidate)
         tree, revision = context['tree'], context['revision']
@@ -163,13 +204,14 @@ class RefereeRecovery:
             'recent_records': [record for record in RunReport('', 0, '', '', records[-8:]).to_dict()['records']],
             'prior_decisions': journal.read()['decisions'][-13:-1],
             'already_applied_actions': journal.actions_applied(ticket)}
+        diagnosis['available_wait_conditions'] = self._referee_wait_conditions(context, candidate)
         if archive:
             diagnosis['archive_request'] = archive
-            diagnosis['available_checks'] = candidate_checks.review_summary(candidate.watcher_result['candidate_checks'])
-        elif kind in {'planning', 'verification_evidence'}:
+        if kind in {'planning', 'verification_evidence'}:
             if options := self._git_tree_check_options(candidate):
                 diagnosis['git_tree_check_options'] = options
-                diagnosis['available_checks'] = candidate_checks.review_summary(candidate.watcher_result['candidate_checks'])
+        if candidate is not None and (receipt := candidate.watcher_result.get('candidate_checks')):
+            diagnosis['available_checks'] = self._candidate_receipt_summary(receipt)
         schema = self.schema_path
         path = self.run_dir / 'referee.schema.json'
         write_json(path, referee.SCHEMA)
@@ -205,6 +247,12 @@ class RefereeRecovery:
                     raise ValueError('Referee did not finish: ' + (turn.stderr or turn.interruption or str(turn.exit_code)))
                 decision = referee.parse(turn.text)
                 action = decision['action']
+                if action == 'wait' and decision.get('wait_for', 'operator') not in diagnosis['available_wait_conditions']:
+                    if attempt == 0:
+                        diagnosis['decision_correction'] = '等待条件尚未登记，请选择已有条件或安排下一步可执行工作。'
+                        self._event('referee_decision_repair', decision_id=ticket['id'], action=action)
+                        continue
+                    raise ValueError('裁判引用了当前任务未登记的等待条件。')
                 if ((archive and action not in {'archive_checks', 'wait'})
                         or (not archive and action == 'archive_checks')):
                     raise ValueError('The selected action is unavailable for this incident')
@@ -276,12 +324,13 @@ class RefereeRecovery:
     def _apply_recovery_decision(self, journal, ticket, context, records, candidate):
         decision = ticket['decision']
         kind, tree, action = context['kind'], context['tree'], decision['action']
+        scheduled_wait = action == 'wait' and (
+            kind != 'verification_evidence' or decision.get('wait_for') in {'dispatch_inputs', 'check_environment', 'field_receipt'})
         saved = self._referee_decision or {}
         if (saved.get('id'), saved.get('incident'), saved.get('decision_key')) == (ticket['id'], kind, ticket['key']):
             journal.update(ticket['id'], 'applied')
-            if action == 'wait' and kind != 'verification_evidence':
-                self._stop = True
-                self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
+            if scheduled_wait:
+                self._apply_referee_wait(decision, context)
                 return ''
             return action
         if action == 'run_git_tree_checks':
@@ -293,14 +342,8 @@ class RefereeRecovery:
             self._save_supplemental_checks(candidate, additions)
             candidate.watcher_result['referee_route'] = {'action': action, 'id': ticket['id'], 'tree': tree}
             self.reviewer_session_id = ''
-            self._recovery_note = '裁判已安排 Watcher 补验，完成后由 Reviewer 复核原派单。'
-        elif action == 'wait' and kind != 'verification_evidence':
-            self._stop = True
-            self._stop_reason = 'Referee waiting for prerequisite: ' + decision['instructions']
-            if context['task'] and self._function_gate:
-                missing = self._missing_dispatch_inputs(context['task'])
-                if missing:
-                    self._stop_reason = self._wait_for_dispatch_inputs(context['task'], missing)
+        elif scheduled_wait:
+            self._apply_referee_wait(decision, context)
         elif action != 'wait':
             errors = self._close_delivered_sessions()
             if errors:
@@ -314,9 +357,15 @@ class RefereeRecovery:
                     fallback = field_handoff.pending_fallback(field_handoff.read(self.run_dir))
                     if fallback:
                         candidate.watcher_result['referee_route']['fallback_key'] = fallback['key']
-            self._recovery_note = 'Referee scheduling decision: ' + decision['instructions']
         self._referee_decision = {**decision, 'id': ticket['id'], 'cycle': context['cycle'],
                                   'incident': kind, 'decision_key': ticket['key'], 'task_id': (context['task'] or {}).get('id', '')}
+        if action in referee.HANDOFF_ROLES:
+            role = referee.HANDOFF_ROLES[action]
+            self._referee_decision['handoff'] = {
+                'role': role, 'round': self._next_round if role == 'worker' else candidate.index, 'tree': tree,
+                'task_digest': candidate_checks.digest(context['task']), 'revision': context['revision'],
+                'checks_digest': candidate_checks.digest([context['checks'], self.config.check_source_aliases]),
+            }
         if action == 'run_git_tree_checks' and self._referee_replan:
             self._deferred_replan = self._replan_binding(context['task'], self.directions.messages())
         self._write_state(records, 'running', 0, '', tree)

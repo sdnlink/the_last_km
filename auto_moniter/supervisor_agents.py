@@ -23,7 +23,7 @@ from auto_moniter.verdict import Verdict, parse_verdict
 from auto_moniter.runlog import clipped, diagnostic_summary
 from auto_moniter.storage import write_json
 from auto_moniter.failures import classify
-from auto_moniter.redaction import redact
+from auto_moniter.redaction import redact, safe
 from auto_moniter.audit import AuditCapacityError
 from auto_moniter import candidate_checks
 from auto_moniter.live import LiveOutput
@@ -49,6 +49,7 @@ class AgentExecution:
         """Repair reviewer reports on the saved candidate within the retry budget."""
         self._review_audit_rejection = None
         tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+        directed_review = self._referee_handoff('reviewer', kwargs['index'], tree)
         previous = next((r for r in reversed(self._records) if r.role == 'reviewer' and r.index == kwargs['index']), None)
         worker = next((r for r in reversed(self._records) if r.role=='worker' and r.index==kwargs['index']),None)
         worker_record = worker
@@ -60,19 +61,19 @@ class AgentExecution:
             and all(item['status'] in {'passed','check_failed'} for item in receipt['checks'])
             and candidate_checks.observed_assertion_failure(receipt,self.run_dir))
         retry = (self._candidate_approval(previous,worker) if receipt else self._check_retry_review(previous)) if previous else None
-        if retry and not behavioral_failure:
+        if retry and not behavioral_failure and not directed_review:
             context = previous.watcher_result.get('candidate_approval',{}).get('context') if receipt else previous.watcher_result.get('check_retry')
             if isinstance(context, dict):
                 self._direction_ids['reviewer'] = list(context['direction_ids'])
             self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
             return _CompletedTurn(json.dumps(retry.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
-        if previous and worker and (review := self._previous_handoff_approval(previous, worker, tree)):
+        if not directed_review and previous and worker and (review := self._previous_handoff_approval(previous, worker, tree)):
             self._event('acceptance_review_reused', round=kwargs['index'], tree=tree)
             return _CompletedTurn(json.dumps(review.to_dict()), '', 0, False, 0,
                                   self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         ready = self._saved_approval(kwargs['index'], tree)
-        if behavioral_failure:
+        if behavioral_failure or directed_review:
             ready = None  # A historical mistaken approval requires actual reassessment.
         if receipt and ready and (ready.get('checks_digest') != receipt['digest']
                 or previous and previous.watcher_result.get('candidate_approval',{}).get('invalidated')):
@@ -88,7 +89,7 @@ class AgentExecution:
                 return _CompletedTurn(json.dumps(ready['review']), '', 0, False, 0,
                                       self.run_dir / f"{kwargs['index']:03d}-reviewer.log", [])
         publication = getattr(self.git_history, 'last_business_commit', {})
-        if (not receipt and publication.get('round') == kwargs['index']
+        if (not directed_review and not receipt and publication.get('round') == kwargs['index']
                 and publication.get('candidate_tree') == self.git_history.candidate.get('commit')):
             self.git_history.verify()
             record = self.git_history.last_record
@@ -136,7 +137,7 @@ class AgentExecution:
             if (self.config.function_dispatch and self.function_tasks.current and not review.parse_error
                     and not (turn.exit_code or turn.timed_out or turn.interruption)
                     and workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) == tree):
-                errors = self._function_reviewer_report_errors(review)
+                errors = self._function_reviewer_report_errors(review, worker_record)
                 if errors:
                     review.status = 'continue'
                     review.parse_error = 'invalid function handoff report: ' + '; '.join(errors)
@@ -337,7 +338,16 @@ class AgentExecution:
                 prompt += ('\nWatcher has deferred the remaining plan changes until this assignment is accepted. '
                            'Only implement or review the current assignment against its approved scope and checks. '
                            'Do not apply pending amendments to this assignment or select its successor.\n')
-            else:
+            binding = self._referee_decision.get('handoff', {})
+            if not report_only and binding.get('role') == role and binding['round'] == index:
+                tree = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
+                if recovery := self._referee_handoff(role, index, tree):
+                    prompt += ('\nWatcher 已核对裁判的恢复安排。按绑定派单的权限和验收条件执行。\n'
+                               + json.dumps(safe(recovery), ensure_ascii=False))
+            elif (not deferred_replan and not binding
+                  and (self._referee_replan and role == 'reviewer'
+                       or referee.HANDOFF_ROLES.get(self._referee_decision['action']) == role
+                       and self._referee_decision['task_id'] == (self.function_tasks.current or {}).get('id', ''))):
                 prompt += ('\nReferee scheduling decision: follow these recovery instructions ahead of conflicting '
                        'worker/reviewer recommendations. Preserve user amendments, original scope, fixed checks '
                        'and independent final acceptance. This is a scheduling decision, not delivery approval.\n'
@@ -373,7 +383,8 @@ class AgentExecution:
                 remaining = []
             prompt += ('\nApproved next assignment after the current one passes watcher acceptance:\n'
                        +json.dumps(remaining[0] if remaining else None,ensure_ascii=False)
-                       +'\nFor an accepted result, use this exact next_task or null. '
+                       +'\nFor an accepted result, return next_task=null. Watcher selects an approved successor, '
+                        'prioritizing deferred assignments with a complete receipt. '
                         'For rejected verification with a runnable code repair, give the bounded implementation '
                         'next_task described above. The watcher inserts a valid repair into the existing plan and '
                         'keeps the pending verification unless the repair delivers the entire requirement.\n')

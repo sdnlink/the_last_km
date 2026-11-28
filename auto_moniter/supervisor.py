@@ -47,7 +47,6 @@ from auto_moniter.metering import UsageMeter
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import requirements_review, requirement_context, requirement_coverage
 from auto_moniter import check_environment
-from auto_moniter import function_plan
 from auto_moniter.requirement_queue import RequirementQueue
 from auto_moniter import migration
 from auto_moniter.supervisor_models import (
@@ -534,6 +533,9 @@ class Supervisor(
                 pending = None
             if pending is not None:
                 record = pending
+                if self._resume_verification_handoff(record, records):
+                    continue
+                self._resume_local_check_handoff(record, records)
                 round_index, verdict, tree = record.index, record.verdict, record.tree
                 turn = _CompletedTurn(verdict.raw, record.session_id, 0, False, record.elapsed_s,
                                       Path(record.output_path), [])
@@ -705,7 +707,7 @@ class Supervisor(
                     if dispatch_preflight:
                         self._event('function_dispatch_validated', task_id=self.function_tasks.current['id'],
                                     round=round_index, tree=worker_start_tree)
-                worker_prompt = self._worker_prompt(round_index, last_worker, last_review)
+                worker_prompt = self._worker_prompt(round_index, last_worker, last_review, tree=worker_start_tree)
                 # Compare to the last verified workspace, including changes made
                 # between turns; comparing only to turn-start would miss those edits.
                 impact_before = getattr(self, '_impact_snapshot', None)
@@ -1201,6 +1203,16 @@ class Supervisor(
                 reported_status=reported_review_status,
             )
             records.append(review_record)
+            if review.repair_steps and not (review_failure or review.parse_error or review_turn.interruption):
+                self._save_worker_handoff(record, review_record, self.function_tasks.current)
+            if (review.supplemental_checks or review.git_tree_checks) and not (review_failure or review.parse_error or review_turn.interruption):
+                review_record.watcher_result['pending_local_checks'] = record.watcher_result.get('candidate_checks', {}).get('digest', '')
+            if (self._verification_only() and review.task_status == 'changes_required'
+                    and (review.field_handoffs or review.next_task)
+                    and not (review_failure or review.parse_error or review_turn.interruption)):
+                review_record.watcher_result['pending_verification_handoff'] = {
+                    'checks_digest': record.watcher_result.get('candidate_checks', {}).get('digest', ''),
+                    'revision': handoff.get('revision', ''), 'reopen': handoff_applied}
             if self.git_history and self.config.workflow!='review-first':
                 self._checkpoint(review_record, review_turn.text, self.git_history.last_worker['commit'])
             self._write_state(records, "running", stall, previous_gap_key, tree)
@@ -1234,6 +1246,15 @@ class Supervisor(
                 review_record.verdict = last_review
                 self._write_state(records, "running", stall, previous_gap_key, tree)
                 self.log(f"round {round_index}: reviewer failure {reviewer_failures}: {review_failure}")
+                if self.config.workflow == 'review-first':
+                    if self._consult_referee('reviewer_failure', review_failure, records, candidate=record):
+                        continue
+                    if self._stop_requested:
+                        return self._finish('stopped', self._stop_reason, records, verdict)
+                    if category in {'network', 'rate_limit', 'session'}:
+                        self._model_transport_wait = True
+                    return self._finish('action_required', self._stop_reason or
+                        '独立审查未完成，已保存原候选。' + review_failure, records, verdict)
                 if _limit_reached(self.config.failure_limit, reviewer_failures):
                     return self._finish(
                         "failed",
@@ -1241,15 +1262,6 @@ class Supervisor(
                         records,
                         review,
                     )
-                if self.config.workflow == 'review-first':
-                    if self._consult_referee('reviewer_failure', review_failure, records, candidate=record):
-                        continue
-                    if self._stop_requested:
-                        return self._finish('stopped', self._stop_reason, records, verdict)
-                    if self._stop:
-                        return self._finish('action_required', self._stop_reason, records, verdict)
-                    return self._finish('action_required', 'Reviewer did not finish; worker candidate saved. ' + review_failure,
-                                        records, verdict)
                 self._retry_pause(reviewer_failures + (3 if recovery == "backoff" else 0), category + " reviewer failure")
                 continue
             if review.parse_error and self.config.workflow == 'review-first':
@@ -1277,18 +1289,9 @@ class Supervisor(
                             return self._finish('action_required', failure, records, review)
                         if check_failure and not review.field_handoffs and self._git_tree_checks_failed(record):
                             return self._finish_function_acceptance(review_record, records, check_failure)
-                        review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
                         self._event('verification_waiting', task_id=self.function_tasks.current['id'], round=round_index)
-                        self._write_state(records, 'running', stall, previous_gap_key, review_tree)
                         try:
-                            state = requirement_context.read(self.run_dir / 'state.json', limit=32 * 1024 * 1024)
-                            if handoff_applied and handoff['binding'] == field_handoff.binding(state):
-                                field_handoff.reopen(self.run_dir, handoff, review.blockers, review.field_handoffs)
-                            elif field_handoff.read(self.run_dir).get('binding') != field_handoff.binding(state):
-                                field_handoff.configure(self.run_dir, state, review.field_handoffs or [
-                                    {'kind': 'observation', 'title': blocker[:300], 'owner': '任务负责人'}
-                                    for blocker in review.blockers[:12]
-                                ], automatic=True)
+                            self._write_field_handoff(record, review_record, records, reopen=handoff_applied, handoff=handoff)
                         except (OSError, ValueError, KeyError) as exc:
                             self.log('现场交接记录未建立：' + redact(str(exc)))
                         else:
@@ -1302,28 +1305,10 @@ class Supervisor(
                                 continue
                         return self._finish('action_required', self._field_wait_message(review), records, review)
                     try:
-                        previous_id = self.function_tasks.current['id']
-                        staged = self._stage_verification_repair(review)
-                        if self.config.full_function_plan and self._complete_function_plan_ready():
-                            remaining = function_plan.waiting(self.function_plan, staged)
-                            if staged.current['delivery_scope'] == 'requirement':
-                                remaining = [item for item in remaining if item['id'] != previous_id]
-                            try:
-                                self.function_plan = self._validate_complete_function_plan(
-                                    [staged.current, *remaining], staged, self.modules.items, self.requirements_review)
-                            except ValueError as exc:
-                                self._planning_rejection = {'task_id': staged.current['id'], 'reason': str(exc)[:2000]}
-                            else:
-                                self._planning_rejection = None
-                        self.function_tasks = staged
-                        self._dispatch_directions = list(self._direction_ids['reviewer'])
-                        self._record_assignment(staged.current)
-                        self._event('verification_repair_assigned', verification_task=previous_id,
-                                    task_id=staged.current['id'])
+                        self._apply_verification_repair(record, review_record, records)
                     except ValueError as exc:
                         return self._finish('action_required', 'Verification repair assignment rejected: '+str(exc), records, review)
                     last_worker, last_review = None, review
-                    self._write_state(records, 'running', 0, '', review_tree)
                     continue
                 if review.task_status == 'accepted' and scope_gaps:
                     self._reject_function_candidate(review_record, scope_gaps)
@@ -1792,6 +1777,8 @@ class Supervisor(
 
     def _finish_locked(self, status: str, summary: str, records: list[RoundRecord],
                        verdict: Verdict | None) -> RunReport:
+        if status == 'action_required' and getattr(self, '_referee_dispatch_wait', False):
+            summary = self._stop_reason
         if status == 'done' and (problem := self._external_delivery_problem()):
             status, summary = 'action_required', problem
         if status == 'done' and self._pending_directions():

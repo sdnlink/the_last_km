@@ -73,10 +73,17 @@ def _released(run):
 
 def request_current(store, task_id, request):
     parent = store._get(request.get('parent_task', ''))
-    handoff = field_handoff.read(Path(parent['run_dir']))
-    return (request.get('binding') == handoff.get('binding') and request.get('revision') == handoff.get('revision')
-            and any(item['id'] == (request.get('item') or {}).get('id') and item.get('executor_task') == task_id
-                    and not item.get('receipt') for item in handoff.get('items', [])))
+    run = Path(parent['run_dir'])
+    for filename, handoff in field_handoff.saved_handoffs(run):
+        if request.get('binding') != handoff.get('binding') or request.get('revision') != handoff.get('revision'):
+            continue
+        if filename != field_handoff.FILE and not field_handoff.deferred_state(
+                run, Directions(run).read('state.json', 32 * 1024 * 1024), handoff):
+            continue
+        if any(item['id'] == (request.get('item') or {}).get('id') and item.get('executor_task') == task_id
+               and not item.get('receipt') for item in handoff.get('items', [])):
+            return True
+    return False
 
 
 def _replacement_failure(store, parent, value, item):
@@ -122,7 +129,7 @@ def collect_failure(value, ident, view):
     return view.get('summary') or '关联执行任务未通过验收，请查看该任务的停止原因。', False
 
 
-def bind(store, parent, run, value):
+def bind(store, parent, run, value, *, filename=field_handoff.FILE):
     requested = []
     for item in value['items']:
         if (not item.get('capability') or any(item.get(key) for key in ('receipt', 'claim', 'case_id'))
@@ -164,6 +171,6 @@ def bind(store, parent, run, value):
             item.update(executor_task=child['id'], executor_resource=entry['resource'])
             occupied.add(child['id'])
             waiting.pop(item['id'], None)
-            write_json(run / field_handoff.FILE, value, durable=True)
+            write_json(run / filename, value, durable=True)
             break
     return waiting

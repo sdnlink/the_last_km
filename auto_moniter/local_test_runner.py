@@ -1,5 +1,6 @@
 """Run a single declared local regression; an empty/entirely skipped run fails."""
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ def parser(*, exit_on_error=True):
     parser.add_argument('--test-blob', help='Require this test Git blob in every tree')
     parser.add_argument('--expect-rust-test', action='append', default=[],
                         help='Keep and verify the named Cargo test passed during this unittest run')
+    parser.add_argument('--record-cargo-root', action='store_true', help=argparse.SUPPRESS)
     return parser
 
 
@@ -35,7 +37,7 @@ def main():
         return run_bound(args, Path(__file__).resolve())
     if args.test_blob:
         parser().error('--test-blob requires --git-tree')
-    if args.expect_rust_test:
+    if args.expect_rust_test or args.record_cargo_root:
         if args.runner != 'unittest':
             parser().error('--expect-rust-test requires --runner unittest')
         return run_with_cargo_evidence(args)
@@ -53,7 +55,17 @@ def run_with_cargo_evidence(args):
         command = positional[0] if positional else options.get('args')
         if (isinstance(command, (list, tuple)) and len(command) >= 2
                 and isinstance(command[0], (str, os.PathLike))
-                and Path(command[0]).name == 'cargo' and command[1] == 'test'):
+                and Path(command[0]).name == 'cargo'):
+            if args.record_cargo_root:
+                root = Path(options.get('cwd') or Path.cwd()).resolve()
+                manifest = next((str(root / value.split('=', 1)[1]) for value in command[2:]
+                                 if isinstance(value, str) and value.startswith('--manifest-path=')), '')
+                if '--manifest-path' in command and command.index('--manifest-path') + 1 < len(command):
+                    manifest = str(root / command[command.index('--manifest-path') + 1])
+                print('cargo_execution=' + json.dumps({'cwd': str(root), 'manifest': manifest,
+                      'subcommand': command[1], 'exit_code': result.returncode}), flush=True)
+            if command[1] != 'test' or not args.expect_rust_test:
+                return result
             for value in (result.stdout, result.stderr):
                 if isinstance(value, bytes):
                     value = value.decode(errors='replace')

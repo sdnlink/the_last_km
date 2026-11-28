@@ -91,9 +91,48 @@ def binding(state):
             'directions': state.get('dispatch_directions') or []}
 
 
-def read(run):
-    path = run / FILE
-    return Directions(run).read(FILE, 256 * 1024) if path.exists() or path.is_symlink() else {}
+def read(run, filename=FILE):
+    path = run / filename
+    return Directions(run).read(filename, 256 * 1024) if path.exists() or path.is_symlink() else {}
+
+
+def saved_handoffs(run):
+    """Return the active handoff and the newest saved revision for each other assignment."""
+    seen = set()
+    archives = sorted(run.glob('field-handoff-*.json'), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    for name in [FILE, *(path.name for path in archives if re.fullmatch(r'field-handoff-[a-f0-9]{32}\.json', path.name))]:
+        value = read(run, name)
+        task_id = value.get('binding', {}).get('task_id')
+        if task_id and task_id not in seen:
+            seen.add(task_id)
+            yield name, value
+
+
+def deferred_state(run, state, value, *, tree=None):
+    task_id = value.get('binding', {}).get('task_id')
+    ledger = state.get('function_tasks') or {}
+    if not task_id or task_id == (ledger.get('current') or {}).get('id'):
+        return None
+    if any(row['task']['id'] == task_id for row in ledger.get('accepted', [])):
+        return None
+    task = next((row for row in (state.get('function_plan') or {}).get('tasks', []) if row['id'] == task_id), None)
+    if not task or task.get('kind') != 'verification':
+        return None
+    saved = {**state, 'function_tasks': {**ledger, 'current': task}}
+    try:
+        identity = binding(saved)
+    except ValueError:
+        return None
+    if (identity != value['binding'] or tree is not None and tree != identity['tree']
+            or [row['id'] for row in Directions(run).messages()] != identity['directions']):
+        return None
+    worker = next((row for row in reversed(saved.get('rounds', []))
+                   if row['role'] == 'worker' and row['index'] == identity['round']), {})
+    receipt = worker.get('watcher_result', {}).get('candidate_checks', {})
+    context = receipt.get('context') or {}
+    if context.get('business_update_count', 0) != state.get('business_update_count', 0):
+        return None
+    return saved if candidate_checks.valid(receipt, run, context) else None
 
 
 def pending_fallback(value):
@@ -279,6 +318,12 @@ def reopen(run, value, blockers, requests=()):
     rows = []
     for index, request in enumerate(items, 1):
         row = dict(safe(request), id=str(index))
+        if not row.get('depends_on'):
+            prior = [item for item in value['items'] if item.get('receipt') and not item.get('depends_on')
+                     and all((item.get(key) or '') == (row.get(key) or '')
+                             for key in REQUEST_FIELDS | {'case_id', 'capability'})]
+            if len(prior) == 1:
+                row['receipt'] = prior[0]['receipt']
         if row['kind'] == 'browser' and not row.get('case_id'):
             # Carry the operator's registration only for an unchanged observation.
             registered = [item for item in value['items']
@@ -290,6 +335,8 @@ def reopen(run, value, blockers, requests=()):
                 row.update({key: item[key] for key in ('allow_manual', 'url', 'expected_version', 'browser_proof')
                             if key in item})
         rows.append(row)
+    if rows and all(row.get('receipt') for row in rows):
+        raise ValueError('本轮请求与已有回执完全相同，须明确需要补测的操作或缺失的证据。')
     updated = {**{key: field for key, field in value.items()
                   if key not in ('resume', 'dispatch', 'executor_status', 'fallback', 'failed_cases', 'browser_inputs')},
                'revision': uuid.uuid4().hex, 'review_feedback': safe(blockers),
@@ -383,8 +430,8 @@ def configure(run, state, items, *, automatic=False, replace_revision=None, inde
     return value
 
 
-def _select(run, state, data):
-    value = read(run)
+def _select(run, state, data, *, filename=FILE):
+    value = read(run, filename)
     if (data.get('revision') != value.get('revision') or data.get('binding') != value.get('binding')
             or binding(state) != value.get('binding')):
         raise ValueError('交接版本已变化，请刷新后核对当前候选。')
@@ -406,8 +453,8 @@ def claim(run, state, data):
     return {**public(value), 'claim_key': key}
 
 
-def bind_browser_case(run, state, data, config):
-    value, item = _select(run, state, data)
+def bind_browser_case(run, state, data, config, *, filename=FILE):
+    value, item = _select(run, state, data, filename=filename)
     case_id = data['case_id']
     if (item['kind'] != 'browser' or item.get('receipt') or item.get('claim')
             or item.get('executor_task') or item.get('case_id') not in (None, '', case_id)):
@@ -417,7 +464,7 @@ def bind_browser_case(run, state, data, config):
         raise ValueError('浏览器用例的现场入口或版本与原待办不一致。')
     item.update(case_id=case_id, url=config['url'], expected_version=config['expected_version'],
                 browser_proof=True)
-    write_json(run / FILE, value, durable=True)
+    write_json(run / filename, value, durable=True)
     return value
 
 
@@ -487,8 +534,8 @@ def _proof(item, data):
     return None
 
 
-def submit(run, state, data, *, executor=None):
-    value, item = _select(run, state, data)
+def submit(run, state, data, *, executor=None, filename=FILE):
+    value, item = _select(run, state, data, filename=filename)
     fields = data.get('receipt')
     if not isinstance(fields, dict) or set(fields) != set(FIELDS[item['kind']]):
         raise ValueError('回执字段与待办要求不一致。')
@@ -516,7 +563,7 @@ def submit(run, state, data, *, executor=None):
     item['receipt'] = receipt
     if ready(value):
         value.setdefault('resume', {'status': 'pending', 'agent_calls': (state.get('usage') or {}).get('agent_calls', 0)})
-    write_json(run / FILE, value, durable=True)
+    write_json(run / filename, value, durable=True)
     return value
 
 

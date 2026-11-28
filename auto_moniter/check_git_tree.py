@@ -44,6 +44,30 @@ def registered_runner(project, command):
         return None
 
 
+def describe_check(project, command):
+    """Describe recognized check inputs without executing the command."""
+    args = registered_runner(project, command)
+    if args:
+        return {'test_path': args.path, **({'git_trees': args.git_tree} if args.git_tree else {})}
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return {}
+    if argv and argv[0] == 'git':
+        argv = argv[1:]
+        if argv[:2] == ['-C', str(project)]:
+            argv = argv[2:]
+        if argv[:1] == ['--no-replace-objects']:
+            argv = argv[1:]
+        if argv[:3] == ['diff', '--no-ext-diff', '--no-textconv']:
+            argv = ['diff', *argv[3:]]
+        if argv[-1:] == ['--']:
+            argv = argv[:-1]
+        if len(argv) == 4 and argv[:2] == ['diff', '--check'] and all(_OID.fullmatch(x) for x in argv[2:]):
+            return {'base': argv[2], 'git_trees': [argv[3]]}
+    return {}
+
+
 def supplemental_command(project, check, request, commands):
     """Bind an existing check, preserving runner arguments and approved test contents."""
     tree, base = request['git_tree'], request['base']
@@ -81,6 +105,18 @@ def supplemental_command(project, check, request, commands):
     for name in args.expect_rust_test:
         argv.extend(['--expect-rust-test', name])
     return shlex.join([*argv, '--git-tree', tree, '--test-blob', blob])
+
+
+def bind_publication_check(project, check, tree, base):
+    """Bind the approved check while preserving explicitly registered historical runs."""
+    scope = describe_check(project, check)
+    if check == 'git diff --check' and base:
+        return supplemental_command(project, check, {'git_tree': tree, 'base': base}, set())
+    if tree in scope.get('git_trees', []):
+        return check
+    if not registered_runner(project, check):
+        raise ValueError('发布树执行支持已登记的本地测试和差异检查。')
+    return supplemental_command(project, check, {'git_tree': tree, 'base': ''}, set())
 
 
 def tree_entries(project, tree, test):
@@ -187,6 +223,8 @@ def run_bound(args, runner):
                 flags.extend(['--' + field, value])
         for name in args.expect_rust_test:
             flags.extend(['--expect-rust-test', name])
+        if args.runner == 'unittest':
+            flags.append('--record-cargo-root')
         status = 0
         for tree, blob, entries in candidates:
             with tempfile.TemporaryDirectory(prefix='auto-moniter-check-tree-') as location:

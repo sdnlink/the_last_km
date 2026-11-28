@@ -108,7 +108,7 @@ def _module_check_commands(modules) -> list[str]:
 def _check_references(value):
     if isinstance(value, dict):
         for key, item in value.items():
-            if key == 'check_ids' and isinstance(item, list):
+            if key in {'check_ids', 'publication_check_ids', 'reusable_check_ids', 'check_inputs'} and isinstance(item, (list, dict)):
                 for identifier in item:
                     if isinstance(identifier, str) and re.fullmatch(r'check:[1-9][0-9]{0,3}', identifier):
                         yield int(identifier.split(':')[1]) - 1
@@ -823,10 +823,11 @@ class TaskStore:
             raise TaskError('关联任务须已登记、使用独立工作区，且执行类型与交接一致。', 409)
         return child
 
-    def _dispatch_handoff_tasks(self, meta, value):
+    def _dispatch_handoff_tasks(self, meta, value, *, filename=None):
         if field_handoff.ready(value):
             return field_handoff.public(value)
         run = Path(meta['run_dir'])
+        filename = filename or field_handoff.FILE
         targets = dict.fromkeys(value.get('independent_tasks', []))
         targets.update((item['executor_task'], item) for item in value['items']
                        if item.get('executor_task') and not item.get('receipt')
@@ -853,7 +854,7 @@ class TaskStore:
                 dispatch[ident] = field_executors.dispatch_failure(exc, previous)
         if dispatch != value.get('dispatch', {}):
             value = {**value, 'dispatch': dispatch}
-            write_json(run / field_handoff.FILE, value, durable=True)
+            write_json(run / filename, value, durable=True)
         return field_handoff.public(value)
 
     def _executor_field_result(self, child, item):
@@ -890,7 +891,8 @@ class TaskStore:
             raise ValueError('执行回执须为工作区内经过验收的普通文件。')
         return requirement_context.read(path, limit=128 * 1024)
 
-    def _collect_field_results(self, meta, run, state, value, *, executor_waiting=None):
+    def _collect_field_results(self, meta, run, state, value, *, executor_waiting=None, filename=None):
+        filename = filename or field_handoff.FILE
         errors = {}
         failed_cases = {}
         browser_inputs = {}
@@ -950,14 +952,14 @@ class TaskStore:
                             value = field_handoff.bind_browser_case(run, state, {
                                 'id': item['id'], 'case_id': case_id, 'binding': binding,
                                 'revision': value['revision'],
-                            }, config)
+                            }, config, filename=filename)
                             item = next(row for row in value['items'] if row['id'] == item['id'])
                         result = browser_execution.poll(run, value, item, config)
                     if result['status'] == 'ready':
                         submission = result['submission']
                         if config.get('handoff_ids'):
                             submission = {**submission, 'id': item['id']}
-                        value = field_handoff.submit(run, state, submission, executor='browser:'+case_id)
+                        value = field_handoff.submit(run, state, submission, executor='browser:'+case_id, filename=filename)
                     else:
                         errors[item['id']] = result.get('reason', '浏览器验证已启动，等待执行结果。')
                         if result['status'] == 'needs_input':
@@ -982,7 +984,7 @@ class TaskStore:
                 result = self._executor_field_result(child, item)
                 if not isinstance(result, dict) or result.get('id') != item['id']:
                     raise ValueError('执行器回执未绑定当前交接项。')
-                value = field_handoff.submit(run, state, result, executor=ident)
+                value = field_handoff.submit(run, state, result, executor=ident, filename=filename)
             except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
                 errors[item['id']] = redact(str(exc))
                 if ident or external:
@@ -995,7 +997,7 @@ class TaskStore:
                 or browser_inputs != value.get('browser_inputs', {})):
             value = {**value, 'executor_status': errors, 'failed_cases': failed_cases,
                      'browser_inputs': browser_inputs}
-            write_json(run / field_handoff.FILE, value, durable=True)
+            write_json(run / filename, value, durable=True)
         return value
 
     def _route_browser_failure(self, meta, run, value, *, referee_enabled=False):
@@ -1115,19 +1117,23 @@ class TaskStore:
                 run = Path(meta['run_dir'])
                 try:
                     if self._recover_lifecycle(meta, run):
+                        lifecycle.collect_deferred_handoffs(self, meta, run)
                         continue
                     value = field_handoff.read(run)
                     wait = read_json(run / dispatch_inputs.WAIT_FILE)
-                    if not (value or wait):
+                    if not (value or wait or next(run.glob('field-handoff-*.json'), None)):
                         continue
                     view = self._view(meta, {}, include_details=False)
-                    if view['status'] in {'running', 'starting', 'paused'}:
+                    if view['status'] in {'running', 'starting'}:
+                        lifecycle.collect_deferred_handoffs(self, meta, run)
                         continue
                     if view['status'] not in {'action_required', 'interrupted'}:
                         continue
                     if read_control(run / 'control.json').get('action') in ('stop', 'pause'):
                         continue
                     state = Directions(run).read('state.json', 32 * 1024 * 1024)
+                    deferred_ready = lifecycle.collect_deferred_handoffs(self, meta, run)
+                    value = field_handoff.read(run)
                     if wait and 'resume' in view['actions'] and dispatch_inputs.ready(
                             wait, state, Path(meta['cwd']).resolve(), [row['id'] for row in Directions(run).messages()], run=run):
                         intent = Directions(run).read(recovery_wait.FILE)
@@ -1149,6 +1155,8 @@ class TaskStore:
                         continue
                     if 'resume' in view['actions'] and self._can_resume_field_archive(state, value, receipt):
                         self._resume_field_archive(meta, run, value, retry_failed=retry_failed)
+                        continue
+                    if lifecycle.wake_for_deferred_handoff(self, meta, run, state, view, value, deferred_ready):
                         continue
                     if not field_handoff.ready(value):
                         waiting = field_executors.bind(self, meta, run, value)
@@ -1864,6 +1872,8 @@ class TaskStore:
                                          and field_handoff.archive_item(handoff))
                     if (handoff and not field_handoff.ready(handoff) and not field_handoff.pending_fallback(handoff)
                             and not automatic_archive
+                            and not ((data or {}).get('deferred_handoff') is True
+                                     and lifecycle.ready_deferred_handoff(run, saved_state))
                             and [row['id'] for row in Directions(run).messages()] == handoff['binding']['directions']):
                         raise TaskError('现场回执尚未齐备，请在任务详情中补交。', 409)
                     usage = saved_state.get('usage', {})

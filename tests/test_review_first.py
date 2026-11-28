@@ -171,12 +171,13 @@ class ReviewFirstTests(unittest.TestCase):
   rejected=self.brief({'status':'revise','summary':'仍有漏项','findings':[
    {'source_id':'original','quote':'跨角色复查权限','gap':'缺少权限不足的验收场景'},
   ]})
-  reviewer=ScriptedProvider('reviewer',[self.brief(),rejected,self.brief(),rejected])
+  reviewer=ScriptedProvider('reviewer',[self.brief(),rejected,self.brief({**BRIEF,'summary':'改写了方案说明'})])
   worker=ScriptedProvider('worker',[])
   result=self.run_loop(worker,reviewer,requirement='跨角色复查权限。')
   self.assertEqual(result.status,'action_required',result.summary)
   self.assertIn('缺少权限不足的验收场景',result.summary)
-  self.assertEqual(len(reviewer.calls),4)
+  self.assertEqual(len(reviewer.calls),3)
+  self.assertIn('方案修订仍是同一套待执行内容',result.summary)
   self.assertEqual(worker.calls,[])
 
  def test_direction_arriving_during_coverage_review_forces_a_new_plan(self):

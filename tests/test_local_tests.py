@@ -8,10 +8,54 @@ import unittest
 from unittest.mock import patch
 
 from auto_moniter.check_git_tree import inspect_checks
-from auto_moniter.local_tests import catalog, command, reuse_key
+from auto_moniter.local_tests import bound_reuse_key, catalog, command, reuse_key
 
 
 class LocalTestTests(unittest.TestCase):
+    def test_bound_reuse_key_changes_with_declared_input_and_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            test = root / 'test_behavior.py'
+            test.write_text('import unittest\n')
+            path = root / 'input.json'
+            path.write_text('{"value": 1}')
+            check = command(root, test.name) + ' --git-tree ' + 'a' * 40
+            key = bound_reuse_key(root, check, [path.name])
+            self.assertIsNotNone(key)
+            with patch.dict('os.environ', {'TEST_REUSE_ENVIRONMENT': 'changed'}):
+                self.assertNotEqual(key, bound_reuse_key(root, check, [path.name]))
+            path.write_text('{"value": 2}')
+            self.assertNotEqual(key, bound_reuse_key(root, check, [path.name]))
+            self.assertIsNone(bound_reuse_key(root, command(root, test.name), [path.name]))
+
+    def test_bound_python_check_records_nested_cargo_execution_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            git = ['git', '-C', str(root)]
+            subprocess.run([*git, 'init', '-q'], check=True)
+            (root / 'Cargo.toml').write_text('[package]\nname="sample"\nversion="0.1.0"\n')
+            cargo = root / 'cargo'
+            cargo.write_text('#!/bin/sh\nexit 0\n')
+            cargo.chmod(0o755)
+            (root / 'test_behavior.py').write_text(
+                'import subprocess, unittest\nfrom pathlib import Path\n'
+                'class Check(unittest.TestCase):\n'
+                ' def test_cargo_root(self):\n'
+                '  root = Path(__file__).parent\n'
+                '  result = subprocess.run([str(root / "cargo"), "check", "--manifest-path", "Cargo.toml"], cwd=root)\n'
+                '  self.assertEqual(result.returncode, 0)\n')
+            subprocess.run([*git, 'add', '.'], check=True)
+            tree = subprocess.check_output([*git, 'write-tree'], text=True).strip()
+            result = subprocess.run([*shlex.split(command(root, 'test_behavior.py')), '--git-tree', tree],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            project_root = next(line.split('project_root=', 1)[1] for line in result.stdout.splitlines()
+                                if line.startswith('git_tree=') and 'project_root=' in line)
+            observed = next(json.loads(line.split('=', 1)[1]) for line in result.stdout.splitlines()
+                            if line.startswith('cargo_execution='))
+            self.assertEqual(observed, {'cwd': project_root, 'manifest': project_root + '/Cargo.toml',
+                                        'subcommand': 'check', 'exit_code': 0})
+
     def test_git_tree_check_runs_both_exact_candidates_and_rejects_wrong_blob(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

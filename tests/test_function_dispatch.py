@@ -1075,8 +1075,10 @@ class DispatchTests(unittest.TestCase):
             self.assertIn('complete independent work within the current scope', worker.calls[1]['prompt'])
             self.assertIn('Respect tool permissions and safety requirements', worker.calls[1]['prompt'])
             self.assertEqual(len(reviewer.calls),4)
-            self.assertIn('For an accepted result, use this exact next_task or null',reviewer.calls[1]['prompt'])
+            self.assertIn('For an accepted result, return next_task=null',reviewer.calls[1]['prompt'])
             self.assertIn('Provide a bounded implementation next_task',reviewer.calls[2]['prompt'])
+            self.assertIn('"source_task_id": "VERIFY", "target_task_id": "REPAIR"', worker.calls[1]['prompt'])
+            self.assertIn('main/Return value must be 42', worker.calls[1]['prompt'])
             ledger=json.loads((root/'run/state.json').read_text())['function_tasks']
             self.assertEqual([item['task']['id'] for item in ledger['accepted']],['REPAIR'])
 

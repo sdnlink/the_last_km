@@ -394,6 +394,7 @@ class RequirementPlanning:
         return (previous.get('kind') == 'verification'
                 and function_tasks.identity(revised) == function_tasks.identity(previous)
                 and set(previous['check_ids']) <= set(revised['check_ids'])
+                and set(previous.get('publication_check_ids', [])) <= set(revised.get('publication_check_ids', []))
                 and set(previous['criterion_ids']) <= set(revised['criterion_ids']))
 
     def _can_revise_waiting_verification(self):
@@ -543,10 +544,13 @@ class RequirementPlanning:
                            + json.dumps(replaced, ensure_ascii=False))
         if scoped_dispatch and task:
             missing = self._missing_dispatch_inputs(task)
+            conflict = self._assignment_repository_conflict(task)
+            commands = [] if conflict else self._assignment_check_commands(task)
             prompt += ('\n\nWatcher 派前核对结果：' + json.dumps({
                 'task_id': task['id'],
+                'check_manifest': list(self._check_manifest(task, commands).values()) if commands else [],
                 'missing_check_inputs': missing,
-                'workspace_conflict': self._assignment_repository_conflict(task),
+                'workspace_conflict': conflict,
                 'git_tree_checks': check_git_tree.inspect_checks(self.config.cwd, checks),
             }, ensure_ascii=False))
         schema = self.schema_path
@@ -687,6 +691,7 @@ class RequirementPlanning:
         except (OSError, ValueError):
             pass  # Advisory history cannot prevent an otherwise valid review.
         base_prompt = prompt
+        rejected_plans = {}
         coverage_required = (saved_revision is not None or saved_dispatch is not None
                              or bool((previous_brief or {}).get('limited_dispatch')))
         if saved_revision:
@@ -840,6 +845,14 @@ class RequirementPlanning:
                         requirement_context.save(self.run_dir, self.config.cwd, self.config.requirement,
                             len(self.requirement_cycles) + 1, plan, snapshot, checks, directions)
                         reviewed_plan, modules, _ = self._coverage_inputs(plan, staged_plan, sources, checks, tree)
+                        plan_key = requirement_coverage.digest({
+                            'plan': {key: value for key, value in reviewed_plan.items() if key != 'summary'},
+                            'modules': modules,
+                        })
+                        if plan_key in rejected_plans:
+                            receipt, missing = rejected_plans[plan_key]
+                            self._event('requirement_plan_unchanged', round=index, receipt=receipt)
+                            raise ValueError(f'方案修订仍是同一套待执行内容。复核缺项见 {receipt}。{missing}')
                         outcome = self._requirement_coverage_review(
                             sources, reviewed_plan, modules=modules, checks=checks,
                             directions=directions, tree=tree)
@@ -859,6 +872,7 @@ class RequirementPlanning:
                                     'affected_tasks': review['affected_tasks']}
                                 return turn
                             missing = '\n'.join(item['gap'] for item in review['findings'])[:1800]
+                            rejected_plans[plan_key] = receipt, missing
                             if attempt >= 4 or not journal.admit(recovery_context, missing):
                                 raise ValueError('需求覆盖复核仍有缺项，派单尚未开始。' + missing)
                             self._close_requirement_reviewer()

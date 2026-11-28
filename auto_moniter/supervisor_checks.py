@@ -199,6 +199,15 @@ class AcceptanceChecks:
                 'worker_model':self.config.model, 'requirement':self.config.requirement,
                 'acceptance':self.config.acceptance, 'quality_policy':self.config.quality_policy,
                 'direction_ids':[message['id'] for message in self.directions.messages()]}
+        if task and task.get('publication_check_ids'):
+            try:
+                bound = self._publication_check_plan(task, context.get('publication_tree'))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                context['publication_check_error'] = '无法在实际发布树执行派单检查。' + str(exc)
+            else:
+                context['publication_checks'] = bound
+                replacements = {item['original']: item['command'] for item in bound}
+                context['commands'] = list(dict.fromkeys(replacements.get(command, command) for command in commands))
         if not fixed_only:
             supplemental = record.watcher_result.get('supplemental_checks', [])
             if supplemental:
@@ -207,8 +216,22 @@ class AcceptanceChecks:
                               if 'git_tree' not in item or item.get('binding') == binding]
                 if applicable:
                     context['supplemental_checks'] = applicable
-                    context['commands'] = list(dict.fromkeys([*commands, *(item['command'] for item in applicable)]))
+                    context['commands'] = list(dict.fromkeys([*context['commands'], *(item['command'] for item in applicable)]))
+        if not fixed_only and not final and task and self.config.task_type == 'code':
+            if reusable := self._bound_reuse_keys(context):
+                context['bound_reuse_keys'] = reusable
         return context
+
+    def _publication_check_plan(self, task, tree):
+        if not tree or not isinstance(self.git_history, ApprovedHistory):
+            raise ValueError('缺少 Watcher 登记的发布树。')
+        catalog = self._function_check_catalog(task)
+        base = self.git_history.business_head['commit']
+        if any(catalog[key] in getattr(self, '_check_aliases', {}) for key in task['publication_check_ids']):
+            raise ValueError('发布树检查须使用 Git 隔离根，当前检查已配置其他源码入口。')
+        return [{'check_id': key, 'git_tree': tree, 'original': catalog[key],
+                 'command': check_git_tree.bind_publication_check(self.config.cwd, catalog[key], tree, base)}
+                for key in task['publication_check_ids']]
 
     def _approved_supplemental_test(self, path, name, module_id):
         from auto_moniter.workspace import _file_token
@@ -227,6 +250,69 @@ class AcceptanceChecks:
                     and candidate_checks.valid(receipt, self.run_dir, context)):
                 return True
         return False
+
+    def _check_manifest(self, task, commands, supplemental=()):
+        catalog = (self._function_check_catalog(task) if self._function_gate and task
+                   else {f'check:{index}': command for index, command in enumerate(self.config.checks, 1)})
+        requested = {item['command']: item for item in supplemental}
+        manifest = {}
+        for index, command in enumerate(commands, 1):
+            ids = [key for key, value in catalog.items() if value == command]
+            request = requested.get(command, {})
+            if request.get('check_id') and request['check_id'] not in ids:
+                ids.append(request['check_id'])
+            manifest[command] = {'position': index, 'check_ids': ids,
+                                 **check_git_tree.describe_check(self.config.cwd, command)}
+        return manifest
+
+    def _candidate_receipt_summary(self, receipt):
+        context = receipt['context']
+        additions = [*context.get('supplemental_checks', []), *context.get('publication_checks', [])]
+        manifest = self._check_manifest(context.get('task'), context['commands'], additions)
+        return candidate_checks.review_summary(receipt, manifest)
+
+    def _bound_reuse_keys(self, context):
+        from auto_moniter.local_tests import bound_reuse_key
+
+        approved = set(self.quality.config.get('reusable_check_ids', []))
+        if not approved:
+            return {}
+        additions = [*context.get('publication_checks', []), *context.get('supplemental_checks', [])]
+        checks = self._check_manifest(context['task'], context['commands'], additions)
+        declared = self.quality.config.get('check_inputs', {})
+        reusable = {}
+        for command, row in checks.items():
+            if (not row.get('git_trees') or not (approved & set(row['check_ids']))
+                    or command in getattr(self, '_check_aliases', {})):
+                continue
+            inputs = sorted({path for key in row['check_ids'] for path in declared.get(key, [])})
+            if key := bound_reuse_key(self.config.cwd, command, inputs):
+                reusable[command] = {'key': key, 'inputs': inputs}
+        return reusable
+
+    def _reusable_bound_checks(self, record, context):
+        keys = context.get('bound_reuse_keys', {})
+        if not keys or self._pending_directions():
+            return {}
+        available = {}
+        for prior in reversed(self._records):
+            if prior.role != 'worker' or prior.index >= record.index:
+                continue
+            receipt = prior.watcher_result.get('candidate_checks', {})
+            previous = receipt.get('context', {})
+            matching = {command: spec for command, spec in previous.get('bound_reuse_keys', {}).items()
+                        if keys.get(command) == spec and command not in available}
+            comparable = ('tree', 'publication_tree', 'business_update_count', 'requirement_cycle',
+                          'direction_ids', 'check_timeout_s', 'check_source_aliases', 'configured_checks', 'quality_policy')
+            if (not matching or any(context.get(key) != previous.get(key) for key in comparable)
+                    or not receipt.get('passed') or not candidate_checks.valid(receipt, self.run_dir, previous)):
+                continue
+            for command, result in zip(previous['commands'], receipt['checks']):
+                if command in matching and result['command'] == redact(command) and result['status'] == 'passed':
+                    available[command] = result, receipt['logs'][result['log']], matching[command]
+            if available.keys() == keys.keys():
+                break
+        return available
 
     def _supplemental_check_context(self, record):
         task = self.function_tasks.current
@@ -329,8 +415,19 @@ class AcceptanceChecks:
                     raise ValueError('Test lacks approval')
             except (OSError, ValueError) as exc:
                 raise ValueError('这个测试尚未获准由 Watcher 补跑：' + name) from exc
-            if executable not in commands:
-                additions.append({**item, 'command': executable})
+            request = {key: value for key, value in item.items() if key != 'git_tree'}
+            if tree := item.get('git_tree'):
+                if tree != context.get('publication_tree'):
+                    raise ValueError('按测试路径补验时，须绑定当前派单登记的发布树。')
+                try:
+                    executable = check_git_tree.supplemental_command(
+                        self.config.cwd, executable, {'git_tree': tree, 'base': ''}, commands)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise ValueError('无法核对发布树中的原测试对象：' + name) from exc
+                request.update(git_tree=tree, base='', check_id='test:' + name,
+                               binding=candidate_checks.digest(self._candidate_check_context(record, fixed_only=True)))
+            if executable is not None and executable not in commands:
+                additions.append({**request, 'command': executable})
                 commands.add(executable)
         self._save_supplemental_checks(record, additions)
 
@@ -506,10 +603,12 @@ class AcceptanceChecks:
                         break
                     prior_results.append(result)
             compare = lambda value: {key: item for key, item in value.items()
-                                     if key not in {'commands', 'supplemental_checks'}}
+                                     if key not in {'commands', 'supplemental_checks', 'bound_reuse_keys'}}
             if (context.get('supplemental_checks') and previous.get('passed')
                     and candidate_checks.valid(previous, self.run_dir, old)
                     and compare(old) == compare(context)
+                    and old.get('bound_reuse_keys', {}) == {
+                        command: key for command, key in context.get('bound_reuse_keys', {}).items() if command in old['commands']}
                     and len(old['commands']) < len(context['commands'])
                     and old['commands'] == context['commands'][:len(old['commands'])]):
                 prior_results = previous['checks']
@@ -524,6 +623,7 @@ class AcceptanceChecks:
         scope_gaps = []
         local_keys = self._local_check_keys(context)
         reusable = self._reusable_local_checks(context, local_keys)
+        reusable.update(self._reusable_bound_checks(record, context))
         # Early precondition failures may return without executing a command.
         # Never attach the preceding attempt's snapshot to this new receipt.
         self._write_acceptance_snapshot(record.index, record.tree, context['final'], [], [], True, False)
@@ -531,6 +631,8 @@ class AcceptanceChecks:
             # A structural scope defect belongs to the reviewer/worker repair
             # path. Do not run an assignment's tests on an unauthorized edit.
             scope_gaps = self._function_scope_problems() if self._function_gate else []
+            if context.get('publication_check_error'):
+                scope_gaps.append(context['publication_check_error'])
             if scope_gaps:
                 verdict.gaps.extend(scope_gaps)
             else:
@@ -594,10 +696,14 @@ class AcceptanceChecks:
     def _reuse_local_check(self, index, number, command, saved, tree, results):
         if saved is None:
             return False
-        from auto_moniter.local_tests import reuse_key
+        from auto_moniter.local_tests import bound_reuse_key, reuse_key
 
         result, digest, key = saved
-        if reuse_key(self.config.cwd, command) != key:
+        if isinstance(key, dict):
+            valid = bound_reuse_key(self.config.cwd, command, key['inputs']) == key['key']
+        else:
+            valid = reuse_key(self.config.cwd, command) == key
+        if not valid:
             return False
         original = self.run_dir / result['log']
         try:
@@ -1115,7 +1221,9 @@ class AcceptanceChecks:
         if self.config.function_dispatch and (not self.function_tasks.current
                 or worker.verdict.task_id != self.function_tasks.current['id']):
             return None
-        if not _accepted(worker.verdict) and not rejected_audit and not function_ready:
+        pending_handoff = bool(review and (review.watcher_result.get('pending_local_checks')
+                                           or review.watcher_result.get('pending_verification_handoff')))
+        if not (_accepted(worker.verdict) or rejected_audit or function_ready or pending_handoff):
             return None
         publication = getattr(self.git_history, 'last_business_commit', {})
         published = publication.get('round') == worker.index and publication.get('candidate_tree') == self.git_history.candidate.get('commit') if publication else False
@@ -1125,7 +1233,8 @@ class AcceptanceChecks:
             delivered_ids.intersection_update(review.verdict.module_ids)
         if published and delivered_ids and all(self.modules.items.get(k, {}).get('status') == 'accepted' for k in delivered_ids):
             return None
-        if review and not (review.failure or review.interruption or review.verdict.parse_error or rejected_audit or published or ready):
+        if review and not (review.failure or review.interruption or review.verdict.parse_error
+                           or pending_handoff or rejected_audit or published or ready):
             return None
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != worker.tree:
             return None

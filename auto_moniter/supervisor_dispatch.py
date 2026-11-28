@@ -477,6 +477,18 @@ class FunctionDispatch:
                                           for name in item['task'].get('test_files', [])),
                                     ])))
         if not foreign:
+            if task.get('publication_check_ids'):
+                if not isinstance(self.git_history, ApprovedHistory) or not self.git_history.business_commits:
+                    raise ValueError('实际发布树检查需要启用 Git 发布记录。')
+                if task.get('kind') == 'verification':
+                    head = self.git_history.business_head['commit']
+                    if not head:
+                        raise ValueError('只读发布树检查需要已登记的业务版本。')
+                    try:
+                        tree = self.git_history.git('rev-parse', head + '^{tree}').decode().strip()
+                        self._publication_check_plan(task, tree)
+                    except (OSError, ValueError, subprocess.SubprocessError, KeyError) as exc:
+                        raise ValueError('当前发布树检查无法派发。' + str(exc)) from exc
             commands = None
             if task['delivery_scope'] == 'function' and task.get('kind') != 'verification':
                 commands = {command for index, command in enumerate(self.config.checks, 1)
@@ -644,7 +656,8 @@ class FunctionDispatch:
                    'round': worker.index, 'tree': worker.tree, 'checks_digest': receipt['digest'],
                    'configured_checks': candidate_checks.digest(self.config.checks),
                    'directions': self._dispatch_directions}
-        handoff = field_handoff.activate(self.run_dir, binding)
+        with self.directions.lock():
+            handoff = field_handoff.activate(self.run_dir, binding)
         if not handoff:
             return None, None
         if not (field_handoff.ready(handoff) or field_handoff.pending_fallback(handoff)):
@@ -672,12 +685,14 @@ class FunctionDispatch:
             return True
         self._event('supplemental_checks_rejected', task_id=worker.verdict.task_id,
                     round=worker.index, reason=reason)
-        kind = 'verification_evidence' if review.verdict.git_tree_checks else 'planning'
+        on_tree = review.verdict.git_tree_checks or any(item.get('git_tree') for item in review.verdict.supplemental_checks)
+        kind = 'verification_evidence' if on_tree else 'planning'
         return self._consult_referee(kind, reason, records, candidate=worker) in {
             'replan', 'retry_reviewer', 'run_git_tree_checks'}
 
     def _route_verification_checks(self, worker, review_record, records):
         """Resolve local work before opening a handoff for external evidence."""
+        review_record.watcher_result.pop('pending_local_checks', None)
         review = review_record.verdict
         if self._continue_verification_planning(worker, review_record, records):
             return True, ''
@@ -689,7 +704,8 @@ class FunctionDispatch:
                 review.blockers.append(reason)
                 if self._continue_verification_planning(worker, review_record, records, reason=reason):
                     return True, ''
-                return False, 'Git 候选补验请求未通过校验。' + reason if review.git_tree_checks else ''
+                on_tree = review.git_tree_checks or any(item.get('git_tree') for item in review.supplemental_checks)
+                return False, 'Git 候选补验请求未通过校验。' + reason if on_tree else ''
             review_record.watcher_result.update(status='blocked', reasons=['已安排 Watcher 补验。'])
             self._write_state(records, 'running', 0, '', worker.tree)
             return True, ''
@@ -700,8 +716,112 @@ class FunctionDispatch:
             review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
             self._write_state(records, 'running', 0, '', worker.tree)
             action = self._consult_referee('verification_evidence', '；'.join(review.blockers), records, candidate=worker)
-            return action in {'run_git_tree_checks', 'retry_reviewer', 'replan'}, ''
+            if action in {'run_git_tree_checks', 'retry_reviewer', 'replan'}:
+                return True, ''
+            if review.repair_steps is not None:
+                return False, '本轮尚无可执行的补验或现场交接。' + '；'.join(review.blockers)
         return False, ''
+
+    def _resume_local_check_handoff(self, worker, records):
+        review = next((row for row in reversed(records) if row.role == 'reviewer' and row.index == worker.index), None)
+        if not review or not (binding := review.watcher_result.get('pending_local_checks')):
+            return
+        review.watcher_result.pop('pending_local_checks')
+        receipt = worker.watcher_result.get('candidate_checks', {})
+        if (binding == receipt.get('digest') and (review.verdict.supplemental_checks or review.verdict.git_tree_checks)
+                and not self._function_reviewer_report_errors(review.verdict, worker)):
+            try:
+                self._queue_supplemental_checks(worker, review.verdict)
+            except ValueError as exc:
+                self._event('supplemental_checks_rejected', round=worker.index, reason=str(exc))
+            else:
+                review.watcher_result.update(status='blocked', reasons=['已恢复待执行的 Watcher 补验。'])
+                self._event('supplemental_checks_resumed', round=worker.index, task_id=worker.verdict.task_id)
+        self._write_state(records, 'running', 0, '', worker.tree)
+
+    def _apply_verification_repair(self, worker, review_record, records):
+        review = review_record.verdict
+        previous_id = self.function_tasks.current['id']
+        staged = self._stage_verification_repair(review)
+        if self.config.full_function_plan and self._complete_function_plan_ready():
+            remaining = function_plan.waiting(self.function_plan, staged)
+            if staged.current['delivery_scope'] == 'requirement':
+                remaining = [item for item in remaining if item['id'] != previous_id]
+            try:
+                self.function_plan = self._validate_complete_function_plan(
+                    [staged.current, *remaining], staged, self.modules.items, self.requirements_review)
+            except ValueError as exc:
+                self._planning_rejection = {'task_id': staged.current['id'], 'reason': str(exc)[:2000]}
+            else:
+                self._planning_rejection = None
+        self.function_tasks = staged
+        self._dispatch_directions = list(self._direction_ids['reviewer'])
+        self._save_worker_handoff(worker, review_record, staged.current)
+        review_record.watcher_result.pop('pending_verification_handoff', None)
+        self._record_assignment(staged.current)
+        self._event('verification_repair_assigned', verification_task=previous_id, task_id=staged.current['id'])
+        self._write_state(records, 'running', 0, '', worker.tree)
+
+    def _write_field_handoff(self, worker, review_record, records, *, reopen=False, handoff=None):
+        from auto_moniter import field_handoff
+
+        review = review_record.verdict
+        review_record.watcher_result.update(status='blocked', reasons=list(review.blockers))
+        self._write_state(records, 'running', 0, '', worker.tree)
+        with self.directions.lock():
+            state = requirement_context.read(self.run_dir / 'state.json', limit=32 * 1024 * 1024)
+            binding = field_handoff.binding(state)
+            if reopen and handoff and handoff['binding'] == binding:
+                field_handoff.reopen(self.run_dir, handoff, review.blockers, review.field_handoffs)
+            elif field_handoff.read(self.run_dir).get('binding') != binding:
+                field_handoff.configure(self.run_dir, state, review.field_handoffs or [
+                    {'kind': 'observation', 'title': blocker[:300], 'owner': '任务负责人'}
+                    for blocker in review.blockers[:12]
+                ], automatic=True)
+        if review_record.watcher_result.pop('pending_verification_handoff', None):
+            self._write_state(records, 'running', 0, '', worker.tree)
+
+    def _resume_verification_handoff(self, worker, records):
+        review = next((row for row in reversed(records) if row.role == 'reviewer' and row.index == worker.index), None)
+        if not review or not (pending := review.watcher_result.get('pending_verification_handoff')):
+            return False
+        receipt = worker.watcher_result.get('candidate_checks')
+        context = self._candidate_check_context(worker)
+        if (not self._verification_only() or self._pending_directions() or self._unplanned_directions()
+                or self._business_head_changed() or not candidate_checks.valid(receipt, self.run_dir, context)
+                or pending['checks_digest'] != receipt['digest']
+                or self._function_reviewer_report_errors(review.verdict, worker)):
+            review.watcher_result.pop('pending_verification_handoff', None)
+            return False
+        try:
+            self._direction_ids['reviewer'] = list(context['direction_ids'])
+            if review.verdict.next_task:
+                self._apply_verification_repair(worker, review, records)
+            else:
+                self._write_field_handoff(worker, review, records, reopen=pending.get('reopen', False),
+                                          handoff=self._field_handoff_at_revision(pending.get('revision', '')))
+        except (OSError, ValueError, KeyError) as exc:
+            review.watcher_result.pop('pending_verification_handoff', None)
+            self._event('verification_handoff_rejected', round=worker.index, reason=str(exc))
+            return False
+        self._event('verification_handoff_resumed', round=worker.index, task_id=review.verdict.task_id)
+        return True
+
+    def _field_handoff_at_revision(self, revision):
+        from auto_moniter import field_handoff
+
+        value = field_handoff.read(self.run_dir)
+        return value if value.get('revision') == revision else {}
+
+    def _ready_deferred_tasks(self, tree):
+        from auto_moniter import field_handoff
+
+        ready = [value for _, value in field_handoff.saved_handoffs(self.run_dir) if field_handoff.ready(value)]
+        if not ready:
+            return set()
+        state = self.directions.read('state.json', 32 * 1024 * 1024)
+        return {value['binding']['task_id'] for value in ready
+                if field_handoff.deferred_state(self.run_dir, state, value, tree=tree)}
 
     def _advance_local_assignment(self, records, *, missing_inputs=False, field_waiting=False):
         if (self.requirements_review.get('limited_dispatch') or not self._complete_function_plan_ready()
@@ -724,11 +844,12 @@ class FunctionDispatch:
             except (OSError, ValueError):
                 return False
         waiting = function_plan.waiting(self.function_plan, self.function_tasks)
-        for task in waiting:
+        ready = self._ready_deferred_tasks(tree)
+        for task in sorted(waiting, key=lambda item: item['id'] not in ready):
             if task['delivery_scope'] == 'requirement' or self._assignment_repository_conflict(task):
                 continue
             if field_waiting and (task.get('kind') != 'verification' or task['delivery_scope'] != 'function'
-                                  or task['id'] in waiting_ids):
+                                  or task['id'] in waiting_ids and task['id'] not in ready):
                 continue
             staged = function_tasks.FunctionTasks(self.function_tasks.export())
             staged.current = None
@@ -906,6 +1027,8 @@ class FunctionDispatch:
             (verdict.task_status not in ('done', 'incomplete'), 'task_status must be done or incomplete'),
             (verdict.next_task is not None, 'next_task must be null; only the reviewer assigns the next task'),
             (verdict.supplemental_checks or verdict.git_tree_checks, 'Only the reviewer may request supplemental checks'),
+            (verdict.repair_steps, '只有 Reviewer 可以下发返工步骤。'),
+            (verdict.field_handoffs, '只有 Reviewer 可以申请现场补证。'),
             (verdict.modules, 'modules must be []; the worker cannot redefine modules'),
             (set(verdict.module_ids) - set(delivery_modules), 'module_ids may contain only ' + ', '.join(delivery_modules)),
             (verdict.status == 'done' and (expected == 'function' or verdict.scope != expected
@@ -1041,6 +1164,10 @@ class FunctionDispatch:
             raise ValueError('Verification repair must use a new implementation task ID')
         staged.current = None
         staged.assign(review.next_task, self.modules.items)
+        if (staged.current['delivery_scope'] == 'requirement'
+                and not set(self.function_tasks.current.get('publication_check_ids', []))
+                <= set(staged.current.get('publication_check_ids', []))):
+            raise ValueError('替代最终验收的修复派单须保留原发布树检查。')
         self._validate_new_assignment_tests(staged.current)
         problems = function_plan.assertion_problems(staged.current)
         if problems:
@@ -1048,12 +1175,33 @@ class FunctionDispatch:
         self._validate_function_plan(staged, self.modules.items, self.requirements_review)
         return staged
 
-    def _function_reviewer_report_errors(self, review):
+    def _function_reviewer_report_errors(self, review, worker=None):
         """Check the report protocol before entering the function handoff."""
         task = self.function_tasks.current
         if not task or review.task_id != task['id'] or review.task_status not in ('accepted', 'changes_required'):
             return ['Reviewer must conclude on the dispatched function ID']
         local_checks = review.supplemental_checks or review.git_tree_checks
+        if review.repair_steps:
+            if self._verification_only() or review.task_status != 'changes_required' or review.next_task is not None:
+                return ['返工步骤只能交给当前有写入权限的实现派单。']
+            protected = self.quality.protected(self.config.cwd)
+            writable = (set(function_tasks.writable_files(task)) - set(task.get('test_files', []))
+                        | set(self._writable_function_tests(task)))
+            writable = {path for path in writable if str(self.config.cwd / path) not in protected}
+            selected = set(task['check_ids'])
+            for step in review.repair_steps:
+                if step['criterion_id'] not in task['criterion_ids'] or step['path'] not in writable:
+                    return ['返工步骤须引用当前派单的验收条目和获准修改的文件。']
+                if (step['check_id'] and step['check_id'] not in selected
+                        or step['log'] and not step['check_id']):
+                    return ['返工步骤须引用当前派单的检查编号，引用检查日志时须同时提供该编号。']
+            if worker is not None and any(step['log'] for step in review.repair_steps):
+                receipt = worker.watcher_result.get('candidate_checks')
+                if not candidate_checks.valid(receipt, self.run_dir, self._candidate_check_context(worker)):
+                    return ['返工步骤引用了当前候选无法核对的检查回执。']
+                logs = {row['log']: row.get('check_ids', []) for row in self._candidate_receipt_summary(receipt)['checks']}
+                if any(step['log'] and step['check_id'] not in logs.get(step['log'], []) for step in review.repair_steps):
+                    return ['返工步骤引用的检查编号与当前候选的日志不对应。']
         if review.supplemental_checks and review.git_tree_checks:
             return ['每份补验结论只能选择按测试路径或按 Git 候选申请。']
         if review.field_handoffs and (task.get('kind') != 'verification'
@@ -1067,11 +1215,17 @@ class FunctionDispatch:
             verification = task.get('kind') == 'verification'
             repair = (verification and review.next_task is not None and review.next_task.get('kind') != 'verification')
             if (self._review_approved(review) or (review.next_task is not None and not repair)
-                    or not (review.gaps or review.blockers or local_checks)):
+                    or not (review.gaps or review.blockers or local_checks or review.repair_steps)):
                 return ['Rejected function requires focused gaps and cannot dispatch another task']
+            if not verification and not review.blockers and review.repair_steps == []:
+                return ['实现派单需要返工时，请在 repair_steps 填写可执行的步骤、文件和预期结果。']
             if verification and not repair and not (review.blockers or local_checks):
                 return ['Read-only verification cannot implement the reported fixes. Provide a bounded implementation '
                         'next_task, or identify the external prerequisite in blockers if no repair can run.']
+            if (worker is not None and verification and not repair and review.repair_steps is not None
+                    and not (local_checks or review.field_handoffs)
+                    and not (self.config.referee and self._git_tree_check_options(worker))):
+                return ['只读派单须指定补跑的获准检查、具体修复派单或现场执行方及所需证据。']
             if repair:
                 try:
                     self._stage_verification_repair(review)
@@ -1093,6 +1247,36 @@ class FunctionDispatch:
         if expected == 'requirement' and review.next_task is not None:
             errors.append('Final delivery cannot include another implementation assignment')
         return errors
+
+    def _save_worker_handoff(self, worker, review_record, task):
+        review = review_record.verdict
+        review_record.watcher_result['worker_handoff'] = {
+            'action': 'repair', 'source_task_id': review.task_id, 'target_task_id': task['id'],
+            'task_digest': candidate_checks.digest(task), 'round': worker.index, 'tree': worker.tree,
+            'checks_digest': worker.watcher_result.get('candidate_checks', {}).get('digest', ''),
+            'revision': self.directions.revision(self.config.requirement)['sha256'],
+            'business_update_count': self._business_update_count,
+            'check_plan_digest': self._handoff_check_plan_digest(task),
+            'steps': review.repair_steps or [],
+            **({'findings': review.gaps, 'evidence': review.evidence} if task['id'] != review.task_id else {}),
+        }
+
+    def _worker_handoff(self, task, tree):
+        latest = next((row for row in reversed(self._records)
+                       if row.role == 'reviewer' and (row.verdict.task_id == task['id']
+                           or row.watcher_result.get('worker_handoff', {}).get('target_task_id') == task['id'])), None)
+        if not latest:
+            return {}
+        handoff = latest.watcher_result.get('worker_handoff', {})
+        if (handoff and handoff['task_digest'] == candidate_checks.digest(task) and handoff['tree'] == tree
+                and handoff['business_update_count'] == self._business_update_count
+                and handoff['check_plan_digest'] == self._handoff_check_plan_digest(task)
+                and handoff['revision'] == self.directions.revision(self.config.requirement)['sha256']):
+            return handoff
+        return {}
+
+    def _handoff_check_plan_digest(self, task):
+        return candidate_checks.digest([self._assignment_check_commands(task), self.config.check_source_aliases])
 
     def _review_function(self, worker, review, index, tree):
         task = self.function_tasks.current
@@ -1128,7 +1312,10 @@ class FunctionDispatch:
                 self._planning_rejection = {'task_id': str((candidate or {}).get('id',''))[:120],
                     'reason':'Reviewer must supply an updated complete function plan before the next dispatch'}
                 return staged
-            candidate = planned
+            if candidate is None:
+                ready = self._ready_deferred_tasks(tree)
+                candidate = next((item for item in waiting if item['id'] in ready
+                                  and set(item['depends_on']) <= {row['task']['id'] for row in staged.accepted}), planned)
         if candidate is not None:
             if self._function_gate:
                 try:
@@ -1158,6 +1345,11 @@ class FunctionDispatch:
         task = self.function_tasks.current
         if self._function_gate:
             selected = self._function_check_catalog(task)
+            if task.get('publication_check_ids'):
+                worker = next(row for row in reversed(self._records)
+                              if row.role == 'worker' and row.index == review_record.index)
+                context = worker.watcher_result['candidate_checks']['context']
+                selected.update((item['check_id'], item['command']) for item in context['publication_checks'])
             staged.accepted[-1]['verification'] = {key: self._passed_function_checks[selected[key]]
                                                    for key in task['check_ids']}
             if task.get('kind') == 'integration':

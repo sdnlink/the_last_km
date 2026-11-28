@@ -109,6 +109,15 @@ class RefereeTests(unittest.TestCase):
         self.assertIn('observed=0', (self.run_dir / '001-check-05.log').read_text())
         self.assertIn('source_verified=true', (self.run_dir / '001-check-05.log').read_text())
         self.assertIn('return 42', (self.root / 'app.py').read_text())
+        summary = json.JSONDecoder().raw_decode(
+            reviewer.calls[-1]['prompt'].split('exact submitted candidate:\n', 1)[1])[0]
+        self.assertEqual(summary['task_id'], 'VERIFY')
+        self.assertEqual(summary['checks'][1]['check_ids'], ['check:2'])
+        self.assertNotIn('git_trees', summary['checks'][1])
+        self.assertEqual(summary['checks'][2]['git_trees'], [requests[1]['git_tree']])
+        self.assertEqual(summary['checks'][-1]['check_ids'], ['check:2'])
+        self.assertEqual(summary['checks'][-2]['base'], requests[0]['base'])
+        self.assertEqual(summary['not_run'], [])
 
     def test_reviewer_schedules_approved_checks_on_exact_tree(self):
         worker, initial, checks, requests = self.git_tree_scenario()
@@ -117,6 +126,74 @@ class RefereeTests(unittest.TestCase):
         reviewer = ScriptedProvider('reviewer', [initial, requested, result('VERIFY', 'accepted')])
         report = self.monitor(worker, reviewer, checks=checks, git_history='required', max_rounds=1).run()
         self.assert_candidate_resumed(report, worker, reviewer, requests)
+
+    def test_publication_plan_uses_git_tree_and_reuses_its_approved_receipt(self):
+        _, initial, checks, _ = self.git_tree_scenario()
+        head_tree = subprocess.check_output(
+            ['git', '-C', str(self.root), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+        (self.root / 'app.py').write_text('def parse_input(): return 99\n')
+        plan_body = json.loads(initial['text'])
+        first, final = plan_body['function_plan']
+        first['publication_check_ids'] = ['check:2']
+        second = {**first, 'id': 'NEXT', 'depends_on': ['VERIFY']}
+        final['depends_on'] = ['NEXT']
+        worker = FunctionWorker('worker', [result('VERIFY', 'done'), result('NEXT', 'done')])
+        reviewer = ScriptedProvider('reviewer', [planning(first, [first, second, final]),
+            result('VERIFY', 'accepted'), result('NEXT', 'accepted')])
+        report = self.monitor(worker, reviewer, checks=checks, git_history='required', max_rounds=2,
+                              quality_policy={'reusable_check_ids': ['check:2']}).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        candidates = [row.watcher_result['candidate_checks'] for row in report.records if row.role == 'worker']
+        self.assertEqual(len(candidates), 2)
+        for candidate in candidates:
+            self.assertTrue(candidate['passed'])
+            self.assertEqual(candidate['context']['publication_tree'], head_tree)
+            self.assertIn(head_tree, candidate['checks'][1]['command'])
+            log = (self.run_dir / candidate['checks'][1]['log']).read_text()
+            self.assertIn('project_root=', log)
+            self.assertIn('observed=42', log)
+        self.assertEqual(candidates[1]['checks'][1]['reused_from'], '001-check-02.log')
+        self.assertIn('return 99', (self.root / 'app.py').read_text())
+
+    def test_protected_supplemental_test_can_run_on_the_current_publication_tree(self):
+        worker, initial, checks, _ = self.git_tree_scenario()
+        head_tree = subprocess.check_output(
+            ['git', '-C', str(self.root), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+        (self.root / 'app.py').write_text('def parse_input(): return 0\n')
+        requested = result('VERIFY', 'changes_required', gaps=['发布候选缺少原专项回执'])
+        requested['verdict']['supplemental_checks'] = [
+            {'criterion_id': 'main:1', 'audit_id': 'AUD-1', 'path': 'test_behavior.py', 'git_tree': head_tree}]
+        accepted = result('VERIFY', 'accepted')
+        accepted['verdict']['issue_resolutions'] = [
+            {'id': 'AUD-1', 'summary': '发布树专项已通过', 'evidence': ['check:001-check-04.log']}]
+        reviewer = ScriptedProvider('reviewer', [initial, requested, accepted])
+        monitor = self.monitor(worker, reviewer, checks=checks, git_history='required', max_rounds=1,
+                               quality_policy={'protect_tests': True, 'verified_progress': False})
+        monitor.audit.record(['发布候选缺少原专项回执'], 1, ['main'])
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn('observed=0', (self.run_dir / '001-check-02.log').read_text())
+        self.assertIn('observed=42', (self.run_dir / '001-check-04.log').read_text())
+        self.assertIn('git_tree=' + head_tree, (self.run_dir / '001-check-04.log').read_text())
+
+    def test_resume_applies_a_saved_local_check_request_without_reasking_reviewer(self):
+        worker, initial, checks, requests = self.git_tree_scenario()
+        requested = result('VERIFY', 'changes_required', gaps=['候选缺少正式回执'])
+        requested['verdict']['git_tree_checks'] = requests
+        reviewer = ScriptedProvider('reviewer', [initial, requested])
+        options = dict(checks=checks, git_history='required', max_rounds=1)
+        monitor = self.monitor(worker, reviewer, **options)
+        with patch.object(monitor, '_route_verification_checks', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                monitor.run()
+        self.assertFalse((self.run_dir / '001-check-04.log').exists())
+        resumed_worker = FunctionWorker('worker', [])
+        reviewer = ScriptedProvider('reviewer', [result('VERIFY', 'accepted')])
+        report = self.monitor(resumed_worker, reviewer, resume=True, **options).run()
+        self.assert_candidate_resumed(report, worker, reviewer, requests)
+        self.assertEqual(resumed_worker.calls, [])
+        self.assertEqual(len(reviewer.calls), 1)
 
     def test_referee_corrects_unauthorized_tree_then_schedules_local_checks(self):
         worker, initial, checks, requests = self.git_tree_scenario()
@@ -198,6 +275,55 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 2))
         self.assertFalse((self.run_dir / 'referee-decisions.json').exists())
+
+    def test_repair_steps_are_checked_and_delivered_to_the_next_worker(self):
+        first = {**result('F1', 'done', status='done'), 'source': 'def parse_input(): return 1\n'}
+        second = {**result('F1', 'done', status='done'), 'touch': 'app.py'}
+        worker = FunctionWorker('worker', [first, second])
+        step = {'criterion_id': 'main:1', 'path': 'app.py', 'observed': '返回 1',
+                'expected': '返回 42', 'action': '将解析结果修正为 42',
+                'check_id': 'check:1', 'log': '001-check-01.log'}
+        rejected = result('F1', 'changes_required', gaps=['解析入口返回值错误'])
+        rejected['verdict']['repair_steps'] = [{**step, 'log': '001-check-99.log'}]
+        corrected = result('F1', 'changes_required', gaps=['解析入口返回值错误'])
+        corrected['verdict']['repair_steps'] = [step]
+        accepted = result('F1', 'accepted', status='done')
+        accepted['verdict']['issue_resolutions'] = [
+            {'id': 'AUD-1', 'summary': '已核对返回值为 42', 'evidence': ['app.py']}]
+        reviewer = ScriptedProvider('reviewer', [planning(final_task()), rejected, corrected, accepted])
+        monitor = self.monitor(worker, reviewer)
+        report = monitor.run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(len(worker.calls), 2)
+        self.assertIn('检查编号与当前候选的日志不对应', reviewer.calls[2]['prompt'])
+        prompt = worker.calls[1]['prompt']
+        handoff = json.JSONDecoder().raw_decode(prompt.split('按对应检查和预期结果验证。\n', 1)[1])[0]
+        self.assertEqual(handoff['steps'], [step])
+        self.assertEqual(handoff['target_task_id'], 'F1')
+        row = next(row for row in report.records if row.role == 'reviewer' and 'worker_handoff' in row.watcher_result)
+        self.assertEqual(row.watcher_result['worker_handoff'], handoff)
+        self.assertEqual(row.tree, handoff['tree'])
+        self.assertNotIn('001-check-99.log', prompt)
+
+    def test_verification_blocker_is_corrected_into_an_explicit_field_handoff(self):
+        verification = verification_task('VERIFY')
+        worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')])
+        generic = result('VERIFY', 'changes_required')
+        generic['verdict'].update(blockers=['缺现场观测'], repair_steps=[])
+        corrected = result('VERIFY', 'changes_required')
+        corrected['verdict'].update(blockers=['缺现场观测'], repair_steps=[], field_handoffs=[{
+            'kind': 'observation', 'title': '现场测量读回值', 'owner': '现场测试执行方',
+            'evidence_needed': '返回值、记录时间和候选版本',
+        }])
+        reviewer = ScriptedProvider('reviewer', [planning(verification), generic, corrected])
+        report = self.monitor(worker, reviewer).run()
+        self.assertEqual(report.status, 'action_required', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn('具体修复派单或现场执行方及所需证据', reviewer.calls[2]['prompt'])
+        handoff = json.loads((self.run_dir / 'field-handoff.json').read_text())
+        item, = handoff['items']
+        self.assertEqual(item['owner'], '现场测试执行方')
+        self.assertEqual(item['evidence_needed'], '返回值、记录时间和候选版本')
 
     def test_stale_read_only_candidate_returns_to_planning_before_running_checks(self):
         original = {**verification_task('VERIFY'), 'delivery_scope': 'function'}
@@ -376,6 +502,79 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual(len(reviewer.calls), 1)
         self.assertIn('field-check-archive-', reviewer.calls[0]['prompt'])
 
+    def test_resume_applies_saved_field_request_without_repeating_reviewer(self):
+        from auto_moniter import field_handoff
+
+        worker, responses = self.archive_scenario()
+        first = ScriptedProvider('reviewer', responses[:2])
+        with patch.object(field_handoff, 'configure', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.monitor(worker, first, max_rounds=1).run()
+        resumed = FunctionWorker('worker', [])
+        reviewer = ScriptedProvider('reviewer', [responses[2], result('VERIFY', 'accepted')])
+        report = self.monitor(resumed, reviewer, max_rounds=1, resume=True).run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertFalse(resumed.calls)
+        self.assertEqual(len(reviewer.calls), 2)
+        self.assertIn('You are the task Referee', reviewer.calls[0]['prompt'])
+        self.assertIn('field-check-archive-', reviewer.calls[1]['prompt'])
+
+    def test_saved_readonly_to_implementation_handoff_survives_restart(self):
+        repair = final_task('REPAIR')
+        verify = verification_task('VERIFY')
+        rejected = result('VERIFY', 'changes_required', gaps=['需要修正返回值'], next_task=repair)
+        worker = FunctionWorker('worker', [result('VERIFY', 'done', status='done')])
+        reviewer = ScriptedProvider('reviewer', [planning(verify), rejected])
+        monitor = self.monitor(worker, reviewer, max_rounds=2)
+        with patch.object(monitor, '_apply_verification_repair', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                monitor.run()
+        resumed = FunctionWorker('worker', [{**result('REPAIR', 'done', status='done'), 'touch': 'app.py'}])
+        accepted = result('REPAIR', 'accepted', status='done')
+        accepted['verdict']['issue_resolutions'] = [
+            {'id': 'AUD-1', 'summary': '已核对修复', 'evidence': ['app.py']}]
+        reviewer = ScriptedProvider('reviewer', [accepted])
+        report = self.monitor(resumed, reviewer, max_rounds=2, resume=True).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(len(resumed.calls), 1)
+        self.assertIn('"source_task_id": "VERIFY", "target_task_id": "REPAIR"', resumed.calls[0]['prompt'])
+        self.assertEqual(len(reviewer.calls), 1)
+
+    def test_console_collects_a_parked_executor_receipt_while_another_assignment_runs(self):
+        from auto_moniter import field_handoff
+        from console.lifecycle import collect_deferred_handoffs
+        from console.tasks import TaskStore
+
+        worker, responses = self.archive_scenario()
+        blocked = responses[1]['verdict']
+        blocked['field_handoffs'][0].pop('case_id')
+        monitor = self.monitor(worker, ScriptedProvider('reviewer', responses[:2]), referee=False)
+        self.assertEqual(monitor.run().status, 'action_required')
+        state_file = self.run_dir / 'state.json'
+        state = json.loads(state_file.read_text())
+        handoff = field_handoff.read(self.run_dir)
+        item = handoff['items'][0]
+        item['executor_task'] = 'child'
+        archived = f"field-handoff-{handoff['revision']}.json"
+        write_json(self.run_dir / archived, handoff)
+        (self.run_dir / field_handoff.FILE).unlink()
+        next_task = next(task for task in state['function_plan']['tasks'] if task['id'] == 'FINAL')
+        state['status'] = 'running'
+        state['function_tasks']['current'] = next_task
+        write_json(state_file, state)
+        store = object.__new__(TaskStore)
+        receipt = {key: '通过' for key in field_handoff.FIELDS['observation']}
+        submission = {'id': item['id'], 'revision': handoff['revision'],
+                      'binding': handoff['binding'], 'receipt': receipt}
+        with (patch.object(store, '_validate_handoff_task', return_value={'id': 'child'}),
+              patch.object(store, '_view', return_value={'status': 'done'}),
+              patch.object(store, '_executor_field_result', return_value=submission)):
+            meta = {'id': 'parent', 'cwd': str(self.root), 'run_dir': str(self.run_dir)}
+            self.assertEqual(collect_deferred_handoffs(store, meta, self.run_dir), {'VERIFY'})
+        self.assertTrue(field_handoff.ready(field_handoff.read(self.run_dir, archived)))
+        self.assertFalse((self.run_dir / field_handoff.FILE).exists())
+        self.assertEqual(monitor._ready_deferred_tasks(state['tree']), {'VERIFY'})
+
     def test_repeated_archive_request_waits_without_repeating_the_referee(self):
         worker, responses = self.archive_scenario()
         reviewer = ScriptedProvider('reviewer', [*responses, responses[1]])
@@ -441,17 +640,30 @@ class RefereeTests(unittest.TestCase):
         worker = self.worker()
         reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),
             decision('retry_reviewer'), result('F1', 'accepted', status='done')])
-        report = self.monitor(worker, reviewer).run()
+        report = self.monitor(worker, reviewer, failure_limit=1).run()
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (1, 5))
         self.assertTrue(all(call['read_only'] for call in reviewer.calls))
         self.assertIn('You are the task Referee', reviewer.calls[3]['prompt'])
-        self.assertIn('Referee scheduling decision', reviewer.calls[4]['prompt'])
+        self.assertIn('Watcher 已核对裁判的恢复安排', reviewer.calls[4]['prompt'])
+        self.assertIn('"action": "retry_reviewer"', reviewer.calls[4]['prompt'])
+        self.assertIn('"round": 1', reviewer.calls[4]['prompt'])
         self.assertEqual(self.journal()[0]['status'], 'applied')
         self.assertEqual([r.index for r in report.records if r.role == 'worker'], [1])
         self.assertEqual([r.index for r in report.records if r.role == 'reviewer'], [1, 1, 1])
         saved = json.loads((self.run_dir / 'state.json').read_text())
         self.assertEqual(saved['usage']['agent_calls'], 6)
+
+    def test_referee_corrects_a_wait_for_an_unregistered_condition(self):
+        worker = self.worker()
+        reviewer = ScriptedProvider('reviewer', [planning(final_task()), review_failure(), review_failure(),
+            decision('wait', wait_for='field_receipt'), decision('retry_reviewer', wait_for=''),
+            result('F1', 'accepted', status='done')])
+        report = self.monitor(worker, reviewer, failure_limit=1).run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn('等待条件尚未登记', reviewer.calls[4]['prompt'])
+        self.assertEqual(self.journal()[0]['decision']['action'], 'retry_reviewer')
 
     def test_repeated_worker_failures_get_one_directed_recovery(self):
         worker = FunctionWorker('worker', [
@@ -463,7 +675,10 @@ class RefereeTests(unittest.TestCase):
         report = self.monitor(worker, reviewer).run()
         self.assertEqual(report.status, 'done', report.summary)
         self.assertEqual((len(worker.calls), len(reviewer.calls)), (3, 3))
-        self.assertIn('Referee scheduling decision', worker.calls[2]['prompt'])
+        self.assertNotIn('Watcher 已核对裁判的恢复安排', worker.calls[1]['prompt'])
+        self.assertIn('Watcher 已核对裁判的恢复安排', worker.calls[2]['prompt'])
+        self.assertIn('"action": "retry_worker"', worker.calls[2]['prompt'])
+        self.assertNotIn('"action": "retry_worker"', reviewer.calls[-1]['prompt'])
         self.assertEqual(len(self.journal()), 1)
 
     def test_no_progress_limit_can_trigger_a_bounded_referee_recovery(self):

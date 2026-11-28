@@ -9,7 +9,7 @@ from auto_moniter.workspace import workspace_diff, workspace_snapshot
 from auto_moniter.verdict import Verdict, verdict_instructions
 from auto_moniter.runlog import clipped
 from auto_moniter.redaction import safe
-from auto_moniter import candidate_checks, function_tasks
+from auto_moniter import function_tasks
 from auto_moniter.approved_history import ApprovedHistory
 from auto_moniter import deployment, documentation_tasks
 from auto_moniter.skills import browser_guidance, guidance
@@ -19,8 +19,8 @@ from auto_moniter.supervisor_models import _accepted
 class AgentPrompts:
     """Build worker and reviewer prompts from the current assignment and evidence."""
 
-    def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None) -> str:
-        if self.config.task_type in ('deployment', 'documentation'):
+    def _worker_prompt(self, index: int, last_worker: Verdict | None, last_review: Verdict | None, *, tree='') -> str:
+        if not self.config.function_dispatch and self.config.task_type in ('deployment', 'documentation'):
             return '\n'.join([
                 ('You are the deployment execution agent. Carry out the original authorized operational task.'
                  if self.config.task_type == 'deployment' else 'You are the document analysis and editing agent.'),
@@ -38,7 +38,10 @@ class AgentPrompts:
             ])
         if self.config.function_dispatch:
             task = self.function_tasks.current
+            repair = self._worker_handoff(task, tree)
             return '\n'.join([
+                *([deployment.instructions('worker', self.config, self.run_dir)] if self.config.task_type == 'deployment' else []),
+                *([documentation_tasks.instructions('worker')] if self.config.task_type == 'documentation' else []),
                 'Verify the current assignment without editing the workspace.' if self._verification_only()
                 else 'Implement the current reviewer-approved assignment in the working directory.',
                 json.dumps(task, ensure_ascii=False),
@@ -50,9 +53,12 @@ class AgentPrompts:
                 'invalid command is absent from this current catalog. Report actual remaining implementation '
                 'defects; if code and focused regressions are ready, submit task_status=done for independent review. '
                 'Do not edit code solely to resolve a past watcher configuration error.',
+                *(['Watcher 已核对返工交接。只处理该派单范围内的步骤，按对应检查和预期结果验证。',
+                   json.dumps(safe(repair), ensure_ascii=False)] if repair else []),
                 'Latest review of this assignment (findings to verify within its scope):',
                 json.dumps({k: getattr(last_review, k) for k in ('summary','gaps','next_actions','blockers')},
-                           ensure_ascii=False) if last_review and last_review.task_id == task['id'] else '(none)',
+                           ensure_ascii=False) if last_review and last_review.task_id == task['id']
+                           and (not last_review.repair_steps or repair) else '(none)',
                 'Preserve earlier accepted functions and test assertions. Do not execute prose as watcher checks.',
             ])
         snapshot = workspace_snapshot(self.config.cwd, ignore_dir=self.run_dir)
@@ -219,7 +225,9 @@ class AgentPrompts:
                    'Adoption does not authorize any further test edits.']
                   if task and task.get('kind') == 'verification' and task['delivery_scope'] == 'function' else []),
                 *(['Fixed checks executed BEFORE this review for the exact submitted candidate:',
-                   json.dumps(safe(candidate_checks.review_summary(receipt)), ensure_ascii=False),
+                   json.dumps(safe(self._candidate_receipt_summary(receipt)), ensure_ascii=False),
+                   'Match check_ids and log for each report. git_trees describes the inputs of recognized Git-bound checks. '
+                   'publication_tree identifies the proposed publication separately. Verify the execution root in the log.',
                    'Each log starts with the executed command. Inspect failed or relevant logs as needed, '
                    'and use the worker round in state.json for the complete receipt. '
                    'Assess the requirement, implementation and observed failures in this review. '
@@ -229,9 +237,17 @@ class AgentPrompts:
                    'protected tests or other files. Acceptance still requires all mandatory checks to pass. '
                    'You own the delivery decision. Approve only after the required checks pass. '
                    'The watcher publishes the approved candidate without repeating the acceptance assessment.'] if receipt else []),
+                *(['实现派单需要返工时，请在 repair_steps 按执行顺序填写 criterion_id、path、observed、expected、'
+                   'action、check_id 和 log。path 须在当前可编辑范围，check_id 须属于派单。'
+                   '引用 Watcher 日志时填写对应编号和日志文件名，依据源码推断时 log 留空，未指定固定检查时 check_id 留空。'
+                   '接受、安排只读补验、现场交接或下发新修复派单时填 repair_steps=[]。'
+                   '确需等待外部执行时同时填写 field_handoffs，列出执行方和应返回的证据。']
+                   if self._function_gate else []),
                 *([guidance('review-evidence')] if receipt and task and self.config.task_type == 'code' else []),
                 *(['If an approved existing test needs an independent execution record, request it in supplemental_checks '
-                   'with path, criterion_id and audit_id. Use task_status=changes_required, next_task=null and describe '
+                   'with path, criterion_id, audit_id and git_tree. Use the exact recorded publication_tree in git_tree '
+                   'when the evidence must come from the publication candidate, or use an empty string for workspace checks. '
+                   'Use task_status=changes_required, next_task=null and describe '
                    'the missing evidence in gaps or blockers. Watcher derives the execution command. Do not request '
                    'modified tests, arbitrary commands or a check already present in the current receipt. '
                    'A resolved audit issue in this module may be cited to rerun its approved test on the current candidate. '
@@ -245,7 +261,8 @@ class AgentPrompts:
                    json.dumps(git_tree_options, ensure_ascii=False)] if git_tree_options else []),
                 *([browser] if browser else []),
                 *(["Dispatched assignment: " + json.dumps(self.function_tasks.current, ensure_ascii=False),
-                   function_tasks.verdict_contract('reviewer', self.function_tasks.current, module_ids=self.modules.items),
+                   function_tasks.verdict_contract('reviewer', task, module_ids=self.modules.items,
+                                                   full_plan=self.config.full_function_plan),
                    "Previously accepted function IDs: " + json.dumps([x['task']['id'] for x in self.function_tasks.accepted])]
                   if self.config.function_dispatch else []),
                 *([self._function_planning_contract()] if self._function_gate else []),
@@ -348,7 +365,7 @@ class AgentPrompts:
                 "Do not mark an issue resolved based only on a worker claim. Unresolved issues remain open across turns and resume.",
                 "A finding about completion report formatting or waiting for automatic checks does not require source edits. "
                 "If current code and evidence satisfy the assignment, close that invalid finding in this same review, "
-                "accept the function and dispatch the next task. Do not require the worker to send the same candidate again.",
+                "accept the function so Watcher can dispatch the next task. Do not require the worker to send the same candidate again.",
                 "When an existing issue remains open, prefix its gaps entry with its exact AUD ID (for example 'AUD-1: assertion still fails'). "
                 "This preserves its original description and scope instead of creating a duplicate under new wording.",
                 "For a new concrete defect, use MODULE/[CRITERION | PATH#SYMBOL | TRIGGER | OBSERVED] summary. "

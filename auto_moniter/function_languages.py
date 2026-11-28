@@ -170,6 +170,57 @@ def _rust_reference_tree(engine, data, tree):
     return engine.parse(bytes(masked)) if changed else tree
 
 
+def _import_type_arguments_tree(engine, data, tree):
+    # The pinned grammar can treat a generic argument containing
+    # import("module").Type as a runtime expression. Keep byte positions
+    # and use the original source for all scope hashes.
+    references = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == 'member_expression':
+            call = node.child_by_field_name('object')
+            prop = node.child_by_field_name('property')
+            if call is not None and call.type == 'call_expression' and prop is not None:
+                callee = call.child_by_field_name('function')
+                args = call.child_by_field_name('arguments')
+                if (callee is not None and callee.type == 'import' and args is not None
+                        and not call.has_error and args.named_child_count == 1
+                        and args.named_children[0].type == 'string'
+                        and data[call.end_byte:prop.start_byte].strip() == b'.'):
+                    references.append((call.start_byte, prop.start_byte, prop.end_byte))
+        stack.extend(node.named_children)
+    if not references:
+        return tree
+
+    def parse_with(replacements):
+        masked = bytearray(data)
+        for start, prop_start, _ in replacements:
+            masked[start:prop_start] = bytes(byte if byte in (10, 13) else 32 for byte in data[start:prop_start])
+        return engine.parse(bytes(masked))
+
+    def is_type_argument(parsed, span):
+        start, prop_start, prop_end = span
+        node = parsed.root_node.named_descendant_for_byte_range(prop_start, prop_end)
+        if (node is None or node.type != 'type_identifier'
+                or (node.start_byte, node.end_byte) != (prop_start, prop_end)):
+            return False
+        while node.parent is not None:
+            node = node.parent
+            if node.type == 'type_arguments':
+                return node.start_byte < start and not node.has_error
+        return False
+
+    trial = parse_with(references)
+    typed = [span for span in references if is_type_argument(trial, span)]
+    if not typed:
+        return tree
+    restored = trial if typed == references else parse_with(typed)
+    if restored.root_node.has_error or not all(is_type_argument(restored, span) for span in typed):
+        return tree
+    return restored
+
+
 def spans(source, symbol, name):
     data = source.encode()
     engine = parser(name)
@@ -178,6 +229,8 @@ def spans(source, symbol, name):
         tree = _rust_reference_tree(engine, data, tree)
     if name == 'swift' and tree.root_node.has_error:
         tree = _swift_conditional_tree(engine, data, tree)
+    if name in {'typescript', 'tsx'} and tree.root_node.has_error:
+        tree = _import_type_arguments_tree(engine, data, tree)
     if tree.root_node.has_error:
         stack = [tree.root_node]
         while stack:

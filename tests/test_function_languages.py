@@ -104,6 +104,31 @@ const Factory = createTable(() => <div />)
             self.assertEqual(original['body'], outside['body'])
             self.assertNotEqual(original['outside'], outside['outside'])
 
+    def test_tsx_import_type_argument_preserves_component_scope(self):
+        source = '''// 中文 😀
+const outside = () => import('./runtime').load
+export const Home = memo(() => {
+  const [modules] = useState<
+    import('./模块').ModuleItem[] | undefined
+  >()
+  return <div>{modules?.length}</div>
+})
+'''
+        path = Path('home.tsx')
+        first = function_languages.spans(source, 'Home', 'tsx')
+        self.assertEqual(len(first), 1)
+        start, end = first[0]
+        self.assertTrue(source[start:end].startswith('const Home = memo'))
+        self.assertIn("import('./模块').ModuleItem[]", source[start:end])
+        self.assertTrue(source[start:end].endswith('\n})'))
+        from auto_moniter.function_gate import source_state
+        initial = source_state(path, 'Home', source)
+        changed = source_state(path, 'Home', source.replace('./模块', './其他'))
+        self.assertEqual(initial['outside'], changed['outside'])
+        self.assertNotEqual(initial['body'], changed['body'])
+        with self.assertRaisesRegex(ValueError, 'Cannot parse valid TSX'):
+            function_languages.spans(source + '\nfunction broken( {', 'Home', 'tsx')
+
     def test_rust_reference_fallback_does_not_accept_real_syntax_errors(self):
         sources = ['fn run() { let raw = "x"; consume(&raw); }\nfn broken( {',
                    'fn run() { let x = &raw const; }', 'fn run() { consume(&raw unexpected); }']

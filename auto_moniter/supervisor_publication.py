@@ -94,7 +94,7 @@ class Publication:
         context = receipt.get('context') if isinstance(receipt, dict) else None
         if not (isinstance(context, dict) and context.get('final') and context.get('tree') == tree
                 and candidate_checks.valid(receipt, self.run_dir, context) and receipt['passed']
-                and set(self.config.checks).issubset(context['commands'])):
+                and candidate_checks.covers_configured_checks(context, self.config.checks)):
             return False
         if self.config.task_type != 'deployment':
             return True
@@ -117,12 +117,15 @@ class Publication:
                            and r.verdict.status == 'done' and not (r.failure or r.interruption)), None)
         if not conclusion:
             return ['缺少绑定最终候选的审查结论。']
-        original_commands = context.get('commands')
-        if (context.get('final') and context.get('tree') == tree and context.get('round') == conclusion.index
-                and isinstance(original_commands, list) and set(self.config.checks).issubset(original_commands)):
-            commands = original_commands
+        reuse_context = (context.get('final') and context.get('tree') == tree
+                         and context.get('round') == conclusion.index
+                         and candidate_checks.covers_configured_checks(context, self.config.checks))
+        if reuse_context:
+            commands = context['commands']
             retained = candidate_checks.retained_results(reference, self.run_dir, context)
         else:
+            if context.get('publication_checks'):
+                return ['发布树检查的候选绑定需要重新核对。']
             commands = self._acceptance_commands(True, conclusion.verdict.module_ids)
             retained = {}
         verdict = copy.deepcopy(conclusion.verdict)
@@ -132,7 +135,7 @@ class Publication:
                        for path in self.run_dir.glob(f'{index:03d}-check-*-attempt-*.log')
                        if path.stem.rsplit('-', 1)[1].isdigit()), default=0) + 1
         if self._delivery_checks(index, verdict, expected_tree=tree, function_commands=commands,
-                                 retained=retained, log_attempt=attempt):
+                                 retained=retained, log_attempt=attempt, receipt_context=context if reuse_context else None):
             return []
         return verdict.gaps[old_gaps:] or ['最终候选的验收复验未完成。']
 
@@ -395,6 +398,8 @@ class Publication:
         if not self._publication_boundary(reviewer):
             return False
         if self.git_history.business_commits:
+            if self._function_gate and (recovered := self._record_published_function(worker, reviewer)) is not None:
+                return recovered
             from auto_moniter.publication import PublicationRefused, publish
             write_json(self.run_dir / 'approval-ready.json', {'round': worker.index, 'tree': tree,
                 'candidate_tree': self.git_history.candidate['commit'], 'review': reviewer.verdict.to_dict(),
@@ -434,4 +439,32 @@ class Publication:
             self._checkpoint(reviewer,review_text,worker.git_checkpoint['commit'])
             self._event('approved_local_commit',commit=reviewer.git_checkpoint['commit'],round=worker.index)
         self._write_state(self._records,'running',0,'',tree)
+        return True
+
+    def _record_published_function(self, worker, reviewer):
+        history = self.git_history
+        publication = history.last_business_commit
+        if (publication.get('round') != worker.index
+                or publication.get('candidate_tree') != history.candidate.get('commit')):
+            return None
+        history.verify()
+        checkpoint = history.last_record
+        if (checkpoint.get('round') != worker.index or checkpoint.get('commit') != history.head
+                or checkpoint.get('business_commit') != publication
+                or history.last_worker.get('business_commit') != publication):
+            raise RecoveryError('已发布派单的 Git 记录不一致，无法恢复验收登记。')
+        path = (self.config.cwd.relative_to(history.root) / checkpoint['record']).as_posix()
+        payload = json.loads(history.git('show', history.head + ':' + path))
+        saved = payload.get('result', {})
+        approval = saved.get('watcher_result', {}).get('candidate_approval', {})
+        receipt = worker.watcher_result.get('candidate_checks', {})
+        if (payload.get('role') != 'reviewer' or saved.get('tree') != worker.tree
+                or saved.get('task_id') != self.function_tasks.current['id']
+                or saved.get('task_status') != 'accepted'
+                or not approval.get('checks_digest') or not receipt.get('digest')
+                or approval.get('context') != receipt.get('context')):
+            reviewer.verdict.gaps.append('已发布派单的原审查结论或检查回执发生变化，无法恢复验收登记。')
+            return False
+        worker.git_checkpoint, reviewer.git_checkpoint = history.last_worker, checkpoint
+        self._event('function_publication_recovered', task_id=self.function_tasks.current['id'], round=worker.index)
         return True

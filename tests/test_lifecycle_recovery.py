@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from auto_moniter import recovery_wait, referee
+from auto_moniter import candidate_checks, dispatch_inputs, field_handoff, recovery_wait, referee
 from auto_moniter.storage import write_json
 from auto_moniter.supervisor import RunConfig, Supervisor
 from auto_moniter.supervisor_dispatch import FunctionDispatch
@@ -14,10 +14,66 @@ from console.tasks import TaskError, TaskStore
 from tests.test_function_dispatch import FunctionWorker
 from tests.test_referee import decision, final_task, planning, review_failure
 from tests.test_supervisor import ScriptedProvider, _verdict
-from tests.test_function_dispatch import CHECK, result
+from tests.test_function_dispatch import CHECK, result, verification_task
 
 
 class LifecycleRecoveryTests(unittest.TestCase):
+    def test_input_wait_wakes_an_independent_ready_handoff_and_keeps_old_receipts(self):
+        from auto_moniter.workspace import workspace_fingerprint
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / 'run'
+            run.mkdir()
+            store = TaskStore(root / 'console', root)
+            meta = {'id': 'test', 'run_dir': str(run), 'managed': True, 'cwd': str(root)}
+            store._catalog = lambda: {'test': meta}
+            store._view = lambda *a, **kw: {'status': 'action_required', 'actions': ['resume']}
+            current, deferred = [{**verification_task(key), 'delivery_scope': 'function'}
+                                 for key in ('WAITING', 'DEFERRED')]
+            tree = workspace_fingerprint(root, ignore_dir=run)
+            receipt = candidate_checks.create(run, {'task': deferred, 'commands': []}, {'checks': []}, True)
+            summary = '仍在等待工作区输入'
+            state = {'status': 'action_required', 'cwd': str(root), 'checks': [], 'quality_policy': {},
+                     'function_tasks': {'current': current, 'accepted': []}, 'summary': summary,
+                     'function_plan': {'tasks': [current, deferred]}, 'rounds': [
+                         {'index': 1, 'role': 'worker', 'tree': tree, 'watcher_result': {'candidate_checks': receipt}},
+                         {'index': 1, 'role': 'reviewer', 'blockers': ['等待执行回执'],
+                          'task_status': 'changes_required', 'watcher_result': {'status': 'blocked'}},
+                     ]}
+            prior = {**state, 'function_tasks': {**state['function_tasks'], 'current': deferred}}
+            binding = field_handoff.binding(prior)
+            revision = 'a' * 32
+            filename = f'field-handoff-{revision}.json'
+            request = {'binding': binding, 'revision': revision, 'id': '1',
+                       'receipt': {'result': '原候选已核对'}}
+            handoff = {'binding': binding, 'revision': revision, 'items': [
+                {'id': '1', 'kind': 'observation', 'executor_task': 'existing-executor'},
+            ]}
+            write_json(run / filename, handoff)
+            write_json(run / 'state.json', state)
+            write_json(run / dispatch_inputs.WAIT_FILE, {'binding': dispatch_inputs.binding(current, root, [], {}, []),
+                       'inputs': ['missing.json'], 'summary': summary})
+            wait = recovery_wait.schedule(run, 'dispatch_inputs', 'resume', detail=summary)
+            write_json(run / recovery_wait.FILE, {**wait, 'retry_at': 0})
+            field_handoff.submit(run, prior, request, executor='existing-executor', filename=filename)
+            with patch.object(store, 'action') as action:
+                store.recover_field_handoffs()
+                action.assert_called_once_with('test', 'resume', {'deferred_handoff': True})
+            write_json(run / filename, handoff)
+            (root / 'app.py').write_text('new workspace contents\n')
+            store._validate_handoff_task = Mock(return_value={'id': 'existing-executor'})
+            store._executor_field_result = Mock(return_value=request)
+            store._view = lambda child, *a, **kw: (
+                {'status': 'done'} if child['id'] == 'existing-executor'
+                else {'status': 'action_required', 'actions': ['resume']})
+            with (patch.object(store, 'action') as action,
+                  patch('console.lifecycle.field_executors.bind') as bind):
+                store.recover_field_handoffs()
+                action.assert_not_called()
+                bind.assert_not_called()
+            self.assertTrue(field_handoff.ready(field_handoff.read(run, filename)))
+
     def test_incomplete_referee_decision_resumes_without_another_referee_call(self):
         class SimulatedCrash(BaseException):
             pass

@@ -21,6 +21,7 @@ def parser(*, exit_on_error=True):
     parser.add_argument('--scheme')
     parser.add_argument('--git-tree', action='append', default=[], help='Run against each exact Git tree')
     parser.add_argument('--test-blob', help='Require this test Git blob in every tree')
+    parser.add_argument('--setup-revision', type=json.loads, help=argparse.SUPPRESS)
     parser.add_argument('--expect-rust-test', action='append', default=[],
                         help='Keep and verify the named Cargo test passed during this unittest run')
     parser.add_argument('--record-cargo-root', action='store_true', help=argparse.SUPPRESS)
@@ -35,8 +36,8 @@ def main():
         else:
             from check_git_tree import run_bound
         return run_bound(args, Path(__file__).resolve())
-    if args.test_blob:
-        parser().error('--test-blob requires --git-tree')
+    if args.test_blob or args.setup_revision is not None:
+        parser().error('--test-blob and --setup-revision require --git-tree')
     if args.expect_rust_test or args.record_cargo_root:
         if args.runner != 'unittest':
             parser().error('--expect-rust-test requires --runner unittest')

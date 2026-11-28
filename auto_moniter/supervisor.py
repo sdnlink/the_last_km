@@ -130,7 +130,6 @@ class Supervisor(
         self.function_plan = None
         self._function_gate = self.config.function_dispatch
         self._function_baseline = None
-        self._passed_function_checks = {}
         self._local_check_receipt = None
         self._local_test_paths = []
         self._migration_context = {}
@@ -1004,6 +1003,9 @@ class Supervisor(
                         last_worker = verdict
                         continue
             if problem := self._candidate_input_wait():
+                if self._advance_local_assignment(records, missing_inputs=True):
+                    last_worker = last_review = None
+                    continue
                 return self._finish('action_required', problem, records, verdict)
             screened_review = self._repair_preflight(record, reviewer, last_review)
             check_failure = (['No current pre-review check result for this candidate']
@@ -1318,7 +1320,7 @@ class Supervisor(
                     review.gaps.extend(check_failure)
                     return self._finish_function_acceptance(review_record, records, check_failure)
                 try:
-                    next_functions = self._review_function(verdict, review, round_index, review_tree)
+                    next_functions = self._review_function(record, review_record, review_tree)
                 except ValueError as exc:
                     review.status = 'continue'
                     review_record.watcher_result.update(status='rejected', reasons=[str(exc)])

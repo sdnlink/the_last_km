@@ -244,11 +244,13 @@ def captcha_retryable(result):
             and (result.get('code') == 'captcha_timeout' or result.get('reason') == CAPTCHA_TIMEOUT))
 
 
-def poll(run, value, item, config, *, retry_captcha=False):
+def poll(run, value, item, config, *, retry_captcha=False, existing_only=False):
     """One detached execution per case, binding and config; read durable results on restart."""
     if config.get('execution_error'):
         return {'status': 'failed', 'reason': config['execution_error']}
     job, request = _job(run, value, item, config)
+    if existing_only:
+        return Directions(job).read('result.json') or {'status': 'running'}
     job.mkdir(parents=True, mode=0o700, exist_ok=True)
     result = Directions(job).read('result.json')
     if result and not retry_captcha:

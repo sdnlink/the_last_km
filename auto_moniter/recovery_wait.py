@@ -96,7 +96,7 @@ def controller_cleanup(run, state):
     context = receipt.get('context') if isinstance(receipt, dict) else None
     return bool(isinstance(context, dict) and context.get('final') and context.get('tree') == state.get('tree')
                 and receipt.get('passed') and candidate_checks.valid(receipt, run, context)
-                and set(state.get('checks') or []).issubset(context['commands'])
+                and candidate_checks.covers_configured_checks(context, state.get('checks') or [])
                 and marker.get('artifacts') == delivery_artifacts(run))
 
 

@@ -15,7 +15,7 @@ from auto_moniter.verdict import Verdict, parse_verdict
 from auto_moniter.runlog import clipped
 from auto_moniter.storage import write_json
 from auto_moniter.redaction import redact, safe
-from auto_moniter import candidate_checks, check_git_tree, function_tasks
+from auto_moniter import candidate_checks, check_git_tree, function_tasks, test_setup_revision
 from auto_moniter.live import LiveOutput
 from auto_moniter.git_history import GitHistoryError
 from auto_moniter.business_recovery import BusinessHeadChanged
@@ -172,16 +172,17 @@ class AcceptanceChecks:
                     log=log.name, reason=reason)
         return reason
 
-    def _candidate_check_context(self, record, *, fixed_only=False):
+    def _candidate_check_context(self, record, *, fixed_only=False, saved_publication_tree=None):
         task = self.function_tasks.current if self.config.function_dispatch else None
         final = task['delivery_scope'] == 'requirement' if task else record.verdict.scope == 'requirement'
         ids = [task['module_id']] if task else record.verdict.module_ids
         commands = (self._assignment_check_commands(task) if self._function_gate and task
                     else self._acceptance_commands(final, ids))
         publication = getattr(self.git_history, 'candidate', {})
+        publication_tree = (publication['business_tree'] if publication.get('round') == record.index
+                            and 'publication_paths' in publication else saved_publication_tree)
         context = {'round':record.index, 'tree':record.tree, 'task':task, 'final':final,
-                **({'publication_tree': publication['business_tree']} if publication.get('round') == record.index
-                   and 'publication_paths' in publication else {}),
+                **({'publication_tree': publication_tree} if publication_tree else {}),
                 'requirement_cycle':len(self.requirement_cycles)+1,
                 'business_update_count':self._business_update_count,
                 **({'deployment_evidence': deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)}
@@ -200,13 +201,18 @@ class AcceptanceChecks:
                 'acceptance':self.config.acceptance, 'quality_policy':self.config.quality_policy,
                 'direction_ids':[message['id'] for message in self.directions.messages()]}
         if task and task.get('publication_check_ids'):
+            last_publication = getattr(self.git_history, 'last_business_commit', {})
+            published_round = (last_publication.get('round') == record.index
+                               and publication.get('commit') == last_publication.get('candidate_tree')
+                               and last_publication.get('commit') == self.git_history.business_head['commit'])
             try:
-                bound = self._publication_check_plan(task, context.get('publication_tree'))
+                bound = self._publication_check_plan(task, context.get('publication_tree'),
+                    base=last_publication['parent'] if published_round else None)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 context['publication_check_error'] = '无法在实际发布树执行派单检查。' + str(exc)
             else:
                 context['publication_checks'] = bound
-                replacements = {item['original']: item['command'] for item in bound}
+                replacements = candidate_checks.publication_commands(context)
                 context['commands'] = list(dict.fromkeys(replacements.get(command, command) for command in commands))
         if not fixed_only:
             supplemental = record.watcher_result.get('supplemental_checks', [])
@@ -222,11 +228,12 @@ class AcceptanceChecks:
                 context['bound_reuse_keys'] = reusable
         return context
 
-    def _publication_check_plan(self, task, tree):
+    def _publication_check_plan(self, task, tree, *, base=None):
         if not tree or not isinstance(self.git_history, ApprovedHistory):
             raise ValueError('缺少 Watcher 登记的发布树。')
         catalog = self._function_check_catalog(task)
-        base = self.git_history.business_head['commit']
+        if base is None:
+            base = self.git_history.business_head['commit']
         if any(catalog[key] in getattr(self, '_check_aliases', {}) for key in task['publication_check_ids']):
             raise ValueError('发布树检查须使用 Git 隔离根，当前检查已配置其他源码入口。')
         return [{'check_id': key, 'git_tree': tree, 'original': catalog[key],
@@ -257,12 +264,14 @@ class AcceptanceChecks:
         requested = {item['command']: item for item in supplemental}
         manifest = {}
         for index, command in enumerate(commands, 1):
-            ids = [key for key, value in catalog.items() if value == command]
             request = requested.get(command, {})
+            ids = [key for key, value in catalog.items() if value == request.get('original', command)]
             if request.get('check_id') and request['check_id'] not in ids:
                 ids.append(request['check_id'])
             manifest[command] = {'position': index, 'check_ids': ids,
                                  **check_git_tree.describe_check(self.config.cwd, command)}
+            if approval := request.get('setup_approval'):
+                manifest[command]['setup_approval'] = approval
         return manifest
 
     def _candidate_receipt_summary(self, receipt):
@@ -282,7 +291,7 @@ class AcceptanceChecks:
         declared = self.quality.config.get('check_inputs', {})
         reusable = {}
         for command, row in checks.items():
-            if (not row.get('git_trees') or not (approved & set(row['check_ids']))
+            if (row.get('setup_approval') or not row.get('git_trees') or not (approved & set(row['check_ids']))
                     or command in getattr(self, '_check_aliases', {})):
                 continue
             inputs = sorted({path for key in row['check_ids'] for path in declared.get(key, [])})
@@ -415,21 +424,88 @@ class AcceptanceChecks:
                     raise ValueError('Test lacks approval')
             except (OSError, ValueError) as exc:
                 raise ValueError('这个测试尚未获准由 Watcher 补跑：' + name) from exc
-            request = {key: value for key, value in item.items() if key != 'git_tree'}
+            request = {key: value for key, value in item.items() if key not in {'git_tree', 'setup_revision'}}
+            revision = item.get('setup_revision')
             if tree := item.get('git_tree'):
                 if tree != context.get('publication_tree'):
                     raise ValueError('按测试路径补验时，须绑定当前派单登记的发布树。')
                 try:
                     executable = check_git_tree.supplemental_command(
-                        self.config.cwd, executable, {'git_tree': tree, 'base': ''}, commands)
+                        self.config.cwd, executable, {'git_tree': tree, 'base': ''}, commands,
+                        setup_revision=revision)
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise ValueError('无法核对发布树中的原测试对象：' + name) from exc
                 request.update(git_tree=tree, base='', check_id='test:' + name,
                                binding=candidate_checks.digest(self._candidate_check_context(record, fixed_only=True)))
             if executable is not None and executable not in commands:
+                if revision is not None:
+                    if not tree or not test_asset(name) or str(path) not in self.quality.protected(self.config.cwd):
+                        raise ValueError('测试准备修订仅适用于已锁定的正式测试文件和发布树。')
+                    blob = check_git_tree.registered_runner(self.config.cwd, executable).test_blob
+                    try:
+                        with path.open('rb') as source:
+                            revised = test_setup_revision.revised_source(source.read(128 * 1024 + 1), revision, blob)
+                    except OSError as exc:
+                        raise ValueError('无法读取受保护的测试准备代码。' + name) from exc
+                    request['setup_approval'] = self._approve_test_setup(
+                        record, request, revision, test_setup_revision.object_id(revised, blob))
                 additions.append({**request, 'command': executable})
                 commands.add(executable)
         self._save_supplemental_checks(record, additions)
+
+    def _approve_test_setup(self, record, request, revision, revised_blob):
+        from auto_moniter.directions import Directions
+
+        directions = self.directions.messages()
+        binding = {'task': self.function_tasks.current, 'tree': request['git_tree'],
+                   'receipt': record.watcher_result['candidate_checks']['digest'],
+                   'request': request, 'revision': revision, 'revised_blob': revised_blob,
+                   'reviewer': self._provider_config(), 'model': self._reviewer_model()}
+        name = f'test-setup-review-{candidate_checks.digest(binding)}.json'
+        saved = Directions(self.run_dir).read(name)
+        if not saved:
+            schema = self.schema_path
+            self.schema_path = self.run_dir / 'test-setup-review.schema.json'
+            try:
+                write_json(self.schema_path, {
+                    'type': 'object', 'additionalProperties': False,
+                    'properties': {'approved': {'type': 'boolean'}, 'summary': {'type': 'string'}},
+                    'required': ['approved', 'summary'],
+                })
+                index = 2300000 + self._agent_calls
+                prompt = ('独立复核这项只读补验的测试准备修订。读取原 Git 树上的测试文件和相关日志，'
+                          '逐一核对原测试入口、操作、断言与预期。仅当替换完整保留原有断言和验证行为、'
+                          '只修正失效的测试准备，且能在该候选上合法运行时填写 approved=true。'
+                          '若测试准备本身是本派单要验证的功能，或改动会跳过测试、屏蔽错误或改变预期，须退回。'
+                          '只返回判断和依据，不编辑文件，不验收业务候选。\n'
+                          + json.dumps(binding, ensure_ascii=False))
+                turn = self._invoke(self.config.reviewer, prompt, '', role='reviewer', index=index,
+                    model=self._reviewer_model(), extra_args=self.config.reviewer_extra_args,
+                    read_only=True, direction_snapshot=directions)
+                self._active_reviewer_id = turn.session_id
+            finally:
+                self.schema_path = schema
+                self._close_requirement_reviewer()
+            if turn.exit_code or turn.interruption or turn.timed_out:
+                raise ValueError(f'测试准备独立复核未完成。请查看 {turn.output_path.name}。')
+            try:
+                outcome = json.loads(turn.text)
+            except ValueError:
+                outcome = None
+            if (not isinstance(outcome, dict) or set(outcome) != {'approved', 'summary'}
+                    or type(outcome['approved']) is not bool or not isinstance(outcome['summary'], str)
+                    or not outcome['summary'].strip() or len(outcome['summary']) > 2000):
+                raise ValueError(f'测试准备独立复核未返回有效结论。请查看 {turn.output_path.name}。')
+            self._process_control()
+            if self._stop or self.directions.messages() != directions:
+                raise ValueError('测试准备复核期间收到新的控制指令或用户要求。')
+            self._supplemental_check_context(record)
+            saved = {**outcome, 'log': turn.output_path.name}
+            write_json(self.run_dir / name, saved, durable=True)
+        if saved.get('approved') is not True:
+            raise ValueError('测试准备修订未通过独立复核。请查看 ' + name + '。')
+        self._event('test_setup_revision_approved', round=record.index, path=request['path'], review=name)
+        return {'review': name, 'original_blob': revision['test_blob'], 'revised_blob': revised_blob}
 
     def _repair_preflight(self, record, reviewer, last_review):
         """Reject an incomplete repair before repeating costly delivery checks.
@@ -571,7 +647,6 @@ class AcceptanceChecks:
                       reused_from={'round':previous.index,'checks_digest':receipt['digest']})
         reused['digest'] = candidate_checks.digest({k:v for k,v in reused.items() if k != 'digest'})
         record.watcher_result['candidate_checks'] = reused
-        self._passed_function_checks = dict(reused['passed_commands'])
         self._delivery_tree = record.tree
         self._event('module_checks_reused_for_final' if context['final'] else 'module_checks_reused',
                     round=record.index, from_round=previous.index, tree=record.tree)
@@ -585,7 +660,6 @@ class AcceptanceChecks:
             record.watcher_result['supplemental_checks'] = context.get('supplemental_checks', [])
         previous = record.watcher_result.get('candidate_checks')
         if candidate_checks.valid(previous, self.run_dir, context) and previous['passed'] and previous['complete']:
-            self._passed_function_checks = dict(previous['passed_commands'])
             self._delivery_tree = record.tree
             self._event('candidate_checks_reused', round=record.index, tree=record.tree)
             return
@@ -617,7 +691,6 @@ class AcceptanceChecks:
                 record.watcher_result['candidate_checks_history'] = [
                     *record.watcher_result.get('candidate_checks_history',[])[-19:], archived]
         verdict = copy.deepcopy(record.verdict)
-        self._passed_function_checks = {}
         snapshot = {'checks':[]}
         passed = False
         scope_gaps = []
@@ -719,7 +792,6 @@ class AcceptanceChecks:
             return False
         target.write_bytes(content)
         results.append({**result, 'log': target.name, 'reused_from': result.get('reused_from', original.name)})
-        self._passed_function_checks[command] = target.name
         self._event('local_check_reused', round=index, tree=tree, log=target.name, source=original.name)
         return True
 
@@ -773,7 +845,7 @@ class AcceptanceChecks:
     @staticmethod
     def _git_tree_checks_failed(record):
         receipt = record.watcher_result.get('candidate_checks', {})
-        commands = {item['command'] for item in receipt.get('context', {}).get('supplemental_checks', [])
+        commands = {redact(item['command']) for item in receipt.get('context', {}).get('supplemental_checks', [])
                     if 'git_tree' in item}
         return any(item['command'] in commands and item['status'] != 'passed'
                    for item in receipt.get('checks', []))
@@ -878,7 +950,8 @@ class AcceptanceChecks:
 
     def _delivery_checks(self, index: int, verdict: Verdict, *, final: bool = True, expected_tree: str = "",
                          module_ids: set[str] | None = None, function_commands: list[str] | None = None,
-                         pre_review=False, reusable=None, prior_results=(), retained=None, log_attempt=0) -> bool:
+                         pre_review=False, reusable=None, prior_results=(), retained=None, log_attempt=0,
+                         receipt_context=None) -> bool:
         """Execute user-selected checks independently of the agents' claims."""
         if final and self.config.task_type == 'deployment':
             try:
@@ -946,8 +1019,6 @@ class AcceptanceChecks:
         commands = self._acceptance_commands(final, verdict.module_ids if module_ids is None else module_ids, function_commands)
         failures = []
         check_results = list(prior_results)
-        self._passed_function_checks.update({command: result['log']
-                                             for command, result in zip(commands, prior_results)})
         budget_stop = None
         for number, command in enumerate(dict.fromkeys(commands), 1):
             if number <= len(prior_results):
@@ -1026,8 +1097,6 @@ class AcceptanceChecks:
                 self._stop_reason = 'Acceptance environment unavailable; prepare dependencies before resuming. See ' + path.name
                 failures.append(self._stop_reason)
                 break
-            if check_results[-1]['status'] == 'passed' and self._function_gate:
-                self._passed_function_checks[command] = path.name
             self._progress_reset |= self.quality.check_result(command, not (result.exit_code or result.timed_out or result.interruption))
         after = workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir)
         published_source_changed = after == before and self._checks_changed_published_source(before)
@@ -1066,7 +1135,7 @@ class AcceptanceChecks:
             verdict.next_actions.append('Read the new human instructions before the next delivery attempt.')
             return False
         if final and not pre_review:
-            context = {'round': index, 'tree': before, 'final': True, 'commands': commands}
+            context = {**(receipt_context or {}), 'round': index, 'tree': before, 'final': True, 'commands': commands}
             if self.config.task_type == 'deployment':
                 context['deployment_evidence'] = deployment.fingerprint(self.config.cwd, self.run_dir, self.config.requirement)
             self._final_check_receipt = candidate_checks.create(self.run_dir, context, {'checks': check_results}, True)

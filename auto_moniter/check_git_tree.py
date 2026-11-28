@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import re
 import shlex
@@ -9,6 +10,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+
+if __package__:
+    from . import test_setup_revision
+else:
+    import test_setup_revision
 
 _OID = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 
@@ -68,7 +74,7 @@ def describe_check(project, command):
     return {}
 
 
-def supplemental_command(project, check, request, commands):
+def supplemental_command(project, check, request, commands, *, setup_revision=None):
     """Bind an existing check, preserving runner arguments and approved test contents."""
     tree, base = request['git_tree'], request['base']
     git = ['git', '-C', str(project)]
@@ -81,13 +87,18 @@ def supplemental_command(project, check, request, commands):
     args = registered_runner(project, check)
     if args is None or base:
         raise ValueError('候选树补验仅支持已批准的本地测试和带业务基线的差异检查。')
-    settings = {key: value for key, value in vars(args).items() if key not in {'git_tree', 'test_blob'}}
+    names = list(dict.fromkeys([*args.expect_rust_test, *(setup_revision or {}).get('rust_tests', [])]))
+    if names and args.runner != 'unittest':
+        raise ValueError('嵌套 Rust 用例须由 unittest 采集。')
+    args.expect_rust_test = names
+    settings = {key: value for key, value in vars(args).items() if key not in {'git_tree', 'test_blob', 'setup_revision'}}
     blob = tree_entries(project, tree, args.path)[args.path][1]
     for command in commands:
         existing = registered_runner(project, command)
         if (existing and tree in existing.git_tree and existing.test_blob in (None, blob)
+                and existing.setup_revision == setup_revision
                 and settings == {key: value for key, value in vars(existing).items()
-                                 if key not in {'git_tree', 'test_blob'}}):
+                                 if key not in {'git_tree', 'test_blob', 'setup_revision'}}):
             return None
     path = project / args.path
     if path.resolve() != path:
@@ -104,6 +115,8 @@ def supplemental_command(project, check, request, commands):
             argv.extend(['--' + key, value])
     for name in args.expect_rust_test:
         argv.extend(['--expect-rust-test', name])
+    if setup_revision is not None:
+        argv.extend(['--setup-revision', json.dumps(setup_revision, ensure_ascii=True, sort_keys=True)])
     return shlex.join([*argv, '--git-tree', tree, '--test-blob', blob])
 
 
@@ -172,6 +185,10 @@ def bindings(args):
         raise ValueError('每项检查可绑定 1 到 8 棵不同的候选树。')
     if args.expect_rust_test and args.runner != 'unittest':
         raise ValueError('具名 Rust 用例须由 unittest 入口采集。')
+    if args.setup_revision is not None and (len(args.git_tree) != 1 or not args.test_blob
+            or not test_setup_revision.valid(args.setup_revision)
+            or args.test_blob != args.setup_revision['test_blob']):
+        raise ValueError('测试准备修订须绑定一棵候选树及其原测试对象。')
     result = []
     for tree in args.git_tree:
         entries = tree_entries(args.project, tree, args.path)
@@ -231,6 +248,13 @@ def run_bound(args, runner):
                 root = Path(location).resolve()
                 materialize(args.project, tree, root, entries)
                 print(f'git_tree={tree} test_blob={blob} project_root={root}', flush=True)
+                if args.setup_revision is not None:
+                    path = root / args.path
+                    source = test_setup_revision.revised_source(path.read_bytes(), args.setup_revision, blob)
+                    revised_blob = test_setup_revision.object_id(source, blob)
+                    path.write_bytes(source)
+                    entries[args.path] = (entries[args.path][0], revised_blob)
+                    print(f'test_setup_blob={revised_blob}', flush=True)
                 result = subprocess.run([sys.executable, str(runner), '--project', str(root), *flags],
                                         cwd=root)
                 verify(root, entries)

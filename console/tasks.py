@@ -891,7 +891,8 @@ class TaskStore:
             raise ValueError('执行回执须为工作区内经过验收的普通文件。')
         return requirement_context.read(path, limit=128 * 1024)
 
-    def _collect_field_results(self, meta, run, state, value, *, executor_waiting=None, filename=None):
+    def _collect_field_results(self, meta, run, state, value, *, executor_waiting=None, filename=None,
+                               existing_only=False):
         filename = filename or field_handoff.FILE
         errors = {}
         failed_cases = {}
@@ -903,6 +904,8 @@ class TaskStore:
                 continue
             external = item['kind'] in {'deployment', 'observation'} and item.get('case_id') != field_handoff.CHECK_ARCHIVE_CASE
             ident = item.get('executor_task')
+            if existing_only and not (ident or item['kind'] == 'browser' and item.get('case_id')):
+                continue
             dependency = field_handoff.dependency_error(value, item)
             if dependency:
                 errors[item['id']] = dependency
@@ -948,13 +951,17 @@ class TaskStore:
                           or item.get('expected_version', config['expected_version']) != config['expected_version']):
                         result = {'status':'failed', 'reason':'浏览器用例的现场入口或版本与原待办不一致。'}
                     else:
-                        if config.get('task_id') and (not item.get('case_id') or not item.get('browser_proof')):
+                        if (not existing_only and config.get('task_id')
+                                and (not item.get('case_id') or not item.get('browser_proof'))):
                             value = field_handoff.bind_browser_case(run, state, {
                                 'id': item['id'], 'case_id': case_id, 'binding': binding,
                                 'revision': value['revision'],
                             }, config, filename=filename)
                             item = next(row for row in value['items'] if row['id'] == item['id'])
-                        result = browser_execution.poll(run, value, item, config)
+                        if existing_only:
+                            result = browser_execution.poll(run, value, item, config, existing_only=True)
+                        else:
+                            result = browser_execution.poll(run, value, item, config)
                     if result['status'] == 'ready':
                         submission = result['submission']
                         if config.get('handoff_ids'):
@@ -1141,6 +1148,7 @@ class TaskStore:
                             lifecycle.launch(self, meta, run, {'condition': 'dispatch_inputs'}, state, 'resume')
                         continue
                     if not value:
+                        lifecycle.wake_for_deferred_handoff(self, meta, run, state, view, {}, deferred_ready)
                         continue
                     checkpoint = value['binding']
                     worker = next((row for row in reversed(state.get('rounds') or [])
@@ -1152,6 +1160,7 @@ class TaskStore:
                             or not candidate_checks.valid(receipt, run, receipt.get('context'))):
                         if field_handoff.ready(value):
                             field_handoff.update_resume(run, value, 'stale', error='候选、验收命令或用户要求已变化。')
+                        lifecycle.wake_for_deferred_handoff(self, meta, run, state, view, {}, deferred_ready)
                         continue
                     if 'resume' in view['actions'] and self._can_resume_field_archive(state, value, receipt):
                         self._resume_field_archive(meta, run, value, retry_failed=retry_failed)

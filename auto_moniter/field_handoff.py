@@ -108,7 +108,7 @@ def saved_handoffs(run):
             yield name, value
 
 
-def deferred_state(run, state, value, *, tree=None):
+def deferred_state(run, state, value, *, tree=None, historical=False):
     task_id = value.get('binding', {}).get('task_id')
     ledger = state.get('function_tasks') or {}
     if not task_id or task_id == (ledger.get('current') or {}).get('id'):
@@ -130,7 +130,7 @@ def deferred_state(run, state, value, *, tree=None):
                    if row['role'] == 'worker' and row['index'] == identity['round']), {})
     receipt = worker.get('watcher_result', {}).get('candidate_checks', {})
     context = receipt.get('context') or {}
-    if context.get('business_update_count', 0) != state.get('business_update_count', 0):
+    if not historical and context.get('business_update_count', 0) != state.get('business_update_count', 0):
         return None
     return saved if candidate_checks.valid(receipt, run, context) else None
 
@@ -320,6 +320,7 @@ def reopen(run, value, blockers, requests=()):
         row = dict(safe(request), id=str(index))
         if not row.get('depends_on'):
             prior = [item for item in value['items'] if item.get('receipt') and not item.get('depends_on')
+                     and not (item['kind'] == 'browser' and item.get('allow_manual'))
                      and all((item.get(key) or '') == (row.get(key) or '')
                              for key in REQUEST_FIELDS | {'case_id', 'capability'})]
             if len(prior) == 1:

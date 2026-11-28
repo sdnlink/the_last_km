@@ -102,7 +102,7 @@ def recover(store, meta, run):
     if view['status'] in {'running', 'starting', 'paused'}:
         return True
     if condition in {'delivery_readiness', 'dispatch_inputs'} and not _input_ready(run, state, condition):
-        return bool(wait.get('checkpoint'))
+        return condition == 'delivery_readiness' and bool(wait.get('checkpoint'))
     if (view['status'] == 'interrupted' and state.get('status') == 'running'
             and wait.get('phase') in {'prepared', 'starting', 'adopted', 'orphaned'}):
         # A launched supervisor can die after writing its running checkpoint.
@@ -145,13 +145,19 @@ def collect_deferred_handoffs(store, meta, run):
             if tree is None:
                 tree = workspace_fingerprint(Path(state['cwd']), ignore_dir=run)
             checkpoint = field_handoff.deferred_state(run, state, value, tree=tree)
+            historical = checkpoint is None
+            if historical:
+                checkpoint = field_handoff.deferred_state(run, state, value, historical=True)
             if not checkpoint:
                 continue
             if not field_handoff.ready(value):
-                waiting = field_executors.bind(store, meta, run, value, filename=filename)
-                value = store._collect_field_results(meta, run, checkpoint, value, executor_waiting=waiting, filename=filename)
-                store._dispatch_handoff_tasks(meta, value, filename=filename)
-            if field_handoff.ready(value):
+                if historical:
+                    store._collect_field_results(meta, run, checkpoint, value, filename=filename, existing_only=True)
+                else:
+                    waiting = field_executors.bind(store, meta, run, value, filename=filename)
+                    value = store._collect_field_results(meta, run, checkpoint, value, executor_waiting=waiting, filename=filename)
+                    store._dispatch_handoff_tasks(meta, value, filename=filename)
+            if not historical and field_handoff.ready(value):
                 ready.add(value['binding']['task_id'])
         return ready
 
@@ -164,8 +170,13 @@ def ready_deferred_handoff(run, state):
             or (state.get('requirements_review') or {}).get('limited_dispatch')):
         return False
     tree = workspace_fingerprint(Path(state['cwd']), ignore_dir=run)
-    return any(field_handoff.ready(value) and field_handoff.deferred_state(run, state, value, tree=tree)
-               for _, value in field_handoff.saved_handoffs(run))
+    accepted = {row['task']['id'] for row in state['function_tasks'].get('accepted', [])}
+    for _, value in field_handoff.saved_handoffs(run):
+        if field_handoff.ready(value):
+            checkpoint = field_handoff.deferred_state(run, state, value, tree=tree)
+            if checkpoint and set(checkpoint['function_tasks']['current']['depends_on']) <= accepted:
+                return True
+    return False
 
 
 def wake_for_deferred_handoff(store, meta, run, state, view, value, ready):

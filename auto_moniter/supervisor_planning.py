@@ -615,6 +615,13 @@ class RequirementPlanning:
         }
         return reviewed_plan, modules, binding
 
+    @staticmethod
+    def _coverage_plan_key(plan, modules):
+        return requirement_coverage.digest({
+            'plan': {key: value for key, value in plan.items() if key != 'summary'},
+            'modules': modules,
+        })
+
     def _saved_coverage_revision(self, continuation, *, checks, tree, sources, next_function):
         if (not continuation or continuation['source'] != 'saved requirement analysis'
                 or continuation['workspace_changed'] or continuation['checks_changed']
@@ -629,7 +636,7 @@ class RequirementPlanning:
             brief['cycle'] = len(self.requirement_cycles) + 1
             staged = self._stage_requirement_plan(plan['next_task'], plan['modules'], plan.get('function_plan'),
                 brief, tree=tree, next_function=next_function) if self.config.function_dispatch else None
-            _, _, binding = self._coverage_inputs(plan, staged, sources, checks, tree)
+            reviewed_plan, modules, binding = self._coverage_inputs(plan, staged, sources, checks, tree)
         except (KeyError, ValueError):
             return None
         for path in sorted(self.run_dir.glob('*-requirement-coverage.json'), reverse=True):
@@ -643,7 +650,7 @@ class RequirementPlanning:
                     {key: record[key] for key in schema['required']}), sources)
             except (OSError, KeyError, ValueError, RecursionError):
                 continue
-            return (review, path.name) if review['status'] == 'revise' else None
+            return (review, path.name, self._coverage_plan_key(reviewed_plan, modules)) if review['status'] == 'revise' else None
         return None
 
     def _saved_ready_dispatch(self, continuation, previous, *, index, tree, next_function):
@@ -695,7 +702,8 @@ class RequirementPlanning:
         coverage_required = (saved_revision is not None or saved_dispatch is not None
                              or bool((previous_brief or {}).get('limited_dispatch')))
         if saved_revision:
-            review, receipt = saved_revision
+            review, receipt, plan_key = saved_revision
+            rejected_plans[plan_key] = receipt, '\n'.join(item['gap'] for item in review['findings'])[:1800]
             prompt = self._coverage_revision_prompt(base_prompt, review)
             self._event('requirement_coverage_revision_resumed', receipt=receipt, round=index)
         for attempt in range(5):
@@ -842,17 +850,20 @@ class RequirementPlanning:
                         snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
                         if snapshot_fingerprint(self.config.cwd, snapshot) != tree:
                             return turn
-                        requirement_context.save(self.run_dir, self.config.cwd, self.config.requirement,
-                            len(self.requirement_cycles) + 1, plan, snapshot, checks, directions)
                         reviewed_plan, modules, _ = self._coverage_inputs(plan, staged_plan, sources, checks, tree)
-                        plan_key = requirement_coverage.digest({
-                            'plan': {key: value for key, value in reviewed_plan.items() if key != 'summary'},
-                            'modules': modules,
-                        })
+                        plan_key = self._coverage_plan_key(reviewed_plan, modules)
                         if plan_key in rejected_plans:
                             receipt, missing = rejected_plans[plan_key]
                             self._event('requirement_plan_unchanged', round=index, receipt=receipt)
-                            raise ValueError(f'方案修订仍是同一套待执行内容。复核缺项见 {receipt}。{missing}')
+                            reason = f'方案修订仍是同一套待执行内容。复核缺项见 {receipt}。{missing}'
+                            if saved_revision and attempt == 0 and journal.admit(recovery_context, reason):
+                                self._close_requirement_reviewer()
+                                self._archive_requirement_review(index)
+                                prompt = self._coverage_revision_prompt(base_prompt, saved_revision[0]) + '\n' + reason
+                                continue
+                            raise ValueError(reason)
+                        requirement_context.save(self.run_dir, self.config.cwd, self.config.requirement,
+                            len(self.requirement_cycles) + 1, plan, snapshot, checks, directions)
                         outcome = self._requirement_coverage_review(
                             sources, reviewed_plan, modules=modules, checks=checks,
                             directions=directions, tree=tree)

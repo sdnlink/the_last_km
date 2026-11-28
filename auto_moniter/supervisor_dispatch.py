@@ -643,13 +643,12 @@ class FunctionDispatch:
         if not review or review.watcher_result.get('status') != 'blocked' or not review.verdict.blockers:
             return None, None
         receipt = worker.watcher_result.get('candidate_checks', {})
-        context = self._candidate_check_context(worker)
-        if isinstance(self.git_history, ApprovedHistory) and self.git_history.candidate.get('round') != worker.index:
-            # Read-only dispatches share the same working tree. Recreate the
-            # publication preview only when the original review can continue.
-            expected = receipt.get('context', {})
-            if self.git_history.business_commits and 'publication_tree' in expected:
-                context['publication_tree'] = expected['publication_tree']
+        saved_tree = None
+        if isinstance(self.git_history, ApprovedHistory) and self.git_history.business_commits:
+            saved_tree = receipt.get('context', {}).get('publication_tree')
+        # Rebuild the original check commands before deciding whether to recreate
+        # the preview. The recreated preview is validated again before review.
+        context = self._candidate_check_context(worker, saved_publication_tree=saved_tree)
         if not candidate_checks.valid(receipt, self.run_dir, context):
             return None, None
         binding = {'task_id': task['id'], 'task_sha256': candidate_checks.digest(task),
@@ -1278,7 +1277,8 @@ class FunctionDispatch:
     def _handoff_check_plan_digest(self, task):
         return candidate_checks.digest([self._assignment_check_commands(task), self.config.check_source_aliases])
 
-    def _review_function(self, worker, review, index, tree):
+    def _review_function(self, worker_record, review_record, tree):
+        worker, review = worker_record.verdict, review_record.verdict
         task = self.function_tasks.current
         errors = self._function_reviewer_report_errors(review)
         if errors:
@@ -1296,7 +1296,9 @@ class FunctionDispatch:
         if workspace_fingerprint(self.config.cwd, ignore_dir=self.run_dir) != tree:
             raise ValueError('Function review is stale because the workspace changed')
         staged = function_tasks.FunctionTasks(self.function_tasks.export())
-        staged.accept(worker, review, index, tree)
+        staged.accept(worker, review, review_record.index, tree)
+        if self._function_gate:
+            self._stage_function_verification(staged.accepted[-1], task, worker_record, review_record)
         if self.requirements_review.get('limited_dispatch'):
             return staged
         if self._deferred_replan_applies():
@@ -1341,29 +1343,32 @@ class FunctionDispatch:
                 staged.assign(candidate, self.modules.items)
         return staged
 
+    def _stage_function_verification(self, accepted, task, worker, reviewer):
+        receipt = worker.watcher_result.get('candidate_checks', {})
+        replacements = candidate_checks.publication_commands(receipt.get('context', {}))
+        logs = receipt.get('passed_commands', {})
+        selected = self._function_check_catalog(task)
+        local = self._local_test_commands(task.get('test_files', []))
+        try:
+            accepted['verification'] = {
+                key: logs[replacements.get(selected[key], selected[key])] for key in task['check_ids']}
+            local_logs = {command: logs[replacements.get(command, command)] for command in local}
+            if task.get('kind') == 'integration':
+                accepted['target_hashes'] = self._function_target_hashes
+            else:
+                accepted['symbol_hash'] = self._function_target_hashes[task['file']]
+        except KeyError as exc:
+            raise ValueError('派单缺少对应的检查回执或源码摘要，尚不能发布。') from exc
+        if task.get('edit_files'):
+            snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
+            accepted['file_hashes'] = {name: snapshot.get(str(self.config.cwd / name))
+                                       for name in task['edit_files']}
+        if local_logs:
+            reviewer.watcher_result['local_tests'] = local_logs
+
     def _advance_function(self, staged, review_record):
         task = self.function_tasks.current
         if self._function_gate:
-            selected = self._function_check_catalog(task)
-            if task.get('publication_check_ids'):
-                worker = next(row for row in reversed(self._records)
-                              if row.role == 'worker' and row.index == review_record.index)
-                context = worker.watcher_result['candidate_checks']['context']
-                selected.update((item['check_id'], item['command']) for item in context['publication_checks'])
-            staged.accepted[-1]['verification'] = {key: self._passed_function_checks[selected[key]]
-                                                   for key in task['check_ids']}
-            if task.get('kind') == 'integration':
-                staged.accepted[-1]['target_hashes'] = self._function_target_hashes
-            else:
-                staged.accepted[-1]['symbol_hash'] = self._function_target_hashes[task['file']]
-            if task.get('edit_files'):
-                snapshot = file_snapshot(self.config.cwd, ignore_dir=self.run_dir)
-                staged.accepted[-1]['file_hashes'] = {name: snapshot.get(str(self.config.cwd / name))
-                                                     for name in task['edit_files']}
-            local = self._local_test_commands(task.get('test_files', []))
-            if local:
-                review_record.watcher_result['local_tests'] = {
-                    value: self._passed_function_checks[value] for value in local}
             self._local_test_paths = list(dict.fromkeys([*self._local_test_paths, *task.get('test_files', [])]))
         self.function_tasks = staged
         self._function_issue_ids = []

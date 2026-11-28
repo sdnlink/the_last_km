@@ -163,6 +163,8 @@ def prompt(context):
         'use an empty base for tests and select a listed business base for a diff check. '
         'Do not request a check already run on that tree. Watcher runs the checks and Reviewer resumes '
         'the same assignment. Use git_tree_checks=[] for all other actions. '
+        '若已确认受保护测试的准备步骤挡住了需要补证的行为，可用 retry_reviewer 交代具体测试文件、'
+        '失败日志及准备步骤，引导审查器申请 setup_revision。保留原断言和已批准的必跑检查。'
         'If a previously applied action is listed, choose a distinct action and explain what will change. '
         'For field_archive incidents, choose archive_checks only when the indicated observation can be answered '
         'by archiving the listed passing Watcher checks and their candidate metadata. The archive can document '

@@ -245,13 +245,19 @@ class AgentPrompts:
                    if self._function_gate else []),
                 *([guidance('review-evidence')] if receipt and task and self.config.task_type == 'code' else []),
                 *(['If an approved existing test needs an independent execution record, request it in supplemental_checks '
-                   'with path, criterion_id, audit_id and git_tree. Use the exact recorded publication_tree in git_tree '
+                   'with path, criterion_id, audit_id, git_tree and setup_revision. Use the exact recorded publication_tree in git_tree '
                    'when the evidence must come from the publication candidate, or use an empty string for workspace checks. '
                    'Use task_status=changes_required, next_task=null and describe '
                    'the missing evidence in gaps or blockers. Watcher derives the execution command. Do not request '
-                   'modified tests, arbitrary commands or a check already present in the current receipt. '
+                   'arbitrary commands or a check already present in the current receipt. '
                    'A resolved audit issue in this module may be cited to rerun its approved test on the current candidate. '
-                   'After the new receipt arrives, assess its result and continue. Use supplemental_checks=[] otherwise.']
+                   'After the new receipt arrives, assess its result and continue. Use supplemental_checks=[] otherwise.',
+                   '常规补验将 setup_revision 填 null。若受保护的原测试在验证目标行为之前就因准备步骤失败，'
+                   '可以在同一发布树上申请独立复核。填写原 Git 测试对象 test_blob，以及唯一的完整准备代码段 '
+                   'original 和 replacement。保留原入口、操作、预期和所有断言，并在 gaps 引用失败日志。'
+                   '如原 unittest 会调用 Cargo，请在 rust_tests 填写需记录结果的原 Rust 用例名，其余情况填空数组。'
+                   'Watcher 仅在独立核对后修改隔离副本中的测试准备，记录原对象及修订对象，并交回原派单续审。'
+                   '原有必跑检查仍须通过。']
                   if task and self._verification_only() else []),
                 *(['需要在指定 Git 候选上补齐正式回执时，使用 git_tree_checks。每项填写 check_id、git_tree 和 base。'
                    '本地测试的 base 填空字符串，差异检查从 bases 选择业务基线。'

@@ -155,6 +155,63 @@ class RefereeTests(unittest.TestCase):
         self.assertEqual(candidates[1]['checks'][1]['reused_from'], '001-check-02.log')
         self.assertIn('return 99', (self.root / 'app.py').read_text())
 
+    def test_publication_receipts_cover_aliases_and_declared_local_tests(self):
+        _, initial, checks, _ = self.git_tree_scenario()
+        _, final = json.loads(initial['text'])['function_plan']
+        source = (self.root / 'test_behavior.py').read_text()
+        command = local_test_command(self.root, 'test_fresh.py')
+        checks = [checks[0], command, command]
+        first = {**task('VERIFY', 'app.py'), 'test_files': ['test_fresh.py'],
+                 'check_ids': ['check:1', 'check:2', 'check:3', 'auto:1'],
+                 'publication_check_ids': ['check:1', 'auto:1']}
+        worker = FunctionWorker('worker', [{**result('VERIFY', 'done'),
+            'writes': {'app.py': 'def parse_input(): return 0\n', 'test_fresh.py': source}}])
+        reviewer = ScriptedProvider('reviewer', [planning(first, [first, final]), result('VERIFY', 'accepted')])
+        options = dict(checks=checks, git_history='required', max_rounds=1)
+        monitor = self.monitor(worker, reviewer, **options)
+        with patch.object(monitor, '_advance_function', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                monitor.run()
+        published = monitor.git_history.head
+        worker, reviewer = FunctionWorker('worker', []), ScriptedProvider('reviewer', [])
+        monitor = self.monitor(worker, reviewer, resume=True, **options)
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(monitor.git_history.head, published)
+        self.assertFalse(worker.calls or reviewer.calls)
+        accepted = monitor.function_tasks.accepted[0]
+        self.assertEqual(accepted['verification']['auto:1'], '001-check-02.log')
+        self.assertEqual(accepted['verification']['check:2'], accepted['verification']['auto:1'])
+        self.assertEqual(accepted['verification']['check:3'], accepted['verification']['auto:1'])
+        review = next(row for row in report.records if row.role == 'reviewer')
+        self.assertEqual(review.watcher_result['local_tests'], {command: '001-check-02.log'})
+        committed = subprocess.check_output(['git', '-C', str(self.root), 'show', 'HEAD:test_fresh.py'], text=True)
+        self.assertEqual(committed, source)
+
+    def test_final_publication_receipt_survives_cleanup_and_a_missing_log(self):
+        from auto_moniter import recovery_wait
+
+        _, initial, checks, _ = self.git_tree_scenario()
+        first, final = json.loads(initial['text'])['function_plan']
+        final['publication_check_ids'] = ['check:2']
+        worker = FunctionWorker('worker', [result('VERIFY', 'done'), result('FINAL', 'done', status='done')])
+        reviewer = ScriptedProvider('reviewer', [planning(first, [first, final]),
+            result('VERIFY', 'accepted'), result('FINAL', 'accepted', status='done')])
+        options = dict(checks=checks, git_history='required', max_rounds=2)
+        monitor = self.monitor(worker, reviewer, **options)
+        with patch.object(monitor, '_close_delivered_sessions', return_value=['cleanup interrupted']):
+            report = monitor.run()
+        self.assertEqual(report.status, 'recovery_failed', report.summary)
+        state = json.loads((self.run_dir / 'state.json').read_text())
+        self.assertTrue(recovery_wait.controller_cleanup(self.run_dir, state))
+        marker = json.loads((self.run_dir / 'delivery-cleanup.json').read_text())
+        (self.run_dir / marker['receipt']['passed_commands'][marker['receipt']['context']['commands'][1]]).unlink()
+        monitor = self.monitor(FunctionWorker('worker', []), ScriptedProvider('reviewer', []),
+                               resume=True, **options)
+        report = monitor.run()
+        self.assertEqual(report.status, 'done', report.summary)
+        self.assertIn('git_tree=', (self.run_dir / '002-check-02-attempt-001.log').read_text())
+
     def test_protected_supplemental_test_can_run_on_the_current_publication_tree(self):
         worker, initial, checks, _ = self.git_tree_scenario()
         head_tree = subprocess.check_output(
@@ -176,6 +233,42 @@ class RefereeTests(unittest.TestCase):
         self.assertIn('observed=0', (self.run_dir / '001-check-02.log').read_text())
         self.assertIn('observed=42', (self.run_dir / '001-check-04.log').read_text())
         self.assertIn('git_tree=' + head_tree, (self.run_dir / '001-check-04.log').read_text())
+
+    def test_protected_setup_revision_runs_only_in_an_independently_reviewed_copy(self):
+        worker, initial, checks, _ = self.git_tree_scenario()
+        path = self.root / 'test_setup.py'
+        original = '        actual = int("old")'
+        replacement = '        data = "42"\n        actual = int(data)'
+        source = ('import unittest\nclass Behavior(unittest.TestCase):\n'
+                  '    def test_value(self):\n' + original + '\n        self.assertEqual(actual, 42)\n')
+        path.write_text(source)
+        git = lambda *args: subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
+        git('add', path.name)
+        git('commit', '-qm', 'protected test')
+        tree, blob = git('rev-parse', 'HEAD^{tree}'), git('rev-parse', 'HEAD:' + path.name)
+        request = result('VERIFY', 'changes_required', gaps=['准备失败，仍需验证原断言'])
+        request['verdict']['supplemental_checks'] = [{
+            'criterion_id': 'main:1', 'audit_id': 'AUD-1', 'path': path.name, 'git_tree': tree,
+            'setup_revision': {'test_blob': blob, 'original': original, 'replacement': replacement},
+        }]
+        approval = {'verdict': {}, 'text': json.dumps({'approved': True, 'summary': '原行为和断言保留'})}
+        reviewer = ScriptedProvider('reviewer', [initial, request, approval, result('VERIFY', 'accepted')])
+        monitor = self.monitor(worker, reviewer, checks=checks, git_history='required', max_rounds=1,
+                               quality_policy={'protect_tests': True, 'verified_progress': False})
+        monitor.audit.record(['缺少原行为的专项回执'], 1, ['main'])
+        report = monitor.run()
+        self.assertEqual(report.status, 'max_rounds', report.summary)
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual(reviewer.calls[2]['session_id'], '')
+        self.assertTrue(reviewer.calls[2]['read_only'])
+        receipt = next(row.watcher_result['candidate_checks'] for row in report.records if row.role == 'worker')
+        proof = receipt['context']['supplemental_checks'][0]['setup_approval']
+        self.assertEqual(proof['original_blob'], blob)
+        log = (self.run_dir / receipt['checks'][-1]['log']).read_text()
+        self.assertIn('test_setup_blob=' + proof['revised_blob'], log)
+        self.assertIn('source_verified=true', log)
+        self.assertEqual(path.read_text(), source)
+        self.assertEqual(git('rev-parse', 'HEAD:' + path.name), blob)
 
     def test_resume_applies_a_saved_local_check_request_without_reasking_reviewer(self):
         worker, initial, checks, requests = self.git_tree_scenario()

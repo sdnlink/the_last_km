@@ -115,13 +115,14 @@ class ReviewFirstTests(unittest.TestCase):
    self.assertIn(finding['gap'],call['prompt'])
   worker=ScriptedProvider('worker',[{'verdict':_verdict('done',evidence=['app.py']),'touch':'app.py'}])
   revised=self.brief({**BRIEF,'acceptance_criteria':[*BRIEF['acceptance_criteria'],finding['quote']]})
-  reviewer=ScriptedProvider('reviewer',[revised,approve_requirement_coverage(),
+  reviewer=ScriptedProvider('reviewer',[self.brief({**BRIEF,'summary':'只改写说明'}),revised,approve_requirement_coverage(),
    {'verdict':_verdict('done',evidence=['app.py'])}])
   result=self.run_loop(worker,reviewer,requirement=requirement,referee=True,resume=True)
   self.assertEqual(result.status,'done',result.summary)
   self.assertIn(finding['gap'],reviewer.calls[0]['prompt'])
   self.assertIn('requirement-review-context.json',reviewer.calls[0]['prompt'])
-  self.assertIn('独立复核需求覆盖范围',reviewer.calls[1]['prompt'])
+  self.assertIn('方案修订仍是同一套待执行内容',reviewer.calls[1]['prompt'])
+  self.assertIn('独立复核需求覆盖范围',reviewer.calls[2]['prompt'])
   self.assertEqual(len(list((self.root/'run').glob('*-requirement-coverage.json'))),2)
 
  def test_authentication_failure_is_not_retried_as_transport(self):

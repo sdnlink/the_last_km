@@ -13,6 +13,35 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
+def publication_commands(context):
+    return {row['original']: row['command'] for row in context.get('publication_checks', [])}
+
+
+def covers_configured_checks(context, checks):
+    commands = context.get('commands')
+    bindings = context.get('publication_checks', [])
+    if not isinstance(commands, list) or not isinstance(bindings, list):
+        return False
+    if bindings:
+        tree = context.get('publication_tree')
+        ids = (context.get('task') or {}).get('publication_check_ids', [])
+        if (not isinstance(tree, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', tree)
+                or context.get('configured_checks') != list(checks)
+                or any(not isinstance(row, dict) or row.get('git_tree') != tree
+                       or not isinstance(row.get('check_id'), str)
+                       or not isinstance(row.get('original'), str)
+                       or not isinstance(row.get('command'), str) or row['command'] not in commands
+                       for row in bindings)
+                or [row.get('check_id') for row in bindings] != ids):
+            return False
+        configured = {f'check:{index}': command for index, command in enumerate(checks, 1)}
+        if any(row['check_id'].startswith('check:') and configured.get(row['check_id']) != row['original']
+               for row in bindings):
+            return False
+    replacements = publication_commands(context)
+    return all(replacements.get(command, command) in commands for command in checks)
+
+
 def observed_assertion_failure(receipt, run):
     """Use actual failed-test output, never infer a product bug from exit 1 alone."""
     return any(output for _, output in _failed_assertion_outputs(receipt, run))

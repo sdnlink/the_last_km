@@ -7,12 +7,14 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from auto_moniter.audit import resolutions
+from auto_moniter import test_setup_revision
 
 SUPPLEMENTAL_CHECKS_SCHEMA = {
     'type': 'array', 'maxItems': 3,
     'items': {'type': 'object', 'additionalProperties': False,
-              'properties': {key: {'type': 'string'} for key in ('path', 'criterion_id', 'audit_id', 'git_tree')},
-              'required': ['path', 'criterion_id', 'audit_id', 'git_tree']},
+              'properties': {**{key: {'type': 'string'} for key in ('path', 'criterion_id', 'audit_id', 'git_tree')},
+                             'setup_revision': {'anyOf': [{'type': 'null'}, test_setup_revision.SCHEMA]}},
+              'required': ['path', 'criterion_id', 'audit_id', 'git_tree', 'setup_revision']},
 }
 REPAIR_STEP_FIELDS = ('criterion_id', 'path', 'observed', 'expected', 'action', 'check_id', 'log')
 REPAIR_STEPS_SCHEMA = {
@@ -239,10 +241,13 @@ def _normalize(data: dict[str, Any], raw: str, *, structured: bool, function_gat
     )
     requests = verdict.supplemental_checks
     if (not isinstance(requests, list) or len(requests) > 3
-            or any(not isinstance(item, dict) or set(item) - {'git_tree'} != {'path', 'criterion_id', 'audit_id'}
+            or any(not isinstance(item, dict)
+                   or set(item) - {'git_tree', 'setup_revision'} != {'path', 'criterion_id', 'audit_id'}
                    or any(not isinstance(value, str) or (key != 'git_tree' and not value.strip()) or len(value) > 512
-                          or '\0' in value for key, value in item.items())
+                          or '\0' in value for key, value in item.items() if key != 'setup_revision')
                    or item.get('git_tree') and not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', item['git_tree'])
+                   or item.get('setup_revision') is not None and
+                   (not item.get('git_tree') or not test_setup_revision.valid(item['setup_revision']))
                    for item in requests)):
         invalid.append('supplemental_checks')
         verdict.supplemental_checks = []
